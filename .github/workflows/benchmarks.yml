@@ -1,0 +1,82 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  benchstat:
+    name: Compare benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: go.sum
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260819171926-ebcb4798430d
+      - name: Resolve comparison commit
+        id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base_sha="$PR_BASE_SHA"
+          if [ -z "$base_sha" ]; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
+      - name: Run base and head benchmarks
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/gomessenger-base" "$BASE_SHA"
+          cd "$GITHUB_WORKSPACE"
+          GOWORK=off go test -run '^$' -bench . -benchmem -count=10 ./... > "$RUNNER_TEMP/head.txt"
+          if [ ! -f "$RUNNER_TEMP/gomessenger-base/go.mod" ]; then
+            : > "$RUNNER_TEMP/base.txt"
+            printf 'No comparable Go module exists at base commit %s; head results are uploaded without a comparison.\n' \
+              "$BASE_SHA" > "$RUNNER_TEMP/benchstat.txt"
+          else
+            cd "$RUNNER_TEMP/gomessenger-base"
+            GOWORK=off go test -run '^$' -bench . -benchmem -count=10 ./... > "$RUNNER_TEMP/base.txt"
+            if grep -q '^Benchmark' "$RUNNER_TEMP/base.txt" && grep -q '^Benchmark' "$RUNNER_TEMP/head.txt"; then
+              benchstat "$RUNNER_TEMP/base.txt" "$RUNNER_TEMP/head.txt" > "$RUNNER_TEMP/benchstat.txt"
+            else
+              printf 'No comparable benchmark samples exist at base commit %s; raw results are uploaded.\n' \
+                "$BASE_SHA" > "$RUNNER_TEMP/benchstat.txt"
+            fi
+          fi
+      - name: Add comparison to job summary
+        run: |
+          echo '## Benchmark comparison' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '1,240p' "$RUNNER_TEMP/benchstat.txt" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw benchmark data
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/base.txt
+            ${{ runner.temp }}/head.txt
+            ${{ runner.temp }}/benchstat.txt
+          retention-days: 30

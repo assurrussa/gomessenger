@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  check:
+    name: Full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            go.sum
+            adapters/*/go.sum
+            observability/go.sum
+            tools/gomessengerctl/go.sum
+            testdata/*/go.sum
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+      - name: Run read-only release gate
+        run: make check
+      - name: Verify gate did not mutate tracked files
+        run: git diff --exit-code -- .
+
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: gomessenger
+          POSTGRES_PASSWORD: gomessenger
+          POSTGRES_DB: gomessenger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gomessenger -d gomessenger"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            go.sum
+            adapters/inbox/go.sum
+      - name: Run PostgreSQL integration gate
+        env:
+          GOMESSENGER_POSTGRES_DSN: postgres://gomessenger:gomessenger@127.0.0.1:5432/gomessenger?sslmode=disable
+        run: make test-postgres

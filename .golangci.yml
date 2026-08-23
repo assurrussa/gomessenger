@@ -1,0 +1,238 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - decorder
+    - depguard
+    - dogsled
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - forcetypeassert
+    - ginkgolinter
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - godox
+    - goheader
+    - gomoddirectives
+    - gomodguard_v2
+    - goprintffuncname
+    - gosec
+    - govet
+    - grouper
+    - importas
+    - inamedparam
+    - ineffassign
+    - lll
+    - loggercheck
+    - makezero
+    - misspell
+    - musttag
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - reassign
+    - revive
+    - rowserrcheck
+    - sloglint
+    - sqlclosecheck
+    - staticcheck
+    - tagliatelle
+    - testableexamples
+    - testifylint
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+  settings:
+
+    depguard:
+      rules:
+        main:
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/assurrussa/outbox
+            - github.com/assurrussa/gobus
+            - github.com/assurrussa/gomessenger
+            - github.com/nats-io/nats.go
+            - github.com/nats-io/nats-server/v2
+            - github.com/cloudevents/sdk-go/v2
+            - github.com/jackc/pgx/v5
+            - modernc.org/sqlite
+            - github.com/prometheus/client_golang
+            - go.opentelemetry.io/otel
+    gomoddirectives:
+      replace-local: true
+      replace-allow-list:
+        - github.com/assurrussa/gomessenger
+        - github.com/assurrussa/gomessenger/adapters/inbox
+        - github.com/assurrussa/gomessenger/adapters/nats
+        - github.com/assurrussa/gomessenger/adapters/outbox
+        - github.com/assurrussa/gomessenger/observability
+        - github.com/assurrussa/outbox
+        - github.com/assurrussa/outbox/backends/sqlite
+
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^(fmt\.Print(|f|ln)|print|println)$
+        - pattern: sharederrors\.Wrap
+        - pattern: sharederrors\.Cause
+    ginkgolinter:
+      suppress-len-assertion: false
+      suppress-nil-assertion: false
+      suppress-err-assertion: false
+      suppress-compare-assertion: false
+      suppress-async-assertion: false
+      allow-havelen-zero: false
+    godox:
+      keywords:
+        - FIXME
+        - TODO
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    lll:
+      line-length: 130
+      tab-width: 1
+    loggercheck:
+      klog: false
+      logr: false
+      zap: true
+      require-string-key: true
+      no-printf-like: true
+      rules:
+        - (*go.uber.org/zap.SugaredLogger).With
+    nolintlint:
+      require-explanation: true
+      allow-no-explanation:
+        - lll
+    revive:
+      severity: error
+      rules:
+        - name: argument-limit
+        - name: atomic
+        - name: bare-return
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: comment-spacings
+        - name: confusing-results
+        - name: context-as-argument
+          arguments:
+            - allowTypesBefore: '*testing.T' # https://go-review.googlesource.com/c/lint/+/145237
+        - name: context-keys-type
+        - name: datarace
+        - name: deep-exit
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-lines
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: range-val-address
+        - name: range-val-in-closure
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: string-of-int
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unexported-return
+        - name: unhandled-error
+          arguments:
+            - fmt.Fprint
+            - fmt.Print
+            - fmt.Printf
+            - fmt.Println
+        - name: unreachable-code
+        - name: use-any
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          toml: snake
+          yaml: snake
+        use-field-name: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-same-issues: 0
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

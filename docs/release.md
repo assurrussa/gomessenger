@@ -1,0 +1,104 @@
+# Release process
+
+GoMessenger is a multi-module repository. Tags are immutable and every optional module must be published before the
+clean release consumer can resolve the complete facade.
+
+## Pre-release gate
+
+1. Run `make prepare` and inspect generated module sums and formatting changes.
+2. Run `make check`; it includes the Docker-free transactional
+   Outbox-to-JetStream-to-Inbox E2E under the race detector.
+3. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
+   `make test-integration` separately reruns embedded JetStream/SQLite adapters and the durable pipeline.
+4. Run `make bench-all` for dispatch, envelope, registry, or admission-path changes. The benchmark workflow records ten
+   base/head samples, uploads raw data, and adds a pinned `benchstat` report without enforcing a machine-dependent
+   performance threshold.
+5. Confirm `git diff --check` and that public docs contain no machine-local paths or development-only `replace`
+   examples.
+6. Update `CHANGELOG.md` and replace `Unreleased` wording only when the release contents are fixed.
+
+Passing local gates proves the checkout, not the published module graph.
+
+## Prepare exact module requirements
+
+The GoMessenger outbox adapter depends on the additive outbox v0.11 contract. Outbox root and backend `v0.11.0` tags are
+already published. Prepare all GoMessenger module requirements in one reviewable commit:
+
+```sh
+make check
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
+```
+
+`release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements
+from nested `go.mod` files, adds matching local pre-tag replacements only to `go.work`, and formats source. It
+deliberately does not tidy unpublished nested dependencies.
+`release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus
+the Outbox root and SQLite backend requirements used by clean consumer/E2E modules. It rejects remaining `replace`
+directives in published module files and any Outbox replacement in clean consumer/E2E modules. The unpublished local
+E2E module deliberately keeps GoMessenger path replacements to test the checkout itself; it is not a published-module
+resolution probe. The gate does not resolve or test the not-yet-published GoMessenger tags. The full source gate must
+pass before release preparation; published resolution is proved separately after the dependency-ordered tags exist.
+Published modules in the checkout use development replacements only before release preparation; no published module
+may depend on them.
+
+Commit the exact-version module files before creating any GoMessenger tag.
+
+## Dependency-ordered tags
+
+For release `vX.Y.Z`, create and push tags in dependency order:
+
+```text
+vX.Y.Z
+adapters/inbox/vX.Y.Z
+adapters/outbox/vX.Y.Z
+observability/vX.Y.Z
+adapters/nats/vX.Y.Z
+tools/gomessengerctl/vX.Y.Z
+```
+
+The root must resolve before any nested module can resolve its root requirement. `adapters/inbox`, `adapters/outbox`,
+and
+`observability` depend only on the root and their external dependencies, so prepare and verify each after the root tag
+is
+published. `adapters/nats` additionally depends on the published inbox tag. The CLI additionally depends on the
+published NATS and inbox tags. For each nested module, run the following after its dependencies resolve, inspect and
+commit any `go.sum` update, and only then create its tag:
+
+```sh
+cd MODULE_DIRECTORY
+GOWORK=off go mod tidy
+GOWORK=off go test ./...
+git diff --check
+```
+
+Never retarget an existing tag. A mistake after publication requires a new patch version.
+
+## Published verification
+
+After all tags are visible through the Go module proxy, run:
+
+```sh
+make test-consumer-release VERSION=vX.Y.Z
+```
+
+The script accepts only an exact stable `vX.Y.Z` tag, creates a clean temporary module, downloads root and nested modules
+by that tag, compiles the public facade and adapters, installs the published `gomessengerctl` module, and uses no local
+replacement. Record this separately from the local gate in the release notes.
+
+## Operational rollout
+
+Published packages are not a deployed service. For an infrastructure migration:
+
+1. apply additive database migrations;
+2. apply reviewed compatible topology changes;
+3. deploy relay and consumer registrations;
+4. verify readiness, DLQ publishing, lag, and telemetry;
+5. enable producers;
+6. run a real end-to-end message and controlled redelivery smoke;
+7. drain old paths only after both correctness and backlog are verified.
+
+State explicitly which of publication, deployment, and manual production smoke has actually occurred.
+
+The committed GitHub Actions workflows prove a clean CI checkout only after a repository remote exists and the branch is
+pushed. Their presence is not evidence that CI has run for a local-only repository.
