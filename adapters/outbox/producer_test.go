@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	testEventName   = "media.processed"
-	testSource      = "urn:service:test"
-	testContentType = "application/json"
+	testEventName    = "media.processed"
+	testSource       = "urn:service:test"
+	testContentType  = "application/json"
+	testProducerName = "outbox.events"
 )
 
 type transactionKey struct{}
@@ -76,7 +77,7 @@ func (d staticDelivery) Invoke(context.Context) error { return errors.New("unexp
 func TestProducerStagesCanonicalEnvelopeWithStableIdempotency(t *testing.T) {
 	metadata, envelope := testEnvelope(t)
 	putter := &fakeUniquePutter{seen: make(map[string]coreoutbox.UniquePutResult)}
-	producer, err := outboxadapter.NewProducer(putter, outboxadapter.ProducerConfig{Name: "outbox.events"})
+	producer, err := outboxadapter.NewProducer(putter, outboxadapter.ProducerConfig{Name: testProducerName})
 	if err != nil {
 		t.Fatalf("producer: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestProducerUsesImmutableMessageTimeForImmediateDelivery(t *testing.T) {
 	metadata, envelope := testEnvelope(t)
 	metadata.NotBefore = time.Time{}
 	putter := &fakeUniquePutter{seen: make(map[string]coreoutbox.UniquePutResult)}
-	producer, err := outboxadapter.NewProducer(putter, outboxadapter.ProducerConfig{Name: "outbox.events"})
+	producer, err := outboxadapter.NewProducer(putter, outboxadapter.ProducerConfig{Name: testProducerName})
 	if err != nil {
 		t.Fatalf("producer: %v", err)
 	}
@@ -117,6 +118,23 @@ func TestProducerUsesImmutableMessageTimeForImmediateDelivery(t *testing.T) {
 	}
 	if !putter.calls[0].availableAt.Equal(metadata.Time) {
 		t.Fatalf("availableAt = %s, want %s", putter.calls[0].availableAt, metadata.Time)
+	}
+}
+
+func TestProducerRejectsQueryDeliveryBeforeSerialization(t *testing.T) {
+	metadata, _ := testEnvelope(t)
+	metadata.Kind = messenger.KindQuery
+	putter := &fakeUniquePutter{seen: make(map[string]coreoutbox.UniquePutResult)}
+	producer, err := outboxadapter.NewProducer(putter, outboxadapter.ProducerConfig{Name: testProducerName})
+	if err != nil {
+		t.Fatalf("producer: %v", err)
+	}
+	_, err = producer.Deliver(t.Context(), staticDelivery{metadata: metadata})
+	if !errors.Is(err, messenger.ErrInvalidMessage) {
+		t.Fatalf("query delivery = %v", err)
+	}
+	if len(putter.calls) != 0 {
+		t.Fatalf("query staged %d outbox calls", len(putter.calls))
 	}
 }
 

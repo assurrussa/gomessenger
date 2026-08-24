@@ -25,24 +25,27 @@ import (
 
 // HandlerConfig declares a durable pull consumer and bounded retry behavior.
 type HandlerConfig struct {
-	Stream        string
-	Namespace     string
-	ConsumerID    string
-	Description   string
-	WireMode      WireMode
-	Concurrency   int
-	Timeout       time.Duration
-	MaxAttempts   int
-	BaseRetry     time.Duration
-	MaxRetry      time.Duration
-	AckWait       time.Duration
-	DLQSubject    string
-	Replicas      int
-	MemoryStorage bool
-	Logger        messenger.Logger
-	Observers     []messenger.Observer
-	Middlewares   []messenger.Middleware
-	Propagator    messenger.ContextPropagator
+	Stream      string
+	Namespace   string
+	ConsumerID  string
+	Description string
+	WireMode    WireMode
+	Concurrency int
+	Timeout     time.Duration
+	// FinalizationTimeout is the additional Inbox transaction deadline after Timeout.
+	// Zero uses five seconds.
+	FinalizationTimeout time.Duration
+	MaxAttempts         int
+	BaseRetry           time.Duration
+	MaxRetry            time.Duration
+	AckWait             time.Duration
+	DLQSubject          string
+	Replicas            int
+	MemoryStorage       bool
+	Logger              messenger.Logger
+	Observers           []messenger.Observer
+	Middlewares         []messenger.Middleware
+	Propagator          messenger.ContextPropagator
 }
 
 type decodedMessage struct {
@@ -62,7 +65,10 @@ const (
 	consumerClosed
 )
 
-const brokerAckTimeout = 5 * time.Second
+const (
+	brokerAckTimeout           = 5 * time.Second
+	defaultFinalizationTimeout = 5 * time.Second
+)
 
 // Consumer is a durable pull consumer implementing messenger.Service.
 type Consumer struct {
@@ -207,7 +213,7 @@ func newConsumer(
 	}
 	if connection == nil || store == nil || decode == nil ||
 		config.Concurrency < 1 || config.Concurrency > 128 ||
-		config.Timeout <= 0 || config.MaxAttempts <= 0 || config.BaseRetry <= 0 ||
+		config.Timeout <= 0 || config.FinalizationTimeout <= 0 || config.MaxAttempts <= 0 || config.BaseRetry <= 0 ||
 		config.MaxRetry < config.BaseRetry || config.AckWait < 100*time.Millisecond || !config.WireMode.valid() {
 		return nil, fmt.Errorf("%w: durable consumer", ErrInvalidConfig)
 	}
@@ -245,6 +251,9 @@ func applyConsumerDefaults(config *HandlerConfig) {
 	}
 	if config.Timeout == 0 {
 		config.Timeout = 30 * time.Second
+	}
+	if config.FinalizationTimeout == 0 {
+		config.FinalizationTimeout = defaultFinalizationTimeout
 	}
 	if config.MaxAttempts == 0 {
 		config.MaxAttempts = 10
@@ -543,7 +552,7 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 	processContext, cancel := context.WithTimeout(deliveryContext, c.config.Timeout)
 	defer cancel()
 	transactionContext, cancelTransaction := context.WithTimeout(
-		deliveryContext, handlerTransactionTimeout(c.config.Timeout),
+		deliveryContext, handlerTransactionTimeout(c.config.Timeout, c.config.FinalizationTimeout),
 	)
 	defer cancelTransaction()
 	startedAt := c.clock().UTC()
@@ -622,11 +631,8 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 	c.observeHandle(processContext, decoded, attempt, result, delay, startedAt, processErr)
 }
 
-func handlerTransactionTimeout(handlerTimeout time.Duration) time.Duration {
-	const (
-		finalizationTimeout = 5 * time.Second
-		maxDuration         = time.Duration(1<<63 - 1)
-	)
+func handlerTransactionTimeout(handlerTimeout, finalizationTimeout time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
 	if handlerTimeout > maxDuration-finalizationTimeout {
 		return maxDuration
 	}

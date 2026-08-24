@@ -49,6 +49,14 @@ type Route interface {
 	Deliver(ctx context.Context, delivery Delivery) (Receipt, error)
 }
 
+// LocalQueryRoute is the sealed local request/reply route contract. The built-in
+// LocalSyncRoute and LocalAsyncRoute are its only implementations.
+type LocalQueryRoute interface {
+	Name() string
+	query(ctx context.Context, call localQueryCall) (localQueryResult, error)
+	requiresLocalQueryRoute()
+}
+
 type delivery struct {
 	metadata Metadata
 	encode   func() ([]byte, DataEncoding, error)

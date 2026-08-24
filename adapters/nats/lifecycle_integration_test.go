@@ -165,7 +165,7 @@ func TestConsumerRejectsDLQOnItsInputSubject(t *testing.T) {
 	}
 }
 
-func TestConsumerRejectsInvalidJetStreamResourceNames(t *testing.T) {
+func TestConsumerRejectsInvalidConfiguration(t *testing.T) {
 	connection := startJetStream(t)
 	store := openConcurrentInbox(t)
 	command := messenger.MustCommand("media.invalid-resource", 1, messenger.JSON[testPayload]())
@@ -176,13 +176,16 @@ func TestConsumerRejectsInvalidJetStreamResourceNames(t *testing.T) {
 	}{
 		{name: "stream", mutate: func(config *nats.HandlerConfig) { config.Stream = "BAD.STREAM" }},
 		{name: "consumer", mutate: func(config *nats.HandlerConfig) { config.ConsumerID = "BAD CONSUMER" }},
+		{name: "finalization timeout", mutate: func(config *nats.HandlerConfig) {
+			config.FinalizationTimeout = -time.Second
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := testHandlerConfig("valid-worker")
 			test.mutate(&config)
 			if _, err := nats.NewCommandConsumer(connection, store, command, handler, config); !errors.Is(err, nats.ErrInvalidConfig) {
-				t.Fatalf("invalid resource name error = %v", err)
+				t.Fatalf("invalid configuration error = %v", err)
 			}
 		})
 	}

@@ -13,6 +13,8 @@ const (
 	OperationDeliver Operation = "deliver"
 	// OperationHandle covers local or durable handler execution.
 	OperationHandle Operation = "handle"
+	// OperationQuery covers a complete local request/reply call.
+	OperationQuery Operation = "query"
 	// OperationService covers managed service completion.
 	OperationService Operation = "service"
 )

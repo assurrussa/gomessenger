@@ -64,7 +64,13 @@ func (r *Route) Name() string { return r.name }
 
 // Deliver publishes one message and waits for broker persistence confirmation.
 func (r *Route) Deliver(ctx context.Context, delivery messenger.Delivery) (messenger.Receipt, error) {
+	if delivery == nil {
+		return messenger.Receipt{}, fmt.Errorf("%w: nil NATS delivery", messenger.ErrInvalidMessage)
+	}
 	metadata := delivery.Metadata()
+	if metadata.Kind != messenger.KindCommand && metadata.Kind != messenger.KindEvent {
+		return messenger.Receipt{}, fmt.Errorf("%w: NATS route only supports command/event delivery", messenger.ErrInvalidMessage)
+	}
 	native, err := delivery.MarshalEnvelope()
 	if err != nil {
 		return messenger.Receipt{}, err

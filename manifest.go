@@ -34,39 +34,57 @@ func (m Manifest) Validate() error {
 	}
 	descriptors := make(map[descriptorKey]struct{}, len(m.Descriptors))
 	for _, descriptor := range m.Descriptors {
-		info := descriptor.DescriptorInfo
-		if !info.Kind.valid() || len(info.Name) > maxDescriptorNameLength ||
-			!descriptorNamePattern.MatchString(info.Name) ||
-			info.SchemaVersion <= 0 || info.ContentType == "" || !info.DataEncoding.valid() {
-			return fmt.Errorf("%w: manifest descriptor %s v%d", ErrInvalidDescriptor,
-				info.Name, info.SchemaVersion)
+		if err := validateManifestDescriptor(descriptor); err != nil {
+			return err
 		}
+		info := descriptor.DescriptorInfo
 		key := keyFor(info)
 		if _, exists := descriptors[key]; exists {
 			return fmt.Errorf("%w: duplicate manifest descriptor %s v%d", ErrDescriptorConflict,
 				info.Name, info.SchemaVersion)
 		}
 		descriptors[key] = struct{}{}
-		if descriptor.Route != "" && !validStableID(descriptor.Route) {
-			return fmt.Errorf("%w: invalid manifest route %q", ErrRouteConflict, descriptor.Route)
-		}
-		if info.Kind == KindCommand && len(descriptor.HandlerIDs) > 1 {
-			return fmt.Errorf("%w: command %s v%d has multiple handlers", ErrHandlerConflict,
-				info.Name, info.SchemaVersion)
-		}
-		handlers := make(map[string]struct{}, len(descriptor.HandlerIDs))
-		for _, handlerID := range descriptor.HandlerIDs {
-			if !validStableID(handlerID) {
-				return fmt.Errorf("%w: invalid manifest handler %q", ErrHandlerConflict, handlerID)
-			}
-			if _, exists := handlers[handlerID]; exists {
-				return fmt.Errorf("%w: duplicate manifest handler %q", ErrHandlerConflict, handlerID)
-			}
-			handlers[handlerID] = struct{}{}
-		}
 	}
-	services := make(map[string]struct{}, len(m.Services))
-	for _, serviceID := range m.Services {
+	return validateManifestServices(m.Services)
+}
+
+func validateManifestDescriptor(descriptor ManifestDescriptor) error {
+	info := descriptor.DescriptorInfo
+	if !info.Kind.valid() || len(info.Name) > maxDescriptorNameLength ||
+		!descriptorNamePattern.MatchString(info.Name) ||
+		info.SchemaVersion <= 0 || info.ContentType == "" || !info.DataEncoding.valid() {
+		return fmt.Errorf("%w: manifest descriptor %s v%d", ErrInvalidDescriptor,
+			info.Name, info.SchemaVersion)
+	}
+	if descriptor.Route != "" && !validStableID(descriptor.Route) {
+		return fmt.Errorf("%w: invalid manifest route %q", ErrRouteConflict, descriptor.Route)
+	}
+	if (info.Kind == KindCommand || info.Kind == KindQuery) && len(descriptor.HandlerIDs) > 1 {
+		return fmt.Errorf("%w: %s %s v%d has multiple handlers", ErrHandlerConflict, info.Kind,
+			info.Name, info.SchemaVersion)
+	}
+	if info.Kind == KindQuery && descriptor.Route == "" {
+		return fmt.Errorf("%w: query %s v%d", ErrRouteNotFound, info.Name, info.SchemaVersion)
+	}
+	if info.Kind == KindQuery && len(descriptor.HandlerIDs) == 0 {
+		return fmt.Errorf("%w: query %s v%d", ErrHandlerNotFound, info.Name, info.SchemaVersion)
+	}
+	handlers := make(map[string]struct{}, len(descriptor.HandlerIDs))
+	for _, handlerID := range descriptor.HandlerIDs {
+		if !validStableID(handlerID) {
+			return fmt.Errorf("%w: invalid manifest handler %q", ErrHandlerConflict, handlerID)
+		}
+		if _, exists := handlers[handlerID]; exists {
+			return fmt.Errorf("%w: duplicate manifest handler %q", ErrHandlerConflict, handlerID)
+		}
+		handlers[handlerID] = struct{}{}
+	}
+	return nil
+}
+
+func validateManifestServices(serviceIDs []string) error {
+	services := make(map[string]struct{}, len(serviceIDs))
+	for _, serviceID := range serviceIDs {
 		if !validStableID(serviceID) {
 			return fmt.Errorf("%w: invalid manifest service %q", ErrServiceConflict, serviceID)
 		}
@@ -99,9 +117,10 @@ func buildManifest(
 	source string,
 	commands map[descriptorKey]commandBinding,
 	events map[descriptorKey]eventBinding,
+	queries map[descriptorKey]queryBinding,
 	services []namedService,
 ) Manifest {
-	descriptors := make([]ManifestDescriptor, 0, len(commands)+len(events))
+	descriptors := make([]ManifestDescriptor, 0, len(commands)+len(events)+len(queries))
 	for _, command := range commands {
 		descriptor := ManifestDescriptor{DescriptorInfo: command.descriptor.info}
 		if command.route != nil {
@@ -121,6 +140,13 @@ func buildManifest(
 			descriptor.HandlerIDs = append(descriptor.HandlerIDs, subscriber.id)
 		}
 		descriptors = append(descriptors, descriptor)
+	}
+	for _, query := range queries {
+		descriptors = append(descriptors, ManifestDescriptor{
+			DescriptorInfo: query.descriptor.info,
+			Route:          query.route.Name(),
+			HandlerIDs:     []string{query.handlerID},
+		})
 	}
 	sort.Slice(descriptors, func(i, j int) bool {
 		if descriptors[i].Kind != descriptors[j].Kind {

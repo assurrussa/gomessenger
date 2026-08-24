@@ -13,6 +13,7 @@ import (
 
 func TestImports(t *testing.T) {
 	event := messenger.MustEvent("consumer.probe", 1, messenger.JSON[string]())
+	query := messenger.MustQuery[string, int]("consumer.lookup", 1, messenger.JSON[string]())
 	logger := messenger.AdaptSlog(nil)
 	builder := messenger.NewBuilder(
 		messenger.WithSource("urn:service:consumer-probe"),
@@ -29,9 +30,15 @@ func TestImports(t *testing.T) {
 		return next(ctx)
 	})
 	builder.SubscribeFunc(event, "consumer-probe", func(context.Context, string) error { return nil })
+	builder.HandleQueryFunc(query, "consumer-lookup", func(context.Context, string) (int, error) { return 1, nil })
 	builder.RouteEvent(event, messenger.NewLocalSyncRoute())
-	if _, _, err := builder.Build(); err != nil {
+	builder.RouteQuery(query, messenger.NewLocalSyncRoute())
+	bus, _, err := builder.Build()
+	if err != nil {
 		t.Fatalf("build: %v", err)
+	}
+	if value, err := messenger.BindQuerier(bus, query).Query(t.Context(), "key"); err != nil || value != 1 {
+		t.Fatalf("query = %d, %v", value, err)
 	}
 	_ = inbox.Key{}
 	_ = natsadapter.HandlerConfig{

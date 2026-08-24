@@ -31,6 +31,13 @@ type Command[T any] struct{ descriptor[T] }
 // Event is an immutable typed event descriptor.
 type Event[T any] struct{ descriptor[T] }
 
+// Query is an immutable typed local query descriptor. Its codec describes the
+// request Q only; R is a compile-time result identity and is never serialized.
+type Query[Q, R any] struct {
+	descriptor[Q]
+	resultType reflect.Type
+}
+
 // NewCommand constructs a command descriptor.
 func NewCommand[T any](name string, schemaVersion int, codec Codec[T]) (Command[T], error) {
 	descriptor, err := newDescriptor(KindCommand, name, schemaVersion, "", codec)
@@ -61,6 +68,21 @@ func MustEvent[T any](name string, schemaVersion int, codec Codec[T]) Event[T] {
 	return event
 }
 
+// NewQuery constructs a typed local query descriptor.
+func NewQuery[Q, R any](name string, schemaVersion int, codec Codec[Q]) (Query[Q, R], error) {
+	descriptor, err := newDescriptor(KindQuery, name, schemaVersion, "", codec)
+	return Query[Q, R]{descriptor: descriptor, resultType: reflect.TypeFor[R]()}, err
+}
+
+// MustQuery constructs a typed local query descriptor and panics when its declaration is invalid.
+func MustQuery[Q, R any](name string, schemaVersion int, codec Codec[Q]) Query[Q, R] {
+	query, err := NewQuery[Q, R](name, schemaVersion, codec)
+	if err != nil {
+		panic(err)
+	}
+	return query
+}
+
 // WithSchema returns a command descriptor with an explicit schema URI.
 func (d Command[T]) WithSchema(schema string) Command[T] {
 	d.info.Schema = schema
@@ -73,11 +95,20 @@ func (d Event[T]) WithSchema(schema string) Event[T] {
 	return d
 }
 
+// WithSchema returns a query descriptor with an explicit request schema URI.
+func (d Query[Q, R]) WithSchema(schema string) Query[Q, R] {
+	d.info.Schema = schema
+	return d
+}
+
 // Info returns a copy of the command's wire identity.
 func (d Command[T]) Info() DescriptorInfo { return d.info }
 
 // Info returns a copy of the event's wire identity.
 func (d Event[T]) Info() DescriptorInfo { return d.info }
+
+// Info returns a copy of the query request identity.
+func (d Query[Q, R]) Info() DescriptorInfo { return d.info }
 
 func newDescriptor[T any](
 	kind Kind,

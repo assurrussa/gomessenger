@@ -7,9 +7,10 @@ typed public facade and may depend only on the standard library and
 `github.com/assurrussa/gobus`. Broker, storage, telemetry, and CLI dependencies
 belong in their nested modules.
 
-The public contract contains commands and events only. Keep in-process queries
-in GoBus; any distributed query API requires a separate request/reply contract
-and ADR as defined in `docs/decisions/0001-query-boundary.md`.
+The public contract contains commands, typed local queries, and events. Local
+queries delegate to GoBus result dispatch and never enter `Delivery` or a wire
+adapter. Any distributed query API requires the separate request/reply contract
+in `docs/decisions/0003-distributed-queries.md`.
 
 Supported modules:
 
@@ -58,7 +59,8 @@ matching aggregate gate and do not repeat nested checks on an unchanged tree.
 ## Coding and compatibility
 
 Use explicit descriptors and stable handler/subscription IDs. Commands have one
-logical handler; events may have zero or more subscriptions. Delivery is
+logical handler; local queries require exactly one handler and local route;
+events may have zero or more subscriptions. Delivery is
 at-least-once outside the process, so ACK must happen only after a committed
 handler/inbox transaction. Never claim exactly-once effects.
 

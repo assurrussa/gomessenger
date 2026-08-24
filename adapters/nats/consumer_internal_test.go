@@ -20,6 +20,21 @@ const (
 	testDLQData        = `{"value":1}`
 )
 
+func TestConsumerFinalizationTimeout(t *testing.T) {
+	config := HandlerConfig{}
+	applyConsumerDefaults(&config)
+	if config.FinalizationTimeout != defaultFinalizationTimeout {
+		t.Fatalf("default finalization timeout = %s, want %s", config.FinalizationTimeout, defaultFinalizationTimeout)
+	}
+	if got := handlerTransactionTimeout(30*time.Second, 12*time.Second); got != 42*time.Second {
+		t.Fatalf("transaction timeout = %s, want 42s", got)
+	}
+	const maxDuration = time.Duration(1<<63 - 1)
+	if got := handlerTransactionTimeout(maxDuration-time.Second, 2*time.Second); got != maxDuration {
+		t.Fatalf("saturated transaction timeout = %s, want %s", got, maxDuration)
+	}
+}
+
 func TestDLQDedupIDIncludesCompleteSourceWireIdentity(t *testing.T) {
 	baseHeaders := map[string][]string{"Ce-Id": {"event-1"}, "Content-Type": {testDLQContentType}}
 	base := dlqDedupID(testDLQConsumerID, testDLQSubject, WireCloudEventsBinary, baseHeaders, []byte(testDLQData))

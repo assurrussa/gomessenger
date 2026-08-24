@@ -3,6 +3,17 @@
 GoMessenger is a multi-module repository. Tags are immutable and every optional module must be published before the
 clean release consumer can resolve the complete facade.
 
+## `v0.1.0` scope
+
+The first release includes typed commands, typed local `Query[Q,R]` request/reply, typed events, local sync/async GoBus
+routes, canonical command/event envelopes, Outbox/JetStream/Inbox durability, middleware, lifecycle, observability,
+topology, and DLQ tooling. The query request codec is local descriptor identity; result `R` is not serialized.
+
+Distributed query transports are explicitly not part of `v0.1.0`. HTTP, gRPC, and core NATS request/reply remain
+future candidates under ADR-0003; JetStream, Outbox, Inbox, receipts, retry, and DLQ must not be presented as remote
+query support. The `site` article-publication audit pilot starts only after all dependency-ordered `v0.1.0` module tags
+pass the published clean-consumer gate.
+
 ## Pre-release gate
 
 1. Run `make prepare` and inspect generated module sums and formatting changes.
@@ -83,8 +94,8 @@ make test-consumer-release VERSION=vX.Y.Z
 ```
 
 The script accepts only an exact stable `vX.Y.Z` tag, creates a clean temporary module, downloads root and nested modules
-by that tag, compiles the public facade and adapters, installs the published `gomessengerctl` module, and uses no local
-replacement. Record this separately from the local gate in the release notes.
+by that tag, compiles the command/query/event facade and adapters, installs the published `gomessengerctl` module, and
+uses no local replacement. Record this separately from the local gate in the release notes.
 
 ## Operational rollout
 
