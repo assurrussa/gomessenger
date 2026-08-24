@@ -87,6 +87,14 @@ type commandRegistration struct {
 	route      Route
 }
 
+type queryRegistration struct {
+	descriptor descriptorRegistration
+	resultType reflect.Type
+	handlerID  string
+	handler    func(any) (funcContextQueryHandler, error)
+	route      LocalQueryRoute
+}
+
 type eventSubscriber struct {
 	id      string
 	handler func(any) (funcContextHandler, error)
@@ -99,6 +107,8 @@ type eventRegistration struct {
 }
 
 type funcContextHandler = HandlerFunc
+
+type funcContextQueryHandler func(context.Context) (localQueryResult, error)
 
 type namedService struct {
 	id      string
@@ -119,6 +129,7 @@ type Builder struct {
 
 	commands map[descriptorKey]*commandRegistration
 	events   map[descriptorKey]*eventRegistration
+	queries  map[descriptorKey]*queryRegistration
 	services map[string]namedService
 	errors   []error
 }
@@ -132,6 +143,7 @@ func NewBuilder(options ...Option) *Builder {
 		propagator:  noopContextPropagator{},
 		commands:    make(map[descriptorKey]*commandRegistration),
 		events:      make(map[descriptorKey]*eventRegistration),
+		queries:     make(map[descriptorKey]*queryRegistration),
 		services:    make(map[string]namedService),
 	}
 	for _, option := range options {
@@ -192,6 +204,66 @@ func (b *Builder) HandleCommandFunc[T any](
 	handler PayloadHandler[T],
 ) {
 	b.HandleCommand(descriptor, handlerID, HandlePayload(handler))
+}
+
+// HandleQuery registers the one local handler for a query descriptor.
+// Validation errors are returned by Build.
+func (b *Builder) HandleQuery[Q, R any](
+	descriptor Query[Q, R],
+	handlerID string,
+	handler QueryHandler[Q, R],
+) {
+	registration := b.ensureQuery(descriptor)
+	if registration == nil {
+		return
+	}
+	if !validStableID(handlerID) || handler == nil {
+		b.addError(fmt.Errorf("%w: invalid query handler %q for %s",
+			ErrHandlerConflict, handlerID, descriptor.info.Name))
+		return
+	}
+	if registration.handler != nil {
+		b.addError(fmt.Errorf("%w: query %s v%d", ErrHandlerConflict,
+			descriptor.info.Name, descriptor.info.SchemaVersion))
+		return
+	}
+	registration.handlerID = handlerID
+	registration.handler = func(payload any) (funcContextQueryHandler, error) {
+		var typed Q
+		if payload == nil {
+			// A nil interface loses its dynamic type when it is erased to any.
+			if reflect.TypeFor[Q]().Kind() != reflect.Interface {
+				return nil, fmt.Errorf("%w: query payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
+			}
+		} else {
+			var ok bool
+			typed, ok = payload.(Q)
+			if !ok {
+				return nil, fmt.Errorf("%w: query payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
+			}
+		}
+		return func(ctx context.Context) (localQueryResult, error) {
+			metadata, _ := MetadataFromContext(ctx)
+			result, err := handler(ctx, Message[Q]{Metadata: metadata, Payload: typed})
+			if err != nil {
+				return localQueryResult{expectedOutputType: descriptor.resultType}, err
+			}
+			return localQueryResult{
+				value:              result,
+				expectedOutputType: descriptor.resultType,
+				present:            true,
+			}, nil
+		}, nil
+	}
+}
+
+// HandleQueryFunc registers a payload-only local query handler.
+func (b *Builder) HandleQueryFunc[Q, R any](
+	descriptor Query[Q, R],
+	handlerID string,
+	handler QueryPayloadHandler[Q, R],
+) {
+	b.HandleQuery(descriptor, handlerID, HandleQueryPayload(handler))
 }
 
 // Subscribe appends a named local event subscription.
@@ -267,6 +339,21 @@ func (b *Builder) RouteEvent[T any](descriptor Event[T], route Route) {
 	b.addRouteService(route)
 }
 
+// RouteQuery sets the query's required local request/reply route.
+func (b *Builder) RouteQuery[Q, R any](descriptor Query[Q, R], route LocalQueryRoute) {
+	registration := b.ensureQuery(descriptor)
+	if registration == nil || !b.validateQueryRoute(descriptor.info, route) {
+		return
+	}
+	if registration.route != nil {
+		b.addError(fmt.Errorf("%w: query %s v%d", ErrRouteConflict,
+			descriptor.info.Name, descriptor.info.SchemaVersion))
+		return
+	}
+	registration.route = route
+	b.addQueryRouteService(route)
+}
+
 // Use adds a named managed consumer or worker service to the returned Runtime.
 func (b *Builder) Use(serviceID string, service Service) {
 	b.addService(serviceID, service)
@@ -285,6 +372,16 @@ func (b *Builder) Build() (*Messenger, *Runtime, error) {
 			}
 		}
 	}
+	for _, query := range b.queries {
+		if query.handler == nil {
+			b.addError(fmt.Errorf("%w: query %s v%d", ErrHandlerNotFound,
+				query.descriptor.info.Name, query.descriptor.info.SchemaVersion))
+		}
+		if query.route == nil {
+			b.addError(fmt.Errorf("%w: query %s v%d", ErrRouteNotFound,
+				query.descriptor.info.Name, query.descriptor.info.SchemaVersion))
+		}
+	}
 	if err := errors.Join(b.errors...); err != nil {
 		return nil, nil, err
 	}
@@ -297,6 +394,10 @@ func (b *Builder) Build() (*Messenger, *Runtime, error) {
 	events := make(map[descriptorKey]eventBinding, len(b.events))
 	for key, registration := range b.events {
 		events[key] = makeEventBinding(registration, observer, b.clock, b.middlewares)
+	}
+	queries := make(map[descriptorKey]queryBinding, len(b.queries))
+	for key, registration := range b.queries {
+		queries[key] = makeQueryBinding(registration, observer, b.clock, b.middlewares)
 	}
 	services := make([]namedService, 0, len(b.services))
 	for _, service := range b.services {
@@ -311,8 +412,9 @@ func (b *Builder) Build() (*Messenger, *Runtime, error) {
 		propagator:  b.propagator,
 		commands:    commands,
 		events:      events,
+		queries:     queries,
 	}
-	messenger.manifest = buildManifest(b.source, commands, events, services)
+	messenger.manifest = buildManifest(b.source, commands, events, queries, services)
 	return messenger, newRuntime(services, b.logger, observer), nil
 }
 
@@ -343,6 +445,25 @@ func (b *Builder) ensureEvent[T any](descriptor Event[T]) *eventRegistration {
 	}
 	registration = &eventRegistration{descriptor: eraseDescriptor(descriptor.descriptor)}
 	b.events[keyFor(descriptor.info)] = registration
+	return registration
+}
+
+func (b *Builder) ensureQuery[Q, R any](descriptor Query[Q, R]) *queryRegistration {
+	registration, ok := b.queries[keyFor(descriptor.info)]
+	if ok {
+		if !sameDescriptor(registration.descriptor, descriptor.info, reflect.TypeFor[Q]()) ||
+			registration.resultType != descriptor.resultType || descriptor.resultType != reflect.TypeFor[R]() {
+			b.addError(fmt.Errorf("%w: query %s v%d", ErrDescriptorConflict,
+				descriptor.info.Name, descriptor.info.SchemaVersion))
+			return nil
+		}
+		return registration
+	}
+	registration = &queryRegistration{
+		descriptor: eraseDescriptor(descriptor.descriptor),
+		resultType: descriptor.resultType,
+	}
+	b.queries[keyFor(descriptor.info)] = registration
 	return registration
 }
 
@@ -382,7 +503,33 @@ func (b *Builder) validateRoute(info DescriptorInfo, route Route) bool {
 	return true
 }
 
+func (b *Builder) validateQueryRoute(info DescriptorInfo, route LocalQueryRoute) bool {
+	if route == nil {
+		b.addError(fmt.Errorf("%w: nil query route for %s", ErrRouteNotFound, info.Name))
+		return false
+	}
+	value := reflect.ValueOf(route)
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		b.addError(fmt.Errorf("%w: nil query route for %s", ErrRouteNotFound, info.Name))
+		return false
+	}
+	if !validStableID(route.Name()) {
+		b.addError(fmt.Errorf("%w: invalid query route name %q", ErrRouteNotFound, route.Name()))
+		return false
+	}
+	return true
+}
+
 func (b *Builder) addRouteService(route Route) {
+	provider, ok := route.(ServiceProvider)
+	if !ok {
+		return
+	}
+	serviceID, service := provider.ManagedService()
+	b.addService(serviceID, service)
+}
+
+func (b *Builder) addQueryRouteService(route LocalQueryRoute) {
 	provider, ok := route.(ServiceProvider)
 	if !ok {
 		return

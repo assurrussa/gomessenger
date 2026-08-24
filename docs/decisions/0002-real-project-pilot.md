@@ -1,46 +1,56 @@
-# ADR-0002: Require a real-project pilot for operational validation
+# ADR-0002: Pilot article publication audit in a real service
 
-- Status: accepted validation stage; pilot target pending
+- Status: accepted; target selected; implementation waits for published GoMessenger `v0.1.0`
 - Date: 2026-08-24
 
 ## Context
 
-Unit, race, checkptr, embedded JetStream, SQLite E2E, PostgreSQL integration, and clean-consumer tests prove the library
+Unit, race, checkptr, embedded JetStream, SQLite E2E, PostgreSQL integration, and clean-consumer tests prove library
 contracts in controlled environments. They do not prove service integration cost, production-shaped throughput,
 operational ownership, deployment behavior, or useful observability under a real workload.
 
+The selected host is `site`. Its existing article-publication transaction already emits webhooks with an immutable
+recipient snapshot. A pilot must not replace or reinterpret that path.
+
 ## Decision
 
-Before describing GoMessenger as operationally production-proven, adopt it in one real but non-critical service flow.
-The first pilot must exercise a one-way command or event; it must not introduce distributed query semantics.
+The first real-project pilot is the additive one-way flow:
 
-The target flow must have:
+```text
+article changes from draft to published
+  -> existing webhook emission remains unchanged
+  -> GoMessenger Outbox event content.article.published v1
+  -> JetStream
+  -> durable Inbox consumer
+  -> article_publication_audit row
+```
 
-- Go 1.27 and an owned NATS JetStream plus PostgreSQL integration path;
-- one business transaction that stages an Outbox message;
-- one consumer transaction with an observable, safely repeatable database effect;
-- a stable message descriptor and a rollback path that does not require changing existing business semantics;
-- host-owned migrations, connection sizing, lifecycle supervision, metrics, logs, traces, and runbook.
+The event payload is `{articleId, slug, locale, publishedAt}`. The pilot is disabled by default and publishes only on
+the draft-to-published transition. Updates and unpublishing do not emit it. The audit handler writes through
+`inbox.SQLTxFromContext`, so the audit row and Inbox completion marker commit in one PostgreSQL transaction.
 
-## Required scenarios
+Implementation belongs in a separate `site` project task and branch after every used GoMessenger module is published
+as `v0.1.0` and passes the clean release-consumer gate. Local `replace` directives are forbidden. The host must upgrade
+Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.11.0`, own the NATS connection/topology and
+migrations, and preserve existing required-runner supervision.
 
-The pilot must demonstrate in a production-like environment:
+## Compatibility constraints
 
-1. business commit and Outbox staging, plus rollback without publication;
-2. relay publication with JetStream `PubAck`;
-3. Inbox commit followed by lost-ACK redelivery without a duplicate business effect;
-4. transient retry, permanent failure, DLQ inspection, and confirmed replay;
-5. service restart, NATS reconnect, temporary PostgreSQL failure, and graceful drain;
-6. measured handler latency, consumer lag, database-pool pressure, retry/DLQ rates, and a representative soak window.
+- Existing webhook topics, payloads, recipient resolution, ordering, retry behavior, and immutable subscription
+  revision snapshots stay unchanged. A regression test must prove the snapshot survives later subscription edits.
+- Producer and consumer runtimes are long-lived and host-supervised. A restartable factory creates a fresh consumer
+  runtime after failure; readiness, drain, logging, metrics, and tracing adapt to the host's existing systems.
+- Topology uses namespace `site`, `SITE_EVENTS` on `site.event.>`, a bounded `SITE_DLQ`, and durable consumer
+  `site-article-publication-audit-v1`; source payloads remain bounded to 1 MiB.
+- Rollout is additive: migrations and topology land while disabled, then a canary enables the pilot. Rollback disables
+  the flag or restores the runtime image; existing webhooks and additive tables remain safe.
 
-## Exit criteria
+## Acceptance
 
-The pilot is successful only when the host can operate the flow from documented dashboards and runbooks, no committed
-database effect is duplicated under the failure matrix, and measured capacity leaves explicit headroom at the intended
-service load. Passing repository E2E alone does not satisfy this decision.
+The separate pilot task must prove business rollback, Outbox staging, JetStream `PubAck`, one audit row, real lost-ACK
+redelivery suppression, transient retry, permanent DLQ and confirmed replay, process and persistent-NATS restart,
+PostgreSQL outage/recovery, graceful and forced drain, operational telemetry, and a 15-minute 5 events/s soak. After
+the soak, lag must reach zero within 30 seconds, no row may be missing or duplicated, DLQ must remain unexpectedly
+empty, p95 handler latency must stay below 500 ms, and at least half of the pgx pool must remain free.
 
-## Open selection
-
-The service and message flow are intentionally not selected here. Selection must prefer a reversible, low-blast-radius
-business flow and must not replace a workflow whose current timing, recipient snapshot, ordering, or retry semantics
-would change merely to adopt GoMessenger.
+Repository gates alone do not satisfy this ADR, and this document does not claim that the pilot is implemented.

@@ -3,7 +3,7 @@ package messenger
 import "errors"
 
 var (
-	// ErrInvalidDescriptor reports an invalid command or event descriptor.
+	// ErrInvalidDescriptor reports an invalid command, event, or query descriptor.
 	ErrInvalidDescriptor = errors.New("messenger: invalid descriptor")
 	// ErrInvalidMessage reports invalid outgoing metadata or envelope data.
 	ErrInvalidMessage = errors.New("messenger: invalid message")
@@ -11,8 +11,10 @@ var (
 	ErrDescriptorConflict = errors.New("messenger: descriptor conflict")
 	// ErrHandlerConflict reports a duplicate command handler or subscription ID.
 	ErrHandlerConflict = errors.New("messenger: handler conflict")
-	// ErrHandlerNotFound reports a missing local command handler.
+	// ErrHandlerNotFound reports a missing required local handler.
 	ErrHandlerNotFound = errors.New("messenger: handler not found")
+	// ErrQueryResultMissing reports successful global middleware completion without a query result.
+	ErrQueryResultMissing = errors.New("messenger: query result missing")
 	// ErrRouteConflict reports more than one primary route for a descriptor.
 	ErrRouteConflict = errors.New("messenger: route conflict")
 	// ErrRouteNotFound reports that a descriptor has no outbound route.

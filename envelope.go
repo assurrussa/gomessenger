@@ -70,7 +70,7 @@ func (e Envelope) Metadata() Metadata {
 
 // Validate checks the native envelope invariants and configured default bounds.
 func (e Envelope) Validate() error {
-	if e.SpecVersion != EnvelopeSpecVersion || e.ID.IsZero() || !e.Kind.valid() ||
+	if e.SpecVersion != EnvelopeSpecVersion || e.ID.IsZero() || !e.Kind.validWire() ||
 		len(e.Name) == 0 || len(e.Name) > maxDescriptorNameLength ||
 		!descriptorNamePattern.MatchString(e.Name) || e.SchemaVersion <= 0 ||
 		e.Time.IsZero() || e.CorrelationID.IsZero() || e.ContentType == "" || !e.DataEncoding.valid() {
@@ -236,18 +236,24 @@ func validateHeaders(headers map[string]string) error {
 		return fmt.Errorf("%w: too many headers", ErrInvalidMessage)
 	}
 	total := 0
-	traceHeaders := make(map[string]struct{}, 2)
+	traceParentSeen := false
+	traceStateSeen := false
 	for key, value := range headers {
 		if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "\r\n") ||
 			strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("%w: invalid header", ErrInvalidMessage)
 		}
-		canonicalKey := strings.ToLower(key)
-		if canonicalKey == "traceparent" || canonicalKey == "tracestate" {
-			if _, duplicate := traceHeaders[canonicalKey]; duplicate {
+		switch {
+		case strings.EqualFold(key, "traceparent"):
+			if traceParentSeen {
 				return fmt.Errorf("%w: duplicate trace header", ErrInvalidMessage)
 			}
-			traceHeaders[canonicalKey] = struct{}{}
+			traceParentSeen = true
+		case strings.EqualFold(key, "tracestate"):
+			if traceStateSeen {
+				return fmt.Errorf("%w: duplicate trace header", ErrInvalidMessage)
+			}
+			traceStateSeen = true
 		}
 		total += len(key) + len(value)
 	}

@@ -23,7 +23,8 @@ func ExampleMessenger_Send() {
 	if err != nil {
 		panic(err)
 	}
-	receipt, err := bus.Send(context.Background(), resize, resizeMedia{JobID: 42})
+	resizeSender := messenger.BindSender(bus, resize)
+	receipt, err := resizeSender.Send(context.Background(), resizeMedia{JobID: 42})
 	if err != nil {
 		panic(err)
 	}
@@ -32,4 +33,33 @@ func ExampleMessenger_Send() {
 	// Output:
 	// handler 42
 	// completed
+}
+
+func ExampleMessenger_Query() {
+	type findArticle struct{ ID int64 }
+	type articleView struct {
+		ID    int64
+		Title string
+	}
+
+	find := messenger.MustQuery[findArticle, articleView]("article.find", 1, messenger.JSON[findArticle]())
+	builder := messenger.NewBuilder(messenger.WithSource("urn:service:catalog"))
+	builder.HandleQueryFunc(find, "article-reader", func(_ context.Context, query findArticle) (articleView, error) {
+		return articleView{ID: query.ID, Title: "CQRS in Go"}, nil
+	})
+	builder.RouteQuery(find, messenger.NewLocalSyncRoute())
+	bus, _, err := builder.Build()
+	if err != nil {
+		panic(err)
+	}
+
+	reader := messenger.BindQuerier(bus, find)
+	article, err := reader.Query(context.Background(), findArticle{ID: 42})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(article.ID, article.Title)
+
+	// Output:
+	// 42 CQRS in Go
 }

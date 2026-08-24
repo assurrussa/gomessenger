@@ -7,23 +7,46 @@ adapter implementation.
 
 A descriptor is identified by all of the following fields:
 
-- kind: `command` or `event`;
+- kind: `command`, `query`, or `event`;
 - explicit wire name;
 - positive schema version;
 - content type and data encoding;
 - optional schema URI.
 
-Go package paths, type names, reflection names, and handler function names are not part of the wire contract. A schema
-version is immutable after publication. An incompatible payload change requires a new version and consumers for the old
-version remain valid until they are deliberately retired.
+Go package paths, type names, reflection names, and handler function names are not part of the wire contract. Runtime
+registration also requires the exact Go payload type. A query additionally requires the exact result type `R`; `R` is
+compile-time identity only and is never derived into a wire name or written to the manifest. A schema version is
+immutable after publication. An incompatible payload change requires a new version and consumers for the old version
+remain valid until they are deliberately retired.
 
 CloudEvents structured and binary mappings carry data encoding in the required `dataencoding` extension. Missing,
 invalid, or descriptor-conflicting values are rejected before the consumer payload codec runs; encoding is never inferred
 from `datacontenttype`.
 
-Commands have one registered handler. Events may have zero or more independently named subscriptions. Duplicate
-handler, subscription, route, or service identifiers fail during builder registration or `Build`; registration order
-does not silently replace an existing binding.
+Commands have at most one registered handler. Queries require exactly one handler and one local route. Events may have
+zero or more independently named subscriptions. Duplicate handler, subscription, route, or service identifiers fail
+during builder registration or `Build`; registration order does not silently replace an existing binding.
+
+## Local query contract
+
+`Query[Q,R]` describes request `Q` with an explicit codec, schema, content type, and encoding. It has no result codec:
+result `R` remains inside the process. `LocalQueryRoute` is sealed and implemented only by `LocalSyncRoute` and
+`LocalAsyncRoute`. Both register an internal result call with GoBus. Sync uses `DispatchResult`; async uses bounded
+`SubmitResult` and waits for its single buffered result.
+
+`Messenger.Query` is always request/reply. With an async route, the caller context governs capacity admission, handler
+execution, and result waiting. Cancellation returns `ctx.Err()`. Accepted completion writes to a buffered channel, so a
+caller that stops waiting cannot block drain. Before `Run`, calls return `ErrRuntimeNotRunning`; after closure they
+return `ErrRuntimeClosed`.
+
+Every query gets a new message ID, UTC time, source, `KindQuery`, correlation/causation lineage, and propagated trace
+headers. There is no public query `Outgoing`, receipt, subject/key, scheduling, expiry, or arbitrary-header API. A query
+never serializes or becomes `Delivery`; native envelopes, Outbox, NATS subjects/routes, and CloudEvents accept only
+commands and events.
+
+The manifest remains spec `1.0` and records only the query request descriptor, its required local route, and one handler
+ID. Distributed request/reply, result envelopes/codecs, and remote transports are not implemented; their contract is
+defined separately in [ADR-0003](decisions/0003-distributed-queries.md).
 
 ## Message identity and lineage
 
@@ -34,14 +57,16 @@ contains the received metadata. A child message created from that context inheri
 - `CausationID` equal to the parent message ID;
 - W3C `traceparent` and `tracestate` through the configured `ContextPropagator`.
 
-Callers may supply an ID, correlation ID, causation ID, timestamps, and headers with `Outgoing`. Reusing a message ID is
-safe only when the complete canonical envelope is byte-for-byte equivalent.
+One-way callers may supply an ID, correlation ID, causation ID, timestamps, and headers with `Outgoing`. Reusing a
+message ID is safe only when the complete canonical envelope is byte-for-byte equivalent. Local queries expose no
+equivalent override surface.
 `WithClock` controls message time independently of `WithIDGenerator`; deterministic generators implement
 `New() (MessageID, error)`. Baggage propagation is not part of the current contract.
 
 ## Canonical envelope v1
 
-The native envelope is deterministic JSON with an explicit envelope version. Validation is strict and bounded:
+The native command/event envelope is deterministic JSON with an explicit envelope version. `KindQuery` is rejected.
+Validation is strict and bounded:
 
 - `dataEncoding` is required and is exactly `json`, `text`, or `binary`; it is part of descriptor identity and is not
   inferred from `contentType`;
@@ -94,12 +119,18 @@ allowing broker redelivery to reset `MaxAttempts`.
 
 ## Handler middleware
 
-Global middleware receives `(ctx, metadata, handlerID, next)` for local and durable handlers. The first registered item
-is the outermost. It may short-circuit or pass a replacement context, but may invoke `next` at most once. Metadata passed
-to middleware is a copy, including a cloned header map. Nil middleware is rejected at build/configuration time.
+Global middleware receives `(ctx, metadata, handlerID, next)` for local query/command/event and durable handlers. The
+first registered item is the outermost. It may short-circuit or pass a replacement context, but may invoke `next` at
+most once. Metadata passed to middleware is a copy, including a cloned header map. Nil middleware is rejected at
+build/configuration time.
 
 `HandlerMiddleware[T]` and `ChainHandler` provide a separate typed decorator layer. Typed and global middleware do not
 change message identity, canonical bytes, inbox keys, or acknowledgement ordering.
+
+`QueryHandlerMiddleware[Q,R]` and `ChainQueryHandler` may return a cached or synthetic `R`. Global middleware has no
+typed result channel: a successful short-circuit, or a swallowed handler error, without a result returns
+`ErrQueryResultMissing`. Query handler and middleware panics use the same recovered handler boundary. A handler error
+is returned without remapping.
 
 ## Time semantics
 
@@ -124,6 +155,8 @@ For JetStream, `AckWait` is independent of handler `Timeout`. It is at least 100
 deadline because an active delivery sends progress acknowledgements every `AckWait / 3`. Pull-iterator heartbeats are a
 separate connection-liveness mechanism and remain within the NATS client's supported interval. A missing pull heartbeat
 is recoverable: the NATS client issues a new pull and the service continues instead of terminating the managed runtime.
+The Inbox transaction deadline is `Timeout + FinalizationTimeout`; finalization defaults to 5 seconds and may be raised
+for slow commit or rollback without extending the application handler deadline.
 
 For JetStream, `MaxAttempts` bounds handler invocations, while the broker consumer keeps delivery unlimited until the
 terminal hand-off is complete. The inbox persists invocation counts and permanent outcomes across consumer restarts.
@@ -159,9 +192,10 @@ Logging is disabled by default. `Logger` is transport-neutral; `AdaptSlog` is th
 a no-op, while direct nil configuration is rejected. Registered observers form an ordered fan-out. One observer panic
 is recovered, logged, and cannot stop later observers.
 
-Observations may contain message, consumer and service identity, attempt, duplicate state, and retry delay. Message IDs,
-attempts, and other high-cardinality values may be trace/log attributes but are never Prometheus metric labels. Core
-infrastructure logs never include payloads, message bodies, or arbitrary headers.
+Observations may contain message, consumer and service identity, route, handler, duration, attempt, duplicate state,
+and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler. Message
+IDs, attempts, and other high-cardinality values may be trace/log attributes but are never Prometheus metric labels.
+Core infrastructure logs and observations never include payloads, query results, message bodies, or arbitrary headers.
 
 ## Lifecycle
 

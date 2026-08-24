@@ -48,6 +48,7 @@ func (backend) Prune(_ context.Context, _ time.Time, _ int) (int64, error) { ret
 func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 	command := messenger.MustCommand("download.job", 1, messenger.JSON[downloadJob]())
 	event := messenger.MustEvent("download.completed", 1, messenger.JSON[downloadJob]())
+	query := messenger.MustQuery[downloadJob, string]("download.status", 1, messenger.JSON[downloadJob]())
 	telemetry, err := observability.New(observability.Config{Registerer: prometheus.NewRegistry()})
 	if err != nil {
 		t.Fatalf("observability: %v", err)
@@ -70,8 +71,12 @@ func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 	})
 	builder.HandleCommandFunc(command, "download-worker", func(context.Context, downloadJob) error { return nil })
 	builder.SubscribeFunc(event, "download-audit", func(context.Context, downloadJob) error { return nil })
+	builder.HandleQueryFunc(query, "download-status", func(context.Context, downloadJob) (string, error) {
+		return "ready", nil
+	})
 	builder.RouteCommand(command, messenger.NewLocalSyncRoute())
 	builder.RouteEvent(event, messenger.NewLocalSyncRoute())
+	builder.RouteQuery(query, messenger.NewLocalSyncRoute())
 	bus, _, err := builder.Build()
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -81,6 +86,9 @@ func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 	}
 	if _, err := messenger.BindPublisher(bus, event).Publish(t.Context(), downloadJob{JobID: 42}); err != nil {
 		t.Fatalf("publish: %v", err)
+	}
+	if result, err := messenger.BindQuerier(bus, query).Query(t.Context(), downloadJob{JobID: 42}); err != nil || result != "ready" {
+		t.Fatalf("query = %q, %v", result, err)
 	}
 
 	encoded, err := messenger.JSON[downloadJob]().Encode(downloadJob{JobID: 42})

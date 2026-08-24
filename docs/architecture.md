@@ -8,25 +8,28 @@ typed descriptor + payload
           v
       Messenger
        /      \
-local route   transport route
+local route   one-way transport route
    |           /          \
 GoBus     outbox stage   JetStream publish
-              |                |
-              v                v
+  |           |                |
+query R       v                v
         relay worker ----> durable consumer
                                  |
                                  v
                          SQL inbox transaction
                                  |
                                  v
-                           typed handler
+                         typed handler
 ```
+
+See the [practical usage guide](usage.md) for the concrete composition order, current producer and consumer examples,
+failure classification, and host shutdown sequence behind this diagram.
 
 ## Root module
 
-The root module owns the concepts that applications compile against: typed descriptors, message metadata, the canonical
-envelope, route receipts, failure classification, local routes, runtime lifecycle, and manifests. Its only non-standard
-dependency is GoBus, used as the local dispatch engine.
+The root module owns the concepts that applications compile against: typed command/query/event descriptors, message
+metadata, the canonical one-way envelope, route receipts, failure classification, local routes, runtime lifecycle, and
+manifests. Its only non-standard dependency is GoBus, used as the local dispatch engine.
 
 Transport-neutral `Logger`, `Observer`, `Middleware`, and `ContextPropagator` interfaces also live at the root. Their
 default implementations are no-ops, so local-only consumers do not acquire logging or telemetry dependencies.
@@ -36,22 +39,24 @@ topology. This keeps local-only consumers lightweight and lets hosts own infrast
 
 ## Query boundary
 
-The current public contract contains commands and events only. In-process queries remain owned by GoBus through its
-typed result-handler API. GoMessenger does not declare a query descriptor, query result envelope, or durable query
-route.
+`Query[Q,R]` is a typed local facade. Its descriptor records request identity; `R` is an in-process type identity. The
+builder requires one handler and one sealed `LocalQueryRoute`. Sync dispatch uses GoBus `RegisterResult` and
+`DispatchResult`; async dispatch uses bounded `SubmitResult` and still waits for one result through `Messenger.Query`.
 
-This is intentional: a cross-process query needs response typing, correlation, deadline and cancellation behavior,
-remote error mapping, availability semantics, and an explicit retry policy. Those semantics do not match the existing
-one-way `Route`/`Receipt`, transactional Outbox, Inbox, or DLQ contracts. A future HTTP, gRPC, or NATS request/reply
-adapter must therefore be designed as a separate contract after a real use case establishes its requirements.
+Queries receive generated metadata, lineage, trace propagation, middleware, observations, panic isolation, and async
+lifecycle behavior, but they do not become `Delivery`. They have no result envelope, receipt, Outbox, Inbox, NATS,
+retry, DLQ, or replay path. Native envelope validation and transport adapters explicitly reject `KindQuery`.
 
-See [ADR-0001](decisions/0001-query-boundary.md).
+A cross-process query additionally needs a result codec/envelope, absolute deadlines, best-effort cancellation, remote
+error mapping, responder availability, response bounds, and consistency-aware retry. That future API is separate from
+the local method. See [ADR-0001](decisions/0001-query-boundary.md) and the unimplemented distributed contract in
+[ADR-0003](decisions/0003-distributed-queries.md).
 
 ## Route boundary
 
-`Messenger` creates metadata, encodes the payload, and hands a `Delivery` to exactly one route for a command or to the
-configured route for an event descriptor. The route determines the meaning of successful admission and returns an
-explicit receipt.
+For a command or event, `Messenger` creates metadata, lazily encodes the payload, and hands a `Delivery` to exactly one
+configured route. The route determines the meaning of successful admission and returns an explicit receipt. A query
+instead hands an internal result call to its local route and returns `R` directly.
 
 Local routes invoke handlers in the same process. The NATS route publishes the canonical envelope directly. The outbox
 route persists the same envelope and a relay later gives those exact bytes to an envelope publisher. No relay decode and
@@ -94,11 +99,13 @@ that row and removes an incomplete logical identity only after no attempt rows r
 
 ## Runtime and backpressure
 
-Concurrency and buffers are bounded and adapter configuration is explicit. Admission cancellation and execution
-lifecycle are intentionally different:
+Concurrency and buffers are bounded and adapter configuration is explicit. One-way async delivery and async query
+lifetimes are intentionally different:
 
-- the caller context controls waiting for a bounded local queue and synchronous invocation;
-- once accepted by a managed asynchronous runtime, execution is owned by that runtime;
+- the caller context controls synchronous invocation and waiting for bounded admission;
+- once an async command/event is accepted, execution is owned by the runtime and detached from caller cancellation;
+- an async query retains caller cancellation for admission, execution, and result waiting; its buffered result cannot
+  block runtime drain after the caller stops waiting;
 - shutdown closes admission, drains accepted work, and force-cancels only when the host's deadline expires.
 
 A service that never entered `Run` closes synchronously during shutdown, including after a pre-run drain.
@@ -120,6 +127,8 @@ spans. `traceparent` and `tracestate` survive native, CloudEvents, and Outbox pa
 
 The core logger is independent from observability and defaults to no-op. It records only infrastructure failures. A
 logging observer is opt-in for successful/failed operation records, and observer panics are isolated from fan-out.
+`OperationQuery` covers the complete request/reply call and `OperationHandle` covers its handler. Neither observation
+contains request payloads, result values, or arbitrary headers.
 
 ## DLQ replay boundary
 

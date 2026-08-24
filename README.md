@@ -1,8 +1,8 @@
 # GoMessenger
 
-GoMessenger is a typed command and event toolkit for Go 1.27+. It keeps one explicit descriptor and handler API across
-local dispatch, transactional outbox staging, NATS JetStream delivery, durable inbox deduplication, and operational
-telemetry.
+GoMessenger is a typed CQRS toolkit for Go 1.27+: commands, local request/reply queries, and events share one explicit
+descriptor, handler, middleware, lifecycle, and observability facade. One-way commands and events can additionally use
+transactional outbox staging, NATS JetStream delivery, and durable inbox deduplication.
 
 The root module is intentionally small: standard library plus
 [`gobus`](https://github.com/assurrussa/gobus). Broker, SQL, Prometheus, and OpenTelemetry dependencies live in optional
@@ -10,14 +10,14 @@ nested modules.
 
 ## When to use it
 
-Use GoMessenger when a message may cross a process boundary or must survive a process restart. Continue using GoBus
-directly for small in-process command, query, and best-effort event dispatch. GoMessenger is not a replacement for a
-database transaction, workflow engine, or streaming analytics platform.
+Use GoMessenger when an application wants one typed command/query/event facade, or when a one-way message may cross a
+process boundary or must survive a restart. Local `Query[Q,R]` delegates to GoBus result dispatch but adds descriptors,
+metadata lineage, middleware, observations, DI binding, and bounded async isolation.
 
-Queries are intentionally outside the current GoMessenger public contract. In-process queries use GoBus
-`RegisterResult`/`DispatchResult`; a future cross-process query would require a separate request/reply contract rather
-than reusing durable command receipts, Outbox, Inbox, retry, or DLQ semantics. See the
-[query boundary decision](docs/decisions/0001-query-boundary.md).
+Distributed queries are not implemented. A local query never uses `Delivery`, a native envelope, `Receipt`, Outbox,
+Inbox, NATS, retry, or DLQ. Remote request/reply requires the separate contract in
+[ADR-0003](docs/decisions/0003-distributed-queries.md). GoMessenger is not a replacement for a database transaction,
+workflow engine, or streaming analytics platform.
 
 The durable contract is **at-least-once**:
 
@@ -34,7 +34,7 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 
 | Module                              | Responsibility                                                   |
 |-------------------------------------|------------------------------------------------------------------|
-| `github.com/assurrussa/gomessenger` | descriptors, envelopes, lineage, local routes, runtime, manifest |
+| `github.com/assurrussa/gomessenger` | CQRS descriptors, local queries, envelopes, local routes, runtime, manifest |
 | `.../adapters/outbox`               | transactional staging and a broker relay job                     |
 | `.../adapters/nats`                 | JetStream producers, consumers, topology, CloudEvents            |
 | `.../adapters/inbox`                | atomic PostgreSQL and SQLite consumer deduplication              |
@@ -45,7 +45,32 @@ The initial GoMessenger release is being prepared as `v0.1.0`. Outbox root and S
 published and are the pinned durable-producer dependencies. During repository development `go.work` selects local
 GoMessenger modules; published consumer modules must use path-qualified tags and no local `replace` directives.
 
-## Typed local example
+## How to use it
+
+Start with one explicit command, query, or event descriptor, select its route, build the messenger, and inject a narrow
+`Sender`, `Querier`, or `Publisher` into business code. Durable consumers are separate managed services attached to the
+returned `Runtime`.
+
+```text
+business code -> Messenger.Query -> local result handler -> typed result
+             `-> Send/Publish -> local handler
+                              `-> Outbox -> relay -> JetStream -> consumer -> Inbox transaction -> handler -> ACK
+```
+
+Use the route that matches the required success boundary:
+
+- `NewLocalSyncRoute` returns after the in-process handler completes;
+- for a query, `NewLocalSyncRoute` returns the handler result and `NewLocalAsyncRoute` queues bounded work but
+  `Messenger.Query` still waits for exactly one result;
+- `natsadapter.NewRoute` returns after JetStream `PubAck`;
+- `outboxadapter.NewProducer` returns after staging inside the caller's transaction. The receipt is provisional until
+  that transaction commits.
+
+For a durable flow, provision topology, apply Outbox and Inbox migrations, register the relay before producer traffic,
+start the managed runtimes, and expose readiness before accepting traffic. See the
+[practical usage guide](docs/usage.md) for the complete producer, consumer, failure, and shutdown sequence.
+
+## Minimal local example
 
 ```go
 type ResizeMedia struct {
@@ -64,11 +89,43 @@ bus, _, err := builder.Build()
 if err != nil {
 	return err
 }
-_, err = bus.Send(ctx, resize, ResizeMedia{JobID: 42})
+resizeSender := messenger.BindSender(bus, resize)
+_, err = resizeSender.Send(ctx, ResizeMedia{JobID: 42})
 ```
 
 The equivalent runnable API is compiled as `ExampleMessenger_Send`; `testdata/consumer` separately compiles the
 complete public facade from an external Go module.
+
+## Minimal local query example
+
+```go
+type FindArticle struct{ ID int64 }
+type ArticleView struct {
+	ID    int64
+	Title string
+}
+
+findArticle := messenger.MustQuery[FindArticle, ArticleView](
+	"article.find", 1, messenger.JSON[FindArticle](),
+)
+builder := messenger.NewBuilder(messenger.WithSource("urn:service:catalog"))
+builder.HandleQueryFunc(findArticle, "article-reader", func(_ context.Context, query FindArticle) (ArticleView, error) {
+	return ArticleView{ID: query.ID, Title: "CQRS in Go"}, nil
+})
+builder.RouteQuery(findArticle, messenger.NewLocalSyncRoute())
+
+bus, _, err := builder.Build()
+if err != nil {
+	return err
+}
+reader := messenger.BindQuerier(bus, findArticle)
+article, err := reader.Query(ctx, FindArticle{ID: 42})
+```
+
+`Query[Q,R]` uses the codec and schema only for request identity; `R` is an in-process type identity and is not written
+to the manifest. Every registered query must have exactly one handler and one built-in local route. The async route
+uses the caller context for admission, execution, and waiting, so cancellation returns `ctx.Err()` and accepted result
+delivery cannot block runtime drain. The runnable version is compiled as `ExampleMessenger_Query`.
 
 Descriptors use explicit stable wire names, schema versions, content types, data encodings, and optional schema URIs.
 Go type names and package paths never become the wire contract implicitly. Native envelopes carry `dataEncoding` as
@@ -76,35 +133,14 @@ Go type names and package paths never become the wire contract implicitly. Nativ
 
 ## Transactional outbox producer
 
-Use `adapters/outbox` when a business write and message publication must commit or roll back together:
-
-```go
-route, err := outboxadapter.NewProducer(outboxService, outboxadapter.ProducerConfig{
-	Name: "outbox.integration-events",
-})
-if err != nil {
-	return err
-}
-builder.RouteEvent(mediaResized, route)
-
-err = transactions.RunInTx(ctx, func(txCtx context.Context) error {
-	if err := mediaRepository.Save(txCtx, media); err != nil {
-		return err
-	}
-	_, err := bus.Publish(txCtx, mediaResized, MediaResized{JobID: media.ID})
-	return err
-})
-```
-
-The producer stores the canonical envelope under its `MessageID`. Repeating identical content resolves the same outbox
-tombstone; reusing the identity with different content fails closed. Immediate messages use their immutable message time
-as `availableAt`, preventing retry-time fingerprint drift.
-
-Register the relay job on the shared outbox runtime:
+Use `adapters/outbox` when a business write and message publication must commit or roll back together. Register the
+broker relay before the producer can stage its job:
 
 ```go
 natsRoute, err := natsadapter.NewRoute(natsConnection, natsadapter.RouteConfig{
-	Name: "nats.integration-events", Namespace: "prod", WireMode: natsadapter.WireNative,
+	Name:      "nats.integration-events",
+	Namespace: "prod",
+	WireMode:  natsadapter.WireNative,
 })
 if err != nil {
 	return err
@@ -113,8 +149,41 @@ relay, err := outboxadapter.NewRelayJob(natsRoute, outboxadapter.RelayJobConfig{
 if err != nil {
 	return err
 }
-outboxService.MustRegisterJob(relay)
+if err := outboxRuntime.Service().RegisterJob(relay); err != nil {
+	return err
+}
+
+route, err := outboxadapter.NewProducer(
+	outboxRuntime.Service(),
+	outboxadapter.ProducerConfig{Name: "outbox.integration-events"},
+)
+if err != nil {
+	return err
+}
+builder := messenger.NewBuilder(
+	messenger.WithSource("urn:service:media-resizer"),
+)
+builder.RouteEvent(mediaResized, route)
+
+bus, _, err := builder.Build()
+if err != nil {
+	return err
+}
+
+err = outboxRuntime.Transactor().RunInTx(ctx, func(txCtx context.Context) error {
+	if err := mediaRepository.Save(txCtx, media); err != nil {
+		return err
+	}
+	_, err := bus.Publish(txCtx, mediaResized, MediaResized{JobID: media.ID})
+	return err
+})
 ```
+
+The repository write must use the transaction carried by `txCtx`. `ReceiptStaged` reports staging in that active
+transaction; a callback rollback still removes the row. The producer stores the canonical envelope under its
+`MessageID`; the relay later publishes those exact bytes and waits for `PubAck`. Repeating identical content resolves the
+same outbox tombstone, while reusing the identity with different content fails closed. Immediate messages use their
+immutable message time as `availableAt`, preventing retry-time fingerprint drift.
 
 `messenger.RetryAfter` from the broker route becomes a persisted `outbox.RetryAt`; permanent envelope failures move
 directly to the outbox DLQ.
@@ -124,6 +193,9 @@ directly to the outbox DLQ.
 A consumer owns one stable `ConsumerID`, explicit concurrency and retry bounds, and one SQL inbox:
 
 ```go
+if err := inboxpgsql.Migrate(ctx, database); err != nil {
+	return err
+}
 store, err := inboxpgsql.New(database)
 if err != nil {
 	return err
@@ -133,29 +205,45 @@ consumer, err := natsadapter.NewEventConsumer(
 	store,
 	mediaResized,
 	func(ctx context.Context, message messenger.Message[MediaResized]) error {
-		// SQL repositories can use inbox.SQLTxFromContext(ctx), so this write and
-		// the inbox completion marker commit atomically.
-		return projection.Apply(ctx, message.Metadata.ID.String(), message.Payload)
+		tx, ok := inbox.SQLTxFromContext(ctx)
+		if !ok {
+			return errors.New("missing inbox transaction")
+		}
+		return projection.ApplyTx(ctx, tx, message.Metadata.ID.String(), message.Payload)
 	},
 	natsadapter.HandlerConfig{
-		Stream: "MESSAGES", Namespace: "prod", ConsumerID: "media-projection",
-		Concurrency: 8, Timeout: 30 * time.Second, MaxAttempts: 10,
+		Stream: "MESSAGES", Namespace: "prod", ConsumerID: "media-projection", WireMode: natsadapter.WireNative,
+		Concurrency: 8, Timeout: 30 * time.Second, FinalizationTimeout: 5 * time.Second,
+		AckWait: 30 * time.Second, MaxAttempts: 10,
+		DLQSubject: "prod.dlq",
 	},
 )
 if err != nil {
 	return err
 }
-builder.Use("consumer.media-projection", consumer)
+consumerBuilder := messenger.NewBuilder(
+	messenger.WithSource("urn:service:media-projection"),
+)
+consumerBuilder.Use("consumer.media-projection", consumer)
+
+_, runtime, err := consumerBuilder.Build()
+if err != nil {
+	return err
+}
 ```
 
-Run the embedded additive inbox migrations explicitly with `inboxpgsql.Migrate` or `inboxsqlite.Migrate`. They include
-the durable handler-attempt count and permanent-outcome state required by NATS consumers. Hosts own database
-connections, migration ordering, NATS connections, credentials, and process supervision.
+Run the embedded additive inbox migrations explicitly with `inboxpgsql.Migrate` or `inboxsqlite.Migrate` before
+constructing consumers. They include the durable handler-attempt count and permanent-outcome state required by NATS
+consumers. Hosts own database connections, migration ordering, NATS connections, credentials, and process supervision.
 
 Each active consumer worker may hold one SQL transaction for the full handler invocation. When several consumers share
 one `sql.DB`, configure `SetMaxOpenConns` to at least the sum of their `HandlerConfig.Concurrency` values, plus explicit
 headroom for application and maintenance queries. A smaller pool turns configured consumer concurrency into database
 connection contention and can exhaust handler deadlines before application code runs.
+
+`Timeout` bounds application handler execution. The Inbox transaction receives an additional
+`FinalizationTimeout` (5 seconds by default) to commit or roll back after that deadline. Increase it when a remote or
+otherwise slow database needs more finalization time; it does not extend the handler deadline.
 
 Inbox table names are currently fixed as `gomessenger_inbox`, `gomessenger_inbox_attempts`, and
 `gomessenger_inbox_attempt_generations`; there is no table-prefix or schema option. PostgreSQL hosts that use a
@@ -169,9 +257,11 @@ before reporting ready.
 
 ## Middleware, logging, and tracing
 
-Global middleware wraps local handlers and can be reused by durable NATS consumers. Registration order is execution
+Global middleware wraps local query/command/event handlers and can be reused by durable NATS consumers. Registration order is execution
 order: the first middleware is outermost. A middleware may replace the context or short-circuit, but `next` may be
-called at most once. Typed handler decorators use `messenger.ChainHandler`.
+called at most once. Typed one-way decorators use `messenger.ChainHandler`; typed query decorators use
+`messenger.ChainQueryHandler` and may return a cached or synthetic `R`. Global middleware cannot synthesize a typed
+result: successful completion without one returns `ErrQueryResultMissing`.
 
 ```go
 logger := messenger.AdaptSlog(slog.Default())
@@ -199,11 +289,50 @@ hand-off failures—and never logs payloads, message bodies, or arbitrary header
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.
 
-## Failure and lifecycle semantics
+## Runtime lifecycle
+
+Run the managed services under the host supervisor. On a signal, close admission first and then wait for accepted work
+within a deadline:
+
+```go
+signalCtx, stopSignals := signal.NotifyContext(
+	context.Background(),
+	os.Interrupt,
+	syscall.SIGTERM,
+)
+defer stopSignals()
+
+runErr := make(chan error, 1)
+go func() {
+	runErr <- runtime.Run(context.Background())
+}()
+
+select {
+case err := <-runErr:
+	return err
+case <-signalCtx.Done():
+}
+
+runtime.BeginDrain()
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+defer cancel()
+if err := runtime.Shutdown(shutdownCtx); err != nil {
+	return err
+}
+return <-runErr
+```
+
+`Runtime.Readiness` checks the runtime and every attached service. The selected Outbox backend runtime has its own
+host-supervised lifecycle; GoMessenger does not open connections or supervise it implicitly. Never call `Shutdown` from
+a handler executing on the same runtime.
+
+## Failure semantics
 
 - Return `messenger.Permanent(err)` for a non-retryable handler failure.
 - Return `messenger.RetryAfter(err, delay)` for an explicit durable delay.
 - Other errors use bounded full-jitter exponential retry in the NATS adapter.
+- `MaxAttempts` bounds handler invocations, not broker deliveries. A `NotBefore` deferral does not invoke the handler or
+  consume an attempt.
 - `AckWait` is a broker redelivery deadline, not a handler timeout. It must be at least 100 ms and may be shorter than
   `Timeout`; active handlers refresh acknowledgement progress every `AckWait / 3`.
 - The NATS adapter publishes and confirms a DLQ record before broker-confirming acknowledgement of the original message.
@@ -211,9 +340,6 @@ CloudEvents structured/binary modes, and transactional Outbox storage. Baggage i
   `MaxAttempts`. A permanent outcome is persisted independently of the attempt count, so an interrupted hand-off cannot
   invoke that handler again after restart.
 - `NotBefore` becomes a retry delay until due; `ExpiresAt` becomes a permanent expired outcome.
-- `Runtime.BeginDrain` closes admission. `Runtime.Shutdown` waits for accepted work until its context deadline, then
-  force-cancels the shared run context.
-- Never call `Shutdown` from a handler executing on the same runtime; coordinate shutdown from the host lifecycle.
 
 ## CloudEvents
 
@@ -285,6 +411,7 @@ GitHub Actions runs the same read-only gate and a PostgreSQL integration job. A 
 head benchmarks with pinned `benchstat`, uploads raw samples, and reports when the base predates the Go module instead
 of failing the first comparison. It does not enforce an unstable cross-machine performance threshold.
 
-See [contracts](docs/contracts.md), [architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md),
-[adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
-[first real-project pilot decision](docs/decisions/0002-real-project-pilot.md).
+See the [practical usage guide](docs/usage.md), [contracts](docs/contracts.md), [architecture](docs/architecture.md),
+[durable pipeline E2E](docs/e2e.md), [adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
+[first real-project pilot decision](docs/decisions/0002-real-project-pilot.md). Distributed request/reply remains a
+separate, unimplemented boundary in [ADR-0003](docs/decisions/0003-distributed-queries.md).

@@ -2,7 +2,9 @@ package messenger
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -18,6 +20,43 @@ func (localCallExecutor) Execute(ctx context.Context, call localCall) error {
 	return call.delivery.Invoke(ctx)
 }
 
+type localQueryResult struct {
+	value              any
+	expectedOutputType reflect.Type
+	present            bool
+}
+
+type localQueryCall struct {
+	metadata Metadata
+	invoke   func(context.Context) (localQueryResult, error)
+}
+
+type localQueryCallExecutor struct{}
+
+func (localQueryCallExecutor) Execute(ctx context.Context, call localQueryCall) (localQueryResult, error) {
+	if call.invoke == nil {
+		return localQueryResult{}, fmt.Errorf("%w: empty local query call", ErrInvalidMessage)
+	}
+	result, err := call.invoke(contextWithMetadata(ctx, call.metadata))
+	if err != nil {
+		return result, &localQueryInvocationError{err: err}
+	}
+	return result, nil
+}
+
+type localQueryInvocationError struct{ err error }
+
+func (e *localQueryInvocationError) Error() string { return e.err.Error() }
+func (e *localQueryInvocationError) Unwrap() error { return e.err }
+
+func unwrapLocalQueryInvocationError(err error) (bool, error) {
+	var invocationError *localQueryInvocationError
+	if errors.As(err, &invocationError) {
+		return true, invocationError.err
+	}
+	return false, err
+}
+
 // LocalSyncRoute executes handlers synchronously through a private GoBus instance.
 type LocalSyncRoute struct{ bus *gobus.Bus }
 
@@ -25,6 +64,7 @@ type LocalSyncRoute struct{ bus *gobus.Bus }
 func NewLocalSyncRoute() *LocalSyncRoute {
 	bus := gobus.New()
 	bus.Register[localCall](localCallExecutor{})
+	bus.RegisterResult[localQueryCall, localQueryResult](localQueryCallExecutor{})
 	return &LocalSyncRoute{bus: bus}
 }
 
@@ -48,12 +88,29 @@ func (r *LocalSyncRoute) Deliver(ctx context.Context, delivery Delivery) (Receip
 
 func (*LocalSyncRoute) requiresLocalHandler() {}
 
+func (r *LocalSyncRoute) query(
+	ctx context.Context,
+	call localQueryCall,
+) (localQueryResult, error) {
+	if ctx == nil || call.invoke == nil {
+		return localQueryResult{}, fmt.Errorf("%w: local sync query", ErrInvalidMessage)
+	}
+	result, err := r.bus.DispatchResult[localQueryResult](ctx, call)
+	if ok, invocationErr := unwrapLocalQueryInvocationError(err); ok {
+		return result, invocationErr
+	}
+	return result, err
+}
+
+func (*LocalSyncRoute) requiresLocalQueryRoute() {}
+
 // LocalAsyncConfig bounds local asynchronous admission and execution.
 type LocalAsyncConfig struct {
 	Capacity int
 	Workers  int
-	// DetachExecution is retained for source compatibility. Accepted jobs
-	// always detach execution from the caller's cancellation and deadline.
+	// DetachExecution is retained for source compatibility. Accepted one-way
+	// jobs always detach execution from the caller's cancellation and deadline.
+	// Query calls always retain the caller context for execution and waiting.
 	//
 	// Deprecated: caller context controls admission only.
 	DetachExecution bool
@@ -82,6 +139,7 @@ func NewLocalAsyncRoute(name string, config LocalAsyncConfig) (*LocalAsyncRoute,
 	}
 	bus := gobus.New()
 	bus.Register[localCall](localCallExecutor{})
+	bus.RegisterResult[localQueryCall, localQueryResult](localQueryCallExecutor{})
 	runtime, err := gobusasync.New(bus, gobusasync.QueueConfig{
 		Capacity: config.Capacity,
 		Workers:  config.Workers,
@@ -119,6 +177,61 @@ func (r *LocalAsyncRoute) Deliver(ctx context.Context, delivery Delivery) (Recei
 }
 
 func (*LocalAsyncRoute) requiresLocalHandler() {}
+
+func (r *LocalAsyncRoute) query(
+	ctx context.Context,
+	call localQueryCall,
+) (localQueryResult, error) {
+	if ctx == nil || call.invoke == nil {
+		return localQueryResult{}, fmt.Errorf("%w: local async query", ErrInvalidMessage)
+	}
+	r.runMu.Lock()
+	closed := r.closed
+	running := r.running && !r.draining && !closed
+	r.runMu.Unlock()
+	if closed {
+		return localQueryResult{}, ErrRuntimeClosed
+	}
+	if !running {
+		return localQueryResult{}, ErrRuntimeNotRunning
+	}
+
+	result, err := r.runtime.SubmitResult[localQueryResult](ctx, call)
+	if err != nil {
+		return localQueryResult{}, normalizeAsyncQueryError(err)
+	}
+	select {
+	case <-ctx.Done():
+		return localQueryResult{}, ctx.Err()
+	case envelope, ok := <-result:
+		if err := ctx.Err(); err != nil {
+			return localQueryResult{}, err
+		}
+		if !ok {
+			return localQueryResult{}, ErrQueryResultMissing
+		}
+		if envelope.Error != nil {
+			if ok, handlerErr := unwrapLocalQueryInvocationError(envelope.Error); ok {
+				return localQueryResult{}, handlerErr
+			}
+			return localQueryResult{}, normalizeAsyncQueryError(envelope.Error)
+		}
+		return envelope.Result, nil
+	}
+}
+
+func normalizeAsyncQueryError(err error) error {
+	switch {
+	case errors.Is(err, gobusasync.ErrRuntimeNotStarted):
+		return ErrRuntimeNotRunning
+	case errors.Is(err, gobusasync.ErrRuntimeClosed), errors.Is(err, gobusasync.ErrRuntimeShutdown):
+		return ErrRuntimeClosed
+	default:
+		return err
+	}
+}
+
+func (*LocalAsyncRoute) requiresLocalQueryRoute() {}
 
 // ManagedService exposes this route to Builder runtime aggregation.
 func (r *LocalAsyncRoute) ManagedService() (string, Service) { return r.name, r }

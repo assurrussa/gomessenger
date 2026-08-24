@@ -68,6 +68,9 @@ func (p *Producer) Deliver(
 		return messenger.Receipt{}, errors.New("messenger/outbox: nil delivery")
 	}
 	metadata := delivery.Metadata()
+	if metadata.Kind != messenger.KindCommand && metadata.Kind != messenger.KindEvent {
+		return messenger.Receipt{}, fmt.Errorf("%w: outbox only supports command/event delivery", messenger.ErrInvalidMessage)
+	}
 	envelope, err := delivery.MarshalEnvelope()
 	if err != nil {
 		return messenger.Receipt{}, err

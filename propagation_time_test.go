@@ -14,7 +14,7 @@ type fixedHeaderPropagator struct{}
 const testTenantValue = "test"
 
 func (fixedHeaderPropagator) Inject(_ context.Context, carrier map[string]string) {
-	carrier["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	carrier["traceparent"] = testTraceParent
 	carrier["tracestate"] = "vendor=value"
 }
 

@@ -9,8 +9,9 @@ outbox jobs, and webhook contracts continue unchanged.
 
 ## From GoBus only
 
-Keep GoBus for process-local work that may be lost when the process stops. Introduce GoMessenger when the message needs
-a stable name/schema, persistence, broker delivery, cross-service consumption, or durable retry/DLQ behavior.
+Keep GoBus for low-level process-local work that does not need the shared facade. Introduce GoMessenger when code wants
+one typed command/query/event API, or when a one-way message needs a stable name/schema, persistence, broker delivery,
+cross-service consumption, or durable retry/DLQ behavior.
 
 1. Define a descriptor with an explicit name and schema version.
 2. Register the existing handler through `Builder.HandleCommand` or `Builder.Subscribe`.
@@ -19,6 +20,19 @@ a stable name/schema, persistence, broker delivery, cross-service consumption, o
 5. Add the runtime to the host's readiness, drain, and shutdown lifecycle before enabling asynchronous admission.
 
 Do not derive a wire name from a Go type. Do not treat a local async receipt as a durable receipt.
+
+## From GoBus result dispatch
+
+Existing GoBus `RegisterResult`/`DispatchResult` code can remain unchanged. To adopt the GoMessenger CQRS facade:
+
+1. declare `MustQuery[Q,R]` with an explicit request name, version, and request codec;
+2. register the existing result handler with `HandleQuery` or `HandleQueryFunc`;
+3. select `NewLocalSyncRoute`, or a running bounded `LocalAsyncRoute` for worker isolation;
+4. inject `BindQuerier` instead of the full messenger.
+
+The migration remains process-local. Result `R` has no codec and never enters the manifest or wire envelope. Do not
+route the query through Outbox, NATS, Inbox, receipt, retry, or DLQ infrastructure. A future distributed read requires
+the separate result-envelope and failure contract in `docs/decisions/0003-distributed-queries.md`.
 
 ## Producer migration to transactional outbox
 
@@ -51,9 +65,9 @@ Do not mechanically replace the existing `gowebhooks` fan-out pipeline. Its reci
 event creation time. Resolving subscriptions in a later generic broker consumer would change delivery semantics when a
 subscription is edited between those moments.
 
-A safe first adoption is to emit a separate integration event after the existing snapshot is staged. Migrate the fan-out
-itself only if the new envelope carries the immutable recipient snapshot and compatibility tests prove the same ordering,
-retry, and tombstone behavior.
+A safe first adoption is the selected additive `content.article.published` audit event after the existing snapshot is
+staged. It does not replace webhooks. Migrate the fan-out itself only if the new envelope carries the immutable recipient
+snapshot and compatibility tests prove the same ordering, retry, and tombstone behavior.
 
 ## Existing media-resizer users
 
