@@ -20,12 +20,17 @@
 - Hardened transport lifecycle around pre-start drain, active direct transactions, and fresh bounded abort cleanup;
   serialized transaction admission honors caller cancellation, while shutdown waits for admitted finalization until its
   deadline and then force-closes the client.
-- Hardened consumer pause/drain boundaries: delayed retry snapshots pause state before pausing service topics and resumes
-  only topics newly paused by that wait; a second drain check after `PollRecords` leaves a concurrently fetched offset
-  unprocessed and uncommitted. Unit regressions and a two-second Kafka retry followed by a barrier cover both paths.
+- Removed worker-wide Kafka retry head-of-line blocking with `BlockRebalanceOnPoll`, a fast record preflight, exact
+  leader-epoch/offset rewind, and a bounded per-worker deadline heap that retains no payload. An early retry pauses only
+  its concrete topic-partition, preserves foreign pauses, fails the worker closed if the rewind is not confirmed, and
+  is fetched again after the scheduler-owned pause resumes. Handler, Inbox, and Kafka transaction work runs after
+  `AllowRebalance`; a second drain check still leaves a concurrently fetched offset unprocessed and uncommitted. Unit
+  regressions cover multiple deadlines, other-partition progress, offset safety, resume/refetch, foreign pauses,
+  cancellation, drain, rebalance release, and fail-closed rewind; the live Kafka scenario uses two partitions and one
+  worker to prove a barrier completes before a two-second retry deadline and exactly one second attempt follows.
 - Wired `TransportConfig.Logger` to adapter-owned startup/readiness, producer and consumer transaction, abort/fencing,
-  and topology events. Structured attributes remain infrastructure-only and exclude record keys, payloads, and headers;
-  franz-go client logging remains a separate explicit connection option.
+  topology, and retry partition deferral events. Structured attributes remain infrastructure-only and exclude record
+  keys, payloads, and headers; franz-go client logging remains a separate explicit connection option.
 - Closed follow-up review gaps by cloning retained broker input, replacing raw franz-go options with sealed
   connection-only wrappers, validating topology before starting consumer workers, and deriving rebalance timeout from
   bounded broker finalization instead of handler duration.

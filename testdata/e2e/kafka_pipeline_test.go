@@ -26,6 +26,48 @@ type kafkaPipelinePayload struct {
 
 const permanentFailureKind = "permanent"
 
+type kafkaDeferralEvent struct {
+	Topic     string
+	Partition int32
+	NotBefore time.Time
+	Attrs     map[string]any
+}
+
+type kafkaDeferralLogger struct {
+	events chan kafkaDeferralEvent
+}
+
+func newKafkaDeferralLogger() *kafkaDeferralLogger {
+	return &kafkaDeferralLogger{events: make(chan kafkaDeferralEvent, 8)}
+}
+
+func (logger *kafkaDeferralLogger) Log(
+	_ context.Context,
+	level messenger.LogLevel,
+	message string,
+	attrs ...messenger.LogAttr,
+) {
+	if level != messenger.LogDebug || message != "Kafka retry partition deferred" {
+		return
+	}
+	event := kafkaDeferralEvent{Attrs: make(map[string]any, len(attrs))}
+	for _, attr := range attrs {
+		event.Attrs[attr.Key] = attr.Value
+		switch attr.Key {
+		case "topic":
+			event.Topic, _ = attr.Value.(string)
+		case "partition":
+			event.Partition, _ = attr.Value.(int32)
+		case "not_before":
+			event.NotBefore, _ = attr.Value.(time.Time)
+		}
+	}
+	select {
+	case logger.events <- event:
+	default:
+	}
+}
+
 //nolint:gocognit,gocyclo // The ordered end-to-end protocol assertions are intentionally kept in one scenario.
 func TestKafkaPipeline(t *testing.T) {
 	brokersValue := os.Getenv("GOMESSENGER_KAFKA_BROKERS")
@@ -54,9 +96,10 @@ func TestKafkaPipeline(t *testing.T) {
 		t.Fatalf("DLQ topic: %v", err)
 	}
 
+	deferralLogger := newKafkaDeferralLogger()
 	transport, err := kafkaadapter.NewTransport(kafkaadapter.TransportConfig{
 		Name: "kafka-integration", Brokers: brokers, ClientID: "gomessenger-kafka-integration",
-		InstanceID: instanceID, OperationTimeout: 30 * time.Second,
+		InstanceID: instanceID, OperationTimeout: 30 * time.Second, Logger: deferralLogger,
 	})
 	if err != nil {
 		t.Fatalf("create Kafka transport: %v", err)
@@ -169,9 +212,37 @@ func TestKafkaPipeline(t *testing.T) {
 	if got := attemptCount(&attemptsMu, attempts, "retry"); got != 2 {
 		t.Fatalf("retry handler attempts = %d, want 2", got)
 	}
+	delayedKey := kafkaKeyForPartition(t, sourceTopic, 0, 2)
+	barrierKey := kafkaKeyForPartition(t, sourceTopic, 1, 2)
 	delayedStarted := time.Now()
-	if _, err := publisher.Publish(t.Context(), kafkaPipelinePayload{Case: "delayed-retry"}); err != nil {
+	if _, err := publisher.PublishMessage(t.Context(), messenger.Outgoing[kafkaPipelinePayload]{
+		Payload:  kafkaPipelinePayload{Case: "delayed-retry"},
+		Metadata: messenger.OutgoingMetadata{Key: delayedKey},
+	}); err != nil {
 		t.Fatalf("publish delayed retry: %v", err)
+	}
+	deferral := waitKafkaDeferral(t, deferralLogger.events, retryTopic, 0, delayedStarted.Add(1500*time.Millisecond))
+	if got := attemptCount(&attemptsMu, attempts, "delayed-retry"); got != 1 {
+		t.Fatalf("delayed retry attempts at deferral = %d, want 1", got)
+	}
+	for _, forbidden := range []string{"key", "payload", "headers", "message_id"} {
+		if _, found := deferral.Attrs[forbidden]; found {
+			t.Fatalf("deferral event contains forbidden attribute %q", forbidden)
+		}
+	}
+	if _, err := publisher.PublishMessage(t.Context(), messenger.Outgoing[kafkaPipelinePayload]{
+		Payload:  kafkaPipelinePayload{Case: "delayed-barrier"},
+		Metadata: messenger.OutgoingMetadata{Key: barrierKey},
+	}); err != nil {
+		t.Fatalf("publish delayed retry barrier: %v", err)
+	}
+	barrierTimeout := time.Until(deferral.NotBefore.Add(-200 * time.Millisecond))
+	if barrierTimeout <= 0 {
+		t.Fatalf("retry deadline passed before barrier assertion: not-before=%s", deferral.NotBefore)
+	}
+	waitHandledWithin(t, handled, "delayed-barrier", barrierTimeout)
+	if got := attemptCount(&attemptsMu, attempts, "delayed-retry"); got != 1 {
+		t.Fatalf("delayed retry attempts before deadline = %d, want 1", got)
 	}
 	waitHandled(t, handled, "delayed-retry")
 	if elapsed := time.Since(delayedStarted); elapsed < 1800*time.Millisecond {
@@ -180,10 +251,6 @@ func TestKafkaPipeline(t *testing.T) {
 	if got := attemptCount(&attemptsMu, attempts, "delayed-retry"); got != 2 {
 		t.Fatalf("delayed retry handler attempts = %d, want 2", got)
 	}
-	if _, err := publisher.Publish(t.Context(), kafkaPipelinePayload{Case: "delayed-barrier"}); err != nil {
-		t.Fatalf("publish delayed retry barrier: %v", err)
-	}
-	waitHandled(t, handled, "delayed-barrier")
 
 	relay, err := outboxadapter.NewRelayJob(route, outboxadapter.RelayJobConfig{})
 	if err != nil {
@@ -207,7 +274,10 @@ func TestKafkaPipeline(t *testing.T) {
 
 	dlqClient, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{dlqTopic: {0: kgo.NewOffset().AtStart()}}),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{dlqTopic: {
+			0: kgo.NewOffset().AtStart(),
+			1: kgo.NewOffset().AtStart(),
+		}}),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 	)
 	if err != nil {
@@ -261,7 +331,7 @@ func TestKafkaPipeline(t *testing.T) {
 
 func kafkaIntegrationTopology(source, consumerID, retry, replay, dlq string) kafkaadapter.Topology {
 	base := kafkaadapter.TopicSpec{
-		Partitions: 1, ReplicationFactor: 1, MinInSyncReplicas: 1,
+		Partitions: 2, ReplicationFactor: 1, MinInSyncReplicas: 1,
 		RetentionMillis: 86_400_000, RetentionBytes: -1,
 		MaxMessageBytes: kafkaadapter.DefaultMaxSourceMessageBytes,
 	}
@@ -356,6 +426,53 @@ func waitHandled(t *testing.T, handled <-chan string, expected string) {
 	case <-time.After(15 * time.Second):
 		t.Fatalf("timed out waiting for handled case %q", expected)
 	}
+}
+
+func waitHandledWithin(t *testing.T, handled <-chan string, expected string, timeout time.Duration) {
+	t.Helper()
+	select {
+	case got := <-handled:
+		if got != expected {
+			t.Fatalf("handled case = %q, want %q", got, expected)
+		}
+	case <-time.After(timeout):
+		t.Fatalf("timed out after %s waiting for handled case %q", timeout, expected)
+	}
+}
+
+func waitKafkaDeferral(
+	t *testing.T,
+	events <-chan kafkaDeferralEvent,
+	topic string,
+	partition int32,
+	minimumDeadline time.Time,
+) kafkaDeferralEvent {
+	t.Helper()
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Topic == topic && event.Partition == partition && !event.NotBefore.Before(minimumDeadline) {
+				return event
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for deferral of %s[%d]", topic, partition)
+		}
+	}
+}
+
+func kafkaKeyForPartition(t *testing.T, topic string, partition, partitionCount int) string {
+	t.Helper()
+	partitioner := kgo.StickyKeyPartitioner(nil).ForTopic(topic)
+	for candidate := range 10_000 {
+		key := fmt.Sprintf("partition-%d-key-%d", partition, candidate)
+		if got := partitioner.Partition(&kgo.Record{Topic: topic, Key: []byte(key)}, partitionCount); got == partition {
+			return key
+		}
+	}
+	t.Fatalf("could not find key for Kafka partition %d", partition)
+	return ""
 }
 
 func attemptCount(mu *sync.Mutex, attempts map[string]int, key string) int {

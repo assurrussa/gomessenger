@@ -309,9 +309,9 @@ builder.UseMiddleware(func(
 Logging is disabled by default. `AdaptSlog(nil)` is a safe no-op adapter; direct `WithLogger(nil)` is a configuration
 error. Observer registrations are additive. A panic in one observer is logged and isolated from the remaining
 observers. Kafka `TransportConfig.Logger` reports adapter-owned startup/readiness, producer and consumer transaction,
-abort/fencing, and topology failures or applied changes. Core logging contains infrastructure state only and never logs
-record keys, payloads, message bodies, or arbitrary headers. `WithClientLogger` is a separate explicit opt-in to
-franz-go's own client logs.
+abort/fencing, topology failures or applied changes, and retry partition deferrals. Core logging contains
+infrastructure state only and never logs record keys, payloads, message bodies, or arbitrary headers.
+`WithClientLogger` is a separate explicit opt-in to franz-go's own client logs.
 
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.

@@ -213,9 +213,12 @@ fresh bounded broker context so commit or abort finalization is not interrupted 
 
 On handler success, the consumed offset commits in a Kafka transaction. On retry, the same canonical bytes and key are
 produced to a consumer retry tier atomically with that offset. The exact due time is a reserved control header; the tier
-is only a scheduling bucket. Retry topics have unlimited time and size retention. A worker polls while waiting so group
-liveness is maintained. `MaxAttempts`, Inbox savepoint behavior, permanent outcomes, and attempt generations retain the
-same handler-invocation meaning as the JetStream path.
+is only a scheduling bucket. Retry topics have unlimited time and size retention. An early retry record pauses and
+rewinds only its concrete topic-partition to the exact leader epoch and offset; an unconfirmed rewind fails the worker
+closed. A bounded deadline scheduler retains no record payload, polling continues for other partitions, and only
+scheduler-owned pauses resume at their due time so the record is fetched again. Rebalance blocking covers only the
+preflight and rewind, never handler, Inbox, or Kafka transaction execution. `MaxAttempts`, Inbox savepoint behavior,
+permanent outcomes, and attempt generations retain the same handler-invocation meaning as the JetStream path.
 
 Permanent and exhausted records are handed to the consumer-specific Kafka DLQ atomically with the consumed offset. DLQ
 v1 is bounded and records source position, original key/bytes, message identity, attempt/generation, failure class,
@@ -224,9 +227,8 @@ Confirmed replay validates source descriptor, key, canonical bytes, consumer tar
 generation, then transactionally publishes to the protected replay topic. It does not delete the DLQ record or bypass a
 completed Inbox identity.
 
-Kafka key/partition ordering holds while a record remains on its source topic. Moving a failed record to a retry topic
-allows later source records to overtake it. The adapter promises no cross-topic strict ordering and no exactly-once
-external effects.
+Kafka ordering holds within a concrete topic-partition. Moving a failed record to a retry topic allows later source
+records to overtake it. The adapter promises no cross-topic strict ordering and no exactly-once external effects.
 
 ## Logging and observations
 
@@ -235,10 +237,10 @@ a no-op, while direct nil configuration is rejected. Registered observers form a
 is recovered, logged, and cannot stop later observers.
 
 Kafka `TransportConfig.Logger` receives adapter-owned transport startup/readiness, producer and consumer transaction,
-abort/fencing, and topology failure/change events. These events contain only stable infrastructure attributes such as
-transport, consumer, route, topic, operation, action, counts, and errors. Record keys, payloads, message bodies, and
-headers are excluded. `WithClientLogger` independently enables franz-go's internal client logger and is not part of this
-transport-neutral safety contract.
+abort/fencing, topology failure/change, and retry partition deferral events. These events contain only stable
+infrastructure attributes such as transport, consumer, route, topic, partition, deadline, operation, action, counts,
+and errors. Record keys, payloads, message bodies, and headers are excluded. `WithClientLogger` independently enables
+franz-go's internal client logger and is not part of this transport-neutral safety contract.
 
 Observations may contain message, consumer and service identity, route, handler, duration, attempt, duplicate state,
 and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler. Message

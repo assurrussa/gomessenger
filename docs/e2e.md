@@ -63,9 +63,12 @@ make test-kafka
 ```
 
 The harness starts official single-node Kafka 4.1.2 and 4.3.1 images one at a time with separate internal/external
-listeners and one-partition transaction/group metadata topics. It proves declarative topic convergence, transactional
-direct publish, retry hand-off, Inbox attempt accounting, Outbox relay and duplicate suppression, transactional DLQ,
-protected replay, static worker identity, read-committed visibility, and graceful runtime shutdown.
+listeners and one-partition transaction/group metadata topics. Service topics use two partitions with one consumer
+worker: after observing the structured retry-deferral event, the test proves that a barrier from the other partition is
+handled before the two-second retry deadline and that exactly one second handler attempt follows. The same scenario
+also proves declarative topic convergence, transactional direct publish, retry hand-off, Inbox attempt accounting,
+Outbox relay and duplicate suppression, transactional DLQ, protected replay, static worker identity, read-committed
+visibility, and graceful runtime shutdown.
 
-This gate is intentionally local rather than a hosted-CI Kafka service. It does not prove multi-broker failover,
-capacity, production credentials, deployment, or a live operational smoke.
+The same target runs locally and in independent hosted matrix jobs for both supported Kafka versions. It does not prove
+multi-broker failover, capacity, production credentials, deployment, or a live operational smoke.

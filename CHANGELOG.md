@@ -38,7 +38,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- delayed Kafka retry waiting no longer polls paused topics, preserving records that franz-go buffered before the pause;
+- early Kafka retry records now pause, rewind, and defer only their own topic-partition, preserving exact offsets and
+  allowing the same worker to process other partitions until the retry deadline;
 - the aggregate GitHub Actions `Full gate` now requires PostgreSQL and both supported Kafka integration jobs.
 
 No release has been published yet.

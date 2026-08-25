@@ -22,8 +22,8 @@ pass the published clean-consumer gate.
    Outbox-to-JetStream-to-Inbox E2E under the race detector.
 3. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
    `make test-integration` separately reruns embedded JetStream/SQLite adapters and the durable pipeline.
-4. Run `make test-kafka` locally. It runs the transactional pipeline against official Kafka 4.1.2 and 4.3.1 images and
-   is deliberately not a hosted-CI broker service.
+4. Run `make test-kafka` locally. It runs the transactional pipeline against official Kafka 4.1.2 and 4.3.1 images;
+   independent hosted matrix jobs run the same target for both versions.
 5. Run `make bench-all` for dispatch, envelope, registry, or admission-path changes. The benchmark workflow records ten
    base/head samples, uploads raw data, and adds a pinned `benchstat` report without enforcing a machine-dependent
    performance threshold.
