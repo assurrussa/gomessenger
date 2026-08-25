@@ -281,6 +281,7 @@ func (t *Transport) workerOptions(groupID, instanceID, transactionID string, top
 		kgo.InstanceID(instanceID),
 		kgo.ConsumeTopics(topics...),
 		kgo.DisableAutoCommit(),
+		kgo.BlockRebalanceOnPoll(),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		kgo.Balancers(kgo.CooperativeStickyBalancer()),
 	)

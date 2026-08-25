@@ -3,8 +3,6 @@ package kafka
 import (
 	"context"
 	"errors"
-	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,15 +20,21 @@ type consumerGroupMetadataRecorder struct {
 }
 
 type consumerSessionRecorder struct {
-	mu          sync.Mutex
-	paused      map[string]struct{}
-	pollStarted chan struct{}
-	releasePoll chan struct{}
-	pollOnce    sync.Once
-	fetches     kgo.Fetches
-	pollCalls   atomic.Int32
-	beginCalls  atomic.Int32
-	endCalls    atomic.Int32
+	mu                  sync.Mutex
+	pausedPartitions    map[string]map[int32]struct{}
+	committed           map[string]map[int32]kgo.EpochOffset
+	uncommitted         map[string]map[int32]kgo.EpochOffset
+	resumedPartitions   []map[string][]int32
+	ignoreSetOffsets    bool
+	poll                func(context.Context, int) kgo.Fetches
+	pollStarted         chan struct{}
+	releasePoll         chan struct{}
+	pollOnce            sync.Once
+	fetches             kgo.Fetches
+	pollCalls           atomic.Int32
+	allowRebalanceCalls atomic.Int32
+	beginCalls          atomic.Int32
+	endCalls            atomic.Int32
 }
 
 type forceCancellationSession struct {
@@ -42,24 +46,91 @@ func (recorder *consumerSessionRecorder) GroupMetadata() (string, int32) {
 	return testWorkerMemberID, 0
 }
 
-func (recorder *consumerSessionRecorder) PauseFetchTopics(topics ...string) []string {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	if recorder.paused == nil {
-		recorder.paused = make(map[string]struct{})
-	}
-	for _, topic := range topics {
-		recorder.paused[topic] = struct{}{}
-	}
-	return sortedTopics(recorder.paused)
+func (recorder *consumerSessionRecorder) AllowRebalance() {
+	recorder.allowRebalanceCalls.Add(1)
 }
 
-func (recorder *consumerSessionRecorder) ResumeFetchTopics(topics ...string) {
+func (recorder *consumerSessionRecorder) PauseFetchPartitions(
+	topicPartitions map[string][]int32,
+) map[string][]int32 {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	for _, topic := range topics {
-		delete(recorder.paused, topic)
+	if recorder.pausedPartitions == nil {
+		recorder.pausedPartitions = make(map[string]map[int32]struct{})
 	}
+	for topic, partitions := range topicPartitions {
+		if recorder.pausedPartitions[topic] == nil {
+			recorder.pausedPartitions[topic] = make(map[int32]struct{})
+		}
+		for _, partition := range partitions {
+			recorder.pausedPartitions[topic][partition] = struct{}{}
+		}
+	}
+	return clonePausedPartitions(recorder.pausedPartitions)
+}
+
+func (recorder *consumerSessionRecorder) ResumeFetchPartitions(topicPartitions map[string][]int32) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.resumedPartitions = append(recorder.resumedPartitions, clonePartitionLists(topicPartitions))
+	for topic, partitions := range topicPartitions {
+		for _, partition := range partitions {
+			delete(recorder.pausedPartitions[topic], partition)
+		}
+		if len(recorder.pausedPartitions[topic]) == 0 {
+			delete(recorder.pausedPartitions, topic)
+		}
+	}
+}
+
+func (recorder *consumerSessionRecorder) SetOffsets(offsets map[string]map[int32]kgo.EpochOffset) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.ignoreSetOffsets {
+		return
+	}
+	if recorder.uncommitted == nil {
+		recorder.uncommitted = make(map[string]map[int32]kgo.EpochOffset)
+	}
+	if recorder.committed == nil {
+		recorder.committed = make(map[string]map[int32]kgo.EpochOffset)
+	}
+	for topic, partitions := range offsets {
+		if recorder.uncommitted[topic] == nil {
+			recorder.uncommitted[topic] = make(map[int32]kgo.EpochOffset)
+		}
+		if recorder.committed[topic] == nil {
+			recorder.committed[topic] = make(map[int32]kgo.EpochOffset)
+		}
+		for partition, offset := range partitions {
+			recorder.uncommitted[topic][partition] = offset
+			recorder.committed[topic][partition] = offset
+		}
+	}
+}
+
+func (recorder *consumerSessionRecorder) UncommittedOffsets() map[string]map[int32]kgo.EpochOffset {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	result := cloneEpochOffsets(recorder.uncommitted)
+	for topic, partitions := range result {
+		for partition, offset := range partitions {
+			committed, committedFound := recorder.committed[topic][partition]
+			if committedFound && offset == committed {
+				delete(partitions, partition)
+			}
+		}
+		if len(partitions) == 0 {
+			delete(result, topic)
+		}
+	}
+	return result
+}
+
+func (recorder *consumerSessionRecorder) CommittedOffsets() map[string]map[int32]kgo.EpochOffset {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return cloneEpochOffsets(recorder.committed)
 }
 
 func (recorder *consumerSessionRecorder) PollRecords(ctx context.Context, _ int) kgo.Fetches {
@@ -74,7 +145,12 @@ func (recorder *consumerSessionRecorder) PollRecords(ctx context.Context, _ int)
 			return kgo.NewErrFetch(ctx.Err())
 		}
 	}
-	return recorder.fetches
+	fetches := recorder.fetches
+	if recorder.poll != nil {
+		fetches = recorder.poll(ctx, 1)
+	}
+	recorder.recordPolledOffsets(fetches)
+	return fetches
 }
 
 func (recorder *consumerSessionRecorder) Begin() error {
@@ -97,19 +173,51 @@ func (session *forceCancellationSession) End(ctx context.Context, _ kgo.Transact
 	return false, ctx.Err()
 }
 
-func (recorder *consumerSessionRecorder) pausedTopics() []string {
+func (recorder *consumerSessionRecorder) recordPolledOffsets(fetches kgo.Fetches) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	return sortedTopics(recorder.paused)
+	if recorder.uncommitted == nil {
+		recorder.uncommitted = make(map[string]map[int32]kgo.EpochOffset)
+	}
+	iterator := fetches.RecordIter()
+	for !iterator.Done() {
+		record := iterator.Next()
+		if recorder.uncommitted[record.Topic] == nil {
+			recorder.uncommitted[record.Topic] = make(map[int32]kgo.EpochOffset)
+		}
+		recorder.uncommitted[record.Topic][record.Partition] = kgo.EpochOffset{
+			Epoch: record.LeaderEpoch, Offset: record.Offset + 1,
+		}
+	}
 }
 
-func sortedTopics(topics map[string]struct{}) []string {
-	result := make([]string, 0, len(topics))
-	for topic := range topics {
-		result = append(result, topic)
+func clonePausedPartitions(source map[string]map[int32]struct{}) map[string][]int32 {
+	cloned := make(map[string][]int32, len(source))
+	for topic, partitions := range source {
+		for partition := range partitions {
+			cloned[topic] = append(cloned[topic], partition)
+		}
 	}
-	sort.Strings(result)
-	return result
+	return cloned
+}
+
+func clonePartitionLists(source map[string][]int32) map[string][]int32 {
+	cloned := make(map[string][]int32, len(source))
+	for topic, partitions := range source {
+		cloned[topic] = append([]int32(nil), partitions...)
+	}
+	return cloned
+}
+
+func cloneEpochOffsets(source map[string]map[int32]kgo.EpochOffset) map[string]map[int32]kgo.EpochOffset {
+	cloned := make(map[string]map[int32]kgo.EpochOffset, len(source))
+	for topic, partitions := range source {
+		cloned[topic] = make(map[int32]kgo.EpochOffset, len(partitions))
+		for partition, offset := range partitions {
+			cloned[topic][partition] = offset
+		}
+	}
+	return cloned
 }
 
 func (recorder consumerGroupMetadataRecorder) GroupMetadata() (string, int32) {
@@ -217,33 +325,27 @@ func TestConsumerRebalanceTimeoutTracksBrokerFinalization(t *testing.T) {
 	}
 }
 
-func TestConsumerDelayedRetryDoesNotPollBufferedRecordsAndRestoresPauseState(t *testing.T) {
-	due := time.Now().UTC().Add(20 * time.Millisecond)
+func TestConsumerPollTimeoutAllowsRebalance(t *testing.T) {
 	session := &consumerSessionRecorder{
-		paused: map[string]struct{}{"external": {}, testSourceTopic: {}},
-		fetches: kgo.Fetches{{Topics: []kgo.FetchTopic{{
-			Topic: testSourceTopic,
-			Partitions: []kgo.FetchPartition{{
-				Partition: 0,
-				Records:   []*kgo.Record{{Topic: testSourceTopic, Partition: 0, Offset: 12}},
-			}},
-		}}}},
+		poll: func(ctx context.Context, _ int) kgo.Fetches {
+			<-ctx.Done()
+			return kgo.NewErrFetch(ctx.Err())
+		},
 	}
 	consumer := &Consumer{
-		topics: []string{testSourceTopic, testSourceTopic + ".retry"},
+		config: HandlerConfig{ConsumerID: testConsumerID},
 		drain:  make(chan struct{}),
-		clock:  time.Now,
 	}
 
-	if err := consumer.waitUntilDue(t.Context(), session, due); err != nil {
-		t.Fatalf("waitUntilDue: %v", err)
+	poll, err := consumer.pollWorkerRecord(t.Context(), session, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("pollWorkerRecord timeout: %v", err)
 	}
-	if got := session.pollCalls.Load(); got != 0 {
-		t.Fatalf("PollRecords calls during delayed retry = %d, want 0", got)
+	if poll != (workerPoll{}) {
+		t.Fatalf("pollWorkerRecord timeout = %#v, want empty poll", poll)
 	}
-	want := []string{"external", testSourceTopic}
-	if got := session.pausedTopics(); !slices.Equal(got, want) {
-		t.Fatalf("paused topics after delayed retry = %v, want %v", got, want)
+	if got := session.allowRebalanceCalls.Load(); got != 1 {
+		t.Fatalf("AllowRebalance calls after timeout = %d, want 1", got)
 	}
 }
 
@@ -261,7 +363,7 @@ func TestConsumerDrainAfterPollDoesNotProcessFetchedRecord(t *testing.T) {
 		}}}},
 	}
 	consumer := &Consumer{
-		config: HandlerConfig{ConsumerID: "worker"},
+		config: HandlerConfig{ConsumerID: testConsumerID},
 		state:  consumerRunning,
 		drain:  make(chan struct{}),
 	}
@@ -269,7 +371,8 @@ func TestConsumerDrainAfterPollDoesNotProcessFetchedRecord(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- consumer.runWorkerSession(t.Context(), session, nil,
-			func(context.Context, transactionalConsumerSession, *kgo.Record) error {
+			func(*kgo.Record) preparedRecord { return preparedRecord{} },
+			func(context.Context, transactionalConsumerSession, *kgo.Record, preparedRecord) error {
 				processed.Add(1)
 				return nil
 			})
@@ -297,13 +400,16 @@ func TestConsumerDrainAfterPollDoesNotProcessFetchedRecord(t *testing.T) {
 		t.Fatalf("transaction calls after drain = begin:%d end:%d, want 0",
 			session.beginCalls.Load(), session.endCalls.Load())
 	}
+	if got := session.allowRebalanceCalls.Load(); got != 1 {
+		t.Fatalf("AllowRebalance calls after drain = %d, want 1", got)
+	}
 }
 
 func TestConsumerShutdownForceCancelsTransactionFinalization(t *testing.T) {
 	session := &forceCancellationSession{endStarted: make(chan struct{})}
 	consumer := &Consumer{
 		transport:   &Transport{config: TransportConfig{OperationTimeout: time.Minute}},
-		config:      HandlerConfig{ConsumerID: "worker", Concurrency: 1},
+		config:      HandlerConfig{ConsumerID: testConsumerID, Concurrency: 1},
 		sourceTopic: testSourceTopic,
 		state:       consumerNew,
 		drain:       make(chan struct{}),

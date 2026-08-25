@@ -296,8 +296,8 @@ func TestConnectionOptionsCannotReplaceWorkerPolicy(t *testing.T) {
 	if got, ok := worker.OptValue(kgo.ConsumeRegex).(bool); !ok || got {
 		t.Fatalf("ConsumeRegex = %v, want false", got)
 	}
-	if got, ok := worker.OptValue(kgo.BlockRebalanceOnPoll).(bool); !ok || got {
-		t.Fatalf("BlockRebalanceOnPoll = %v, want false", got)
+	if got, ok := worker.OptValue(kgo.BlockRebalanceOnPoll).(bool); !ok || !got {
+		t.Fatalf("BlockRebalanceOnPoll = %v, want true", got)
 	}
 	gotTopics, ok := worker.OptValue(kgo.ConsumeTopics).(map[string]*regexp.Regexp)
 	if !ok || len(gotTopics) != 1 || gotTopics[topics[0]] != nil {

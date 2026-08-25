@@ -381,17 +381,47 @@ func (c *Consumer) runWorker(ctx context.Context, index int, ready func()) error
 	); err != nil {
 		return fmt.Errorf("messenger/kafka: worker %d startup: %w", index, err)
 	}
-	return c.runWorkerSession(ctx, franzConsumerSession{session: session}, ready, c.processRecord)
+	return c.runWorkerSession(
+		ctx,
+		franzConsumerSession{session: session},
+		ready,
+		c.prepareRecord,
+		c.processPreparedRecord,
+	)
 }
 
-type consumerRecordProcessor func(context.Context, transactionalConsumerSession, *kgo.Record) error
+type preparedRecord struct {
+	control     controlMetadata
+	decoded     decodedMessage
+	observedAt  time.Time
+	retryAt     time.Time
+	failureKind string
+	failure     error
+	attempt     uint64
+	messageID   string
+}
+
+type consumerRecordPreflight func(*kgo.Record) preparedRecord
+
+type consumerRecordProcessor func(
+	context.Context,
+	transactionalConsumerSession,
+	*kgo.Record,
+	preparedRecord,
+) error
 
 func (c *Consumer) runWorkerSession(
 	ctx context.Context,
 	session transactionalConsumerSession,
 	ready func(),
+	prepare consumerRecordPreflight,
 	process consumerRecordProcessor,
 ) error {
+	scheduler := newRetryPartitionScheduler()
+	clock := c.clock
+	if clock == nil {
+		clock = time.Now
+	}
 	markReady := func() {
 		if ready == nil || ctx.Err() != nil || !consumerGroupJoined(session) {
 			return
@@ -408,32 +438,91 @@ func (c *Consumer) runWorkerSession(
 			return nil
 		default:
 		}
-		pollContext, cancel := context.WithTimeout(ctx, time.Second)
-		fetches := session.PollRecords(pollContext, 1)
-		pollErr := pollContext.Err()
-		cancel()
-		if err := fetchError(fetches, pollErr); err != nil {
-			return fmt.Errorf("messenger/kafka: consume %s: %w", c.config.ConsumerID, err)
+		now := clock().UTC()
+		if due := scheduler.releaseDue(now); len(due) > 0 {
+			session.ResumeFetchPartitions(due)
 		}
-		if c.drainRequested() {
+		pollTimeout := scheduler.pollTimeout(now, time.Second)
+		if pollTimeout <= 0 {
+			continue
+		}
+		poll, err := c.pollWorkerRecord(ctx, session, pollTimeout)
+		if err != nil {
+			return err
+		}
+		if poll.drained {
 			return nil
 		}
 		markReady()
-		iterator := fetches.RecordIter()
-		if iterator.Done() {
-			if pollErr != nil && !errors.Is(pollErr, context.DeadlineExceeded) && ctx.Err() != nil {
-				return ctx.Err()
+		if poll.record == nil {
+			continue
+		}
+		record := poll.record
+		prepared := prepare(record)
+		if !prepared.retryAt.IsZero() {
+			if err := c.deferRetryPartition(ctx, session, scheduler, record, prepared.retryAt); err != nil {
+				return err
 			}
 			continue
 		}
-		record := iterator.Next()
-		if err := process(ctx, session, record); err != nil {
-			if errors.Is(err, errTransactionNotCommitted) {
-				continue
-			}
-			return err
+		session.AllowRebalance()
+		err = process(ctx, session, record, prepared)
+		if err == nil || errors.Is(err, errTransactionNotCommitted) {
+			continue
 		}
+		return err
 	}
+}
+
+type workerPoll struct {
+	record  *kgo.Record
+	drained bool
+}
+
+func (c *Consumer) pollWorkerRecord(
+	ctx context.Context,
+	session transactionalConsumerSession,
+	timeout time.Duration,
+) (workerPoll, error) {
+	pollContext, cancel := context.WithTimeout(ctx, timeout)
+	fetches := session.PollRecords(pollContext, 1)
+	pollErr := pollContext.Err()
+	cancel()
+	if err := fetchError(fetches, pollErr); err != nil {
+		session.AllowRebalance()
+		return workerPoll{}, fmt.Errorf("messenger/kafka: consume %s: %w", c.config.ConsumerID, err)
+	}
+	if c.drainRequested() {
+		session.AllowRebalance()
+		return workerPoll{drained: true}, nil
+	}
+	iterator := fetches.RecordIter()
+	if !iterator.Done() {
+		return workerPoll{record: iterator.Next()}, nil
+	}
+	session.AllowRebalance()
+	if pollErr != nil && !errors.Is(pollErr, context.DeadlineExceeded) && ctx.Err() != nil {
+		return workerPoll{}, ctx.Err()
+	}
+	return workerPoll{}, nil
+}
+
+func (c *Consumer) deferRetryPartition(
+	ctx context.Context,
+	session transactionalConsumerSession,
+	scheduler *retryPartitionScheduler,
+	record *kgo.Record,
+	deadline time.Time,
+) error {
+	partition, ownsPause, err := pauseAndRewindRetryPartition(session, record)
+	if err != nil {
+		session.AllowRebalance()
+		return err
+	}
+	scheduler.schedule(partition, deadline, ownsPause)
+	session.AllowRebalance()
+	c.logDeferredPartition(ctx, record, deadline)
+	return nil
 }
 
 func (c *Consumer) drainRequested() bool {
@@ -449,14 +538,9 @@ type consumerGroupMetadataReader interface {
 	GroupMetadata() (string, int32)
 }
 
-type fetchTopicController interface {
-	PauseFetchTopics(topics ...string) []string
-	ResumeFetchTopics(topics ...string)
-}
-
 type transactionalConsumerSession interface {
 	consumerGroupMetadataReader
-	fetchTopicController
+	retryPartitionSession
 	PollRecords(ctx context.Context, maxRecords int) kgo.Fetches
 	Begin() error
 	ProduceSync(ctx context.Context, records ...*kgo.Record) kgo.ProduceResults
@@ -471,12 +555,28 @@ func (s franzConsumerSession) GroupMetadata() (string, int32) {
 	return s.session.Client().GroupMetadata()
 }
 
-func (s franzConsumerSession) PauseFetchTopics(topics ...string) []string {
-	return s.session.Client().PauseFetchTopics(topics...)
+func (s franzConsumerSession) AllowRebalance() {
+	s.session.AllowRebalance()
 }
 
-func (s franzConsumerSession) ResumeFetchTopics(topics ...string) {
-	s.session.Client().ResumeFetchTopics(topics...)
+func (s franzConsumerSession) PauseFetchPartitions(topicPartitions map[string][]int32) map[string][]int32 {
+	return s.session.Client().PauseFetchPartitions(topicPartitions)
+}
+
+func (s franzConsumerSession) ResumeFetchPartitions(topicPartitions map[string][]int32) {
+	s.session.Client().ResumeFetchPartitions(topicPartitions)
+}
+
+func (s franzConsumerSession) SetOffsets(offsets map[string]map[int32]kgo.EpochOffset) {
+	s.session.Client().SetOffsets(offsets)
+}
+
+func (s franzConsumerSession) CommittedOffsets() map[string]map[int32]kgo.EpochOffset {
+	return s.session.Client().CommittedOffsets()
+}
+
+func (s franzConsumerSession) UncommittedOffsets() map[string]map[int32]kgo.EpochOffset {
+	return s.session.Client().UncommittedOffsets()
 }
 
 func (s franzConsumerSession) PollRecords(ctx context.Context, maxRecords int) kgo.Fetches {
@@ -534,35 +634,64 @@ func consumerRebalanceTimeout(operationTimeout time.Duration) time.Duration {
 	return max(defaultConsumerRebalanceTimeout, operationTimeout)
 }
 
-func (c *Consumer) processRecord(ctx context.Context, session transactionalConsumerSession, record *kgo.Record) error {
+func (c *Consumer) prepareRecord(record *kgo.Record) preparedRecord {
 	control, controlErr := parseControl(record, c.sourceTopic, c.replayTopic, c.retrySet)
 	if controlErr != nil {
-		return c.deadLetterRecord(ctx, session, record, sourceControl(record), "control", controlErr, 1, "")
+		return preparedRecord{
+			control: sourceControl(record), failureKind: "control", failure: controlErr, attempt: 1,
+		}
 	}
 	if control.source.topic != c.sourceTopic {
-		return c.deadLetterRecord(ctx, session, record, control, "control",
-			fmt.Errorf("%w: source topic mismatch", messenger.ErrInvalidMessage), max(1, control.attempt), "")
+		return preparedRecord{
+			control: control, failureKind: "control",
+			failure: fmt.Errorf("%w: source topic mismatch", messenger.ErrInvalidMessage),
+			attempt: max(1, control.attempt),
+		}
 	}
 	decoded, err := c.decode(record.Value)
 	if err != nil {
-		return c.deadLetterRecord(ctx, session, record, control, "decode", err, max(1, control.attempt), "")
+		return preparedRecord{
+			control: control, failureKind: "decode", failure: err, attempt: max(1, control.attempt),
+		}
 	}
 	if err := validateRecordKey(record.Key, decoded.metadata); err != nil {
-		return c.deadLetterRecord(ctx, session, record, control, "identity_conflict", err,
-			max(1, control.attempt), decoded.metadata.ID.String())
+		return preparedRecord{
+			control: control, decoded: decoded, failureKind: "identity_conflict", failure: err,
+			attempt: max(1, control.attempt), messageID: decoded.metadata.ID.String(),
+		}
 	}
 	now := c.clock().UTC()
 	retryAt, timingErr := retryDue(control.notBefore, decoded.metadata.ExpiresAt, now)
 	if timingErr != nil {
-		return c.deadLetterRecord(ctx, session, record, control, "expired", timingErr,
-			max(1, control.attempt), decoded.metadata.ID.String())
-	}
-	if !retryAt.IsZero() {
-		if err := c.waitUntilDue(ctx, session, retryAt); err != nil {
-			return err
+		return preparedRecord{
+			control: control, decoded: decoded, observedAt: now, failureKind: "expired", failure: timingErr,
+			attempt: max(1, control.attempt), messageID: decoded.metadata.ID.String(),
 		}
-		now = c.clock().UTC()
 	}
+	return preparedRecord{control: control, decoded: decoded, observedAt: now, retryAt: retryAt}
+}
+
+func (c *Consumer) processPreparedRecord(
+	ctx context.Context,
+	session transactionalConsumerSession,
+	record *kgo.Record,
+	prepared preparedRecord,
+) error {
+	if prepared.failure != nil {
+		return c.deadLetterRecord(
+			ctx,
+			session,
+			record,
+			prepared.control,
+			prepared.failureKind,
+			prepared.failure,
+			prepared.attempt,
+			prepared.messageID,
+		)
+	}
+	control := prepared.control
+	decoded := prepared.decoded
+	now := c.clock().UTC()
 	if !decoded.metadata.ExpiresAt.IsZero() && !decoded.metadata.ExpiresAt.After(now) {
 		return c.deadLetterRecord(ctx, session, record, control, "expired", ErrMessageExpired,
 			max(1, control.attempt), decoded.metadata.ID.String())
@@ -584,7 +713,10 @@ func (c *Consumer) processRecord(ctx context.Context, session transactionalConsu
 		AttemptGeneration: control.attemptGeneration,
 	}
 	fingerprint := inbox.FingerprintEnvelope(decoded.canonical)
-	startedAt := now
+	startedAt := prepared.observedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
 	maxAttempts := uint64(c.config.MaxAttempts) //nolint:gosec // Configuration validation requires a positive value.
 	result, processErr := c.store.ProcessAttempt(
 		transactionContext, key, fingerprint, maxAttempts,
@@ -750,46 +882,19 @@ func (c *Consumer) brokerContext(parent context.Context) (context.Context, conte
 	return context.WithTimeout(parent, c.transport.config.OperationTimeout)
 }
 
-func (c *Consumer) waitUntilDue(ctx context.Context, session transactionalConsumerSession, due time.Time) error {
-	restore := pauseFetchTopics(session, c.topics)
-	defer restore()
-	for {
-		remaining := due.Sub(c.clock().UTC())
-		if remaining <= 0 {
-			return nil
-		}
-
-		// franz-go manages group heartbeats and rebalance callbacks independently
-		// of PollRecords. Polling while topics are paused is unsafe because records
-		// buffered before the pause may still be returned and must not be discarded.
-		timer := time.NewTimer(min(remaining, time.Second))
-		select {
-		case <-timer.C:
-			continue
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-c.drain:
-			timer.Stop()
-			return context.Canceled
-		}
+func (c *Consumer) logDeferredPartition(ctx context.Context, record *kgo.Record, deadline time.Time) {
+	attrs := []messenger.LogAttr{
+		{Key: logAttrOperation, Value: "retry_defer"},
+		{Key: logAttrConsumerID, Value: c.config.ConsumerID},
+		{Key: logAttrTopic, Value: record.Topic},
+		{Key: logAttrPartition, Value: record.Partition},
+		{Key: logAttrNotBefore, Value: deadline},
 	}
-}
-
-func pauseFetchTopics(client fetchTopicController, topics []string) func() {
-	previouslyPaused := client.PauseFetchTopics()
-	paused := make(map[string]struct{}, len(previouslyPaused))
-	for _, topic := range previouslyPaused {
-		paused[topic] = struct{}{}
+	if c.transport != nil {
+		c.transport.logInfrastructure(ctx, messenger.LogDebug, "Kafka retry partition deferred", attrs...)
+		return
 	}
-	resume := make([]string, 0, len(topics))
-	for _, topic := range topics {
-		if _, ok := paused[topic]; !ok {
-			resume = append(resume, topic)
-		}
-	}
-	client.PauseFetchTopics(topics...)
-	return func() { client.ResumeFetchTopics(resume...) }
+	logInfrastructure(ctx, c.config.Logger, messenger.LogDebug, "Kafka retry partition deferred", attrs...)
 }
 
 func retryDue(notBefore, expiresAt, now time.Time) (time.Time, error) {

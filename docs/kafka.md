@@ -135,10 +135,10 @@ Register the transport explicitly even in consumer-only processes. Route registr
 automatically, and Builder safely deduplicates that identical service instance.
 
 `TransportConfig.Logger` is the adapter-owned infrastructure channel. It reports transport startup/readiness,
-producer and consumer transaction failures, abort/fencing outcomes, and topology failures or applied changes. Its
-attributes are limited to transport, consumer, route, topic, operation, action, counts, and errors; record keys,
-payloads, message bodies, and headers are never logged. `WithClientLogger` is a separate opt-in to franz-go's internal
-logger and follows franz-go's own logging contract.
+producer and consumer transaction failures, abort/fencing outcomes, topology failures or applied changes, and retry
+partition deferrals. Its attributes are limited to transport, consumer, route, topic, partition, deadline, operation,
+action, counts, and errors; record keys, payloads, message bodies, and headers are never logged. `WithClientLogger` is a
+separate opt-in to franz-go's internal logger and follows franz-go's own logging contract.
 
 `NewCommandConsumer` has the same lifecycle and retry contract. The Inbox backend must support durable attempts and the
 handler must use `inbox.SQLTxFromContext` for database writes that need atomic Inbox completion.
@@ -153,20 +153,23 @@ source retention as already-old records.
 
 One worker is one Kafka group member and processes one record at a time. On success, the consumed offset commits in a
 Kafka transaction. On a retryable failure, the same canonical bytes and key move to the selected retry topic with an
-exact `not-before`, atomically with the source offset. While a fetched retry is not due, the worker pauses its assigned
-GoMessenger topics and waits without calling `PollRecords`, preserving any records franz-go buffered before the pause.
-franz-go continues broker heartbeats independently. This creates bounded head-of-line blocking for all partitions
-assigned to that worker until the retry becomes due; other workers remain available. `MaxAttempts` counts application
-handler invocations, not broker deliveries or `NotBefore` deferrals.
+exact `not-before`, atomically with the source offset. Workers use franz-go's blocked-rebalance poll mode only for a
+bounded preflight. If a retry record arrives early, the worker snapshots existing partition pauses, pauses only that
+topic-partition, rewinds the local and uncommitted cursor to the record's exact leader epoch and offset, verifies the
+rewind, and then allows rebalancing. A failed verification terminates the worker without processing later offsets.
+The worker retains only the topic-partition and deadline in a bounded scheduler, continues polling other partitions,
+and resumes only pauses it owns when the nearest deadline is due. The record is then fetched again and enters the
+ordinary transactional handler path; handler, Inbox, and Kafka transaction execution never hold the poll rebalance
+block. `MaxAttempts` counts application handler invocations, not broker deliveries or `NotBefore` deferrals.
 
 On permanent failure or exhaustion, a bounded Kafka DLQ v1 record and the consumed offset commit in the same
 transaction. The DLQ record retains the original source position, key, canonical bytes, consumer, attempt generation,
 failure class, bounded error, and failure time. CLI inspection and replay planning never print the original bytes or
 handler error.
 
-Ordering is guaranteed by Kafka key/partition only while a message remains on its source topic. Once a failed record is
-moved to a retry topic, later source records may overtake it. Choose handlers and domain keys with that boundary in
-mind; this adapter does not claim strict per-key ordering across retries.
+Ordering is preserved within each concrete topic-partition, including while an early retry record is deferred. Once a
+failed record is moved to a different retry topic, later source records may overtake it. Choose handlers and domain
+keys with that boundary in mind; this adapter does not claim strict per-key ordering across topics.
 
 ## Inspect and replay DLQ records
 

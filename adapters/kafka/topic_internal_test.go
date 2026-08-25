@@ -12,6 +12,7 @@ const testNamespace = "prod"
 const (
 	testSourceTopic = "prod.event.orders.created.v1"
 	testConsumerID  = "billing"
+	testWorkerID    = "worker"
 	testMessageID   = "018f3f31-7bf2-7cc3-98c1-2b5f9b1f77ab"
 	testDomainKey   = "order-42"
 )
@@ -106,17 +107,17 @@ func TestConsumerServiceNamesRejectAmbiguousSourceBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical ConsumerGroup: %v", err)
 	}
-	if collided := ambiguousSource + serviceMarker + "worker"; canonicalGroup != collided {
+	if collided := ambiguousSource + serviceMarker + testWorkerID; canonicalGroup != collided {
 		t.Fatalf("invalid collision premise: %q != %q", canonicalGroup, collided)
 	}
 	checks := []struct {
 		name string
 		call func() (string, error)
 	}{
-		{name: "retry", call: func() (string, error) { return RetryTopic(ambiguousSource, "worker", 0) }},
-		{name: "replay", call: func() (string, error) { return ReplayTopic(ambiguousSource, "worker") }},
-		{name: "DLQ", call: func() (string, error) { return DLQTopic(ambiguousSource, "worker") }},
-		{name: "group", call: func() (string, error) { return ConsumerGroup(ambiguousSource, "worker") }},
+		{name: "retry", call: func() (string, error) { return RetryTopic(ambiguousSource, testWorkerID, 0) }},
+		{name: "replay", call: func() (string, error) { return ReplayTopic(ambiguousSource, testWorkerID) }},
+		{name: "DLQ", call: func() (string, error) { return DLQTopic(ambiguousSource, testWorkerID) }},
+		{name: "group", call: func() (string, error) { return ConsumerGroup(ambiguousSource, testWorkerID) }},
 	}
 	for _, check := range checks {
 		check := check
