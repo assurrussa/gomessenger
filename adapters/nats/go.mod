@@ -3,17 +3,13 @@ module github.com/assurrussa/gomessenger/adapters/nats
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.0.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.0.0
+	github.com/assurrussa/gomessenger v0.1.0
+	github.com/assurrussa/gomessenger/adapters/inbox v0.1.0
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
 	modernc.org/sqlite v1.57.0
 )
-
-replace github.com/assurrussa/gomessenger => ../..
-
-replace github.com/assurrussa/gomessenger/adapters/inbox => ../inbox
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect

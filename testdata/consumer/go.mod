@@ -3,12 +3,12 @@ module example.com/gomessenger-consumer
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.0.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.0.0
-	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
-	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
-	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
-	github.com/assurrussa/gomessenger/observability v0.0.0
+	github.com/assurrussa/gomessenger v0.1.0
+	github.com/assurrussa/gomessenger/adapters/inbox v0.1.0
+	github.com/assurrussa/gomessenger/adapters/kafka v0.1.0
+	github.com/assurrussa/gomessenger/adapters/nats v0.1.0
+	github.com/assurrussa/gomessenger/adapters/outbox v0.1.0
+	github.com/assurrussa/gomessenger/observability v0.1.0
 	github.com/assurrussa/outbox v0.11.0
 	github.com/prometheus/client_golang v1.24.1
 )

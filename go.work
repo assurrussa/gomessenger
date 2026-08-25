@@ -6,19 +6,25 @@ use (
 	./adapters/kafka
 	./adapters/nats
 	./adapters/outbox
+	./examples/durable-postgres-nats
 	./observability
 	./testdata/consumer
 	./testdata/e2e
 	./tools/gomessengerctl
-	./examples/durable-postgres-nats
 )
 
 replace (
 	github.com/assurrussa/gomessenger v0.0.0 => .
+	github.com/assurrussa/gomessenger v0.1.0 => .
 	github.com/assurrussa/gomessenger/adapters/inbox v0.0.0 => ./adapters/inbox
+	github.com/assurrussa/gomessenger/adapters/inbox v0.1.0 => ./adapters/inbox
 	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0 => ./adapters/kafka
+	github.com/assurrussa/gomessenger/adapters/kafka v0.1.0 => ./adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0 => ./adapters/nats
+	github.com/assurrussa/gomessenger/adapters/nats v0.1.0 => ./adapters/nats
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0 => ./adapters/outbox
+	github.com/assurrussa/gomessenger/adapters/outbox v0.1.0 => ./adapters/outbox
 	github.com/assurrussa/gomessenger/observability v0.0.0 => ./observability
+	github.com/assurrussa/gomessenger/observability v0.1.0 => ./observability
 	github.com/assurrussa/outbox => ../outbox
 )
