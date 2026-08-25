@@ -2,6 +2,14 @@ github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
+github.com/assurrussa/gomessenger v0.1.0 h1:mRDpVwUvp9Z4PMzyDv1vu3SDrKzPA+r6ySLEteDI+mw=
+github.com/assurrussa/gomessenger v0.1.0/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
+github.com/assurrussa/gomessenger/adapters/inbox v0.1.0 h1:1w9nK9Xf20QHgKBr4jbGYmFWl5mTEv9YBmExB5wuAUE=
+github.com/assurrussa/gomessenger/adapters/inbox v0.1.0/go.mod h1:dpI7ppg6foBKLYwFLB1SNUW1yXxRWy2yH8c7XnrGJYA=
+github.com/assurrussa/gomessenger/adapters/kafka v0.1.0 h1:DzYdbex9JgIhb7zV3D77X+WEyoZXQWAK1kWmPvArXAM=
+github.com/assurrussa/gomessenger/adapters/kafka v0.1.0/go.mod h1:kQAUKd9yN6eFL7DICz/aYlIQa5i8yhGnzR2nqjNex7U=
+github.com/assurrussa/gomessenger/adapters/nats v0.1.0 h1:gvr4G7IUdJ3B+L8kWvW5/95FEiANPO4GHfYdlLJu9Sg=
+github.com/assurrussa/gomessenger/adapters/nats v0.1.0/go.mod h1:1SzbQCOTPQmT5yx4+MLk7CD2xugfnNT7EZMAk5BOnQs=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [0.1.0] - 2026-08-26
 
 ### Added
 
@@ -45,5 +45,3 @@ All notable changes to this project will be documented in this file.
 - early Kafka retry records now pause, rewind, and defer only their own topic-partition, preserving exact offsets and
   allowing the same worker to process other partitions until the retry deadline;
 - the aggregate GitHub Actions `Full gate` now requires PostgreSQL and both supported Kafka integration jobs.
-
-No release has been published yet.

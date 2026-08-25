@@ -3,14 +3,12 @@ module github.com/assurrussa/gomessenger/observability
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.0.0
+	github.com/assurrussa/gomessenger v0.1.0
 	github.com/prometheus/client_golang v1.24.1
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/sdk v1.45.0
 	go.opentelemetry.io/otel/trace v1.45.0
 )
-
-replace github.com/assurrussa/gomessenger => ..
 
 require (
 	github.com/assurrussa/gobus v1.1.0 // indirect
