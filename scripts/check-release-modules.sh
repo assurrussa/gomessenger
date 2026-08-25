@@ -73,7 +73,7 @@ check_dependency_no_replace() {
 validate_version "$version" VERSION
 validate_version "$outbox_version" OUTBOX_VERSION
 
-for module in adapters/inbox adapters/nats adapters/outbox observability tools/gomessengerctl; do
+for module in adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl; do
 	check_no_replace "$module"
 done
 
@@ -82,6 +82,8 @@ check_dependency_no_replace testdata/e2e github.com/assurrussa/outbox
 check_dependency_no_replace testdata/e2e github.com/assurrussa/outbox/backends/sqlite
 
 check_requirement adapters/inbox github.com/assurrussa/gomessenger "$version"
+check_requirement adapters/kafka github.com/assurrussa/gomessenger "$version"
+check_requirement adapters/kafka github.com/assurrussa/gomessenger/adapters/inbox "$version"
 check_requirement adapters/nats github.com/assurrussa/gomessenger "$version"
 check_requirement adapters/nats github.com/assurrussa/gomessenger/adapters/inbox "$version"
 check_requirement adapters/outbox github.com/assurrussa/gomessenger "$version"
@@ -89,9 +91,11 @@ check_requirement adapters/outbox github.com/assurrussa/outbox "$outbox_version"
 check_requirement observability github.com/assurrussa/gomessenger "$version"
 check_requirement tools/gomessengerctl github.com/assurrussa/gomessenger "$version"
 check_requirement tools/gomessengerctl github.com/assurrussa/gomessenger/adapters/inbox "$version"
+check_requirement tools/gomessengerctl github.com/assurrussa/gomessenger/adapters/kafka "$version"
 check_requirement tools/gomessengerctl github.com/assurrussa/gomessenger/adapters/nats "$version"
 check_requirement testdata/consumer github.com/assurrussa/gomessenger "$version"
 check_requirement testdata/consumer github.com/assurrussa/gomessenger/adapters/inbox "$version"
+check_requirement testdata/consumer github.com/assurrussa/gomessenger/adapters/kafka "$version"
 check_requirement testdata/consumer github.com/assurrussa/gomessenger/adapters/nats "$version"
 check_requirement testdata/consumer github.com/assurrussa/gomessenger/adapters/outbox "$version"
 check_requirement testdata/consumer github.com/assurrussa/gomessenger/observability "$version"

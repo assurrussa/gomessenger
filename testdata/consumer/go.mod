@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/assurrussa/gomessenger v0.0.0
 	github.com/assurrussa/gomessenger/adapters/inbox v0.0.0
+	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
 	github.com/assurrussa/gomessenger/observability v0.0.0
@@ -28,9 +29,13 @@ require (
 	github.com/nats-io/nats.go v1.53.1 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/twmb/franz-go v1.21.6 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.18.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.45.0 // indirect
 	go.opentelemetry.io/otel/metric v1.45.0 // indirect
@@ -46,6 +51,7 @@ require (
 replace (
 	github.com/assurrussa/gomessenger => ../..
 	github.com/assurrussa/gomessenger/adapters/inbox => ../../adapters/inbox
+	github.com/assurrussa/gomessenger/adapters/kafka => ../../adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/nats => ../../adapters/nats
 	github.com/assurrussa/gomessenger/adapters/outbox => ../../adapters/outbox
 	github.com/assurrussa/gomessenger/observability => ../../observability

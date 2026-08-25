@@ -4,14 +4,17 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.0.0
+	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
+	github.com/twmb/franz-go v1.21.6
 )
 
 replace (
 	github.com/assurrussa/gomessenger => ../..
 	github.com/assurrussa/gomessenger/adapters/inbox => ../../adapters/inbox
+	github.com/assurrussa/gomessenger/adapters/kafka => ../../adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/nats => ../../adapters/nats
 )
 
@@ -30,6 +33,9 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.2 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.26 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.18.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect

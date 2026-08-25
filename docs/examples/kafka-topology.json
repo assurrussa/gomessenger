@@ -1,0 +1,87 @@
+{
+  "specVersion": "1.0",
+  "topics": [
+    {
+      "name": "prod.event.orders.order-created.v1",
+      "role": "source",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": 604800000,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.retry.t0",
+      "role": "retry",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": -1,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.retry.t1",
+      "role": "retry",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": -1,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.retry.t2",
+      "role": "retry",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": -1,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.retry.t3",
+      "role": "retry",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": -1,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.replay",
+      "role": "replay",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": 604800000,
+      "retentionBytes": -1,
+      "maxMessageBytes": 2113536
+    },
+    {
+      "name": "prod.event.orders.order-created.v1.gm.billing-order-projector.dlq",
+      "role": "dlq",
+      "sourceTopic": "prod.event.orders.order-created.v1",
+      "consumerId": "billing-order-projector",
+      "partitions": 3,
+      "replicationFactor": 3,
+      "minInSyncReplicas": 2,
+      "retentionMillis": 2592000000,
+      "retentionBytes": -1,
+      "maxMessageBytes": 3162112
+    }
+  ]
+}

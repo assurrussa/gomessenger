@@ -252,7 +252,7 @@ func TestTransactionalPipelinePublishesPermanentFailureToDLQ(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode DLQ record: %v", err)
 	}
-	if record.ConsumerID != "dlq-worker" || record.FailureKind != "permanent" || record.Attempt != 1 {
+	if record.ConsumerID != "dlq-worker" || record.FailureKind != permanentFailureKind || record.Attempt != 1 {
 		t.Fatalf("DLQ record = %#v", record)
 	}
 	envelope, err := messenger.UnmarshalEnvelope(record.Envelope)

@@ -1,9 +1,10 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
-MODULES := . adapters/inbox adapters/nats adapters/outbox observability tools/gomessengerctl
+MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl
+LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl
 E2E_MODULE := testdata/e2e
 
-.PHONY: prepare fmt-check build vet lint lint-core lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-postgres check bench-all release-ready release-readiness
+.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-kafka test-postgres check bench-all release-ready release-readiness
 
 prepare:
 	@$(GO) work sync
@@ -33,8 +34,13 @@ lint: lint-core
 
 lint-fix: lint-fix-core
 
-lint-core:
-	@for module in $(MODULES); do (cd $$module && GOWORK=off $(GOLANGCI_LINT) run --timeout=5m ./...) || exit 1; done
+lint-core: lint-root lint-modules
+
+lint-root:
+	@GOWORK=off $(GOLANGCI_LINT) run --timeout=5m ./...
+
+lint-modules:
+	@for module in $(LINT_MODULES); do (cd $$module && GOWORK=off $(GOLANGCI_LINT) run --timeout=5m ./...) || exit 1; done
 	@cd $(E2E_MODULE) && GOWORK=off $(GOLANGCI_LINT) run --timeout=5m ./...
 
 lint-fix-core:
@@ -68,8 +74,12 @@ test-e2e:
 
 test-integration: test-e2e
 	@cd adapters/inbox && GOWORK=off $(GO) test -race ./...
+	@cd adapters/kafka && GOWORK=off $(GO) test -race ./...
 	@cd adapters/nats && GOWORK=off $(GO) test -race ./...
 	@cd adapters/outbox && GOWORK=off $(GO) test -race ./...
+
+test-kafka:
+	@sh ./scripts/test-kafka.sh
 
 test-postgres:
 	@test -n "$(GOMESSENGER_POSTGRES_DSN)" || (echo "GOMESSENGER_POSTGRES_DSN is required" >&2; exit 2)

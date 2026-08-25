@@ -85,6 +85,7 @@ linters:
             - github.com/assurrussa/gomessenger
             - github.com/nats-io/nats.go
             - github.com/nats-io/nats-server/v2
+            - github.com/twmb/franz-go
             - github.com/cloudevents/sdk-go/v2
             - github.com/jackc/pgx/v5
             - modernc.org/sqlite
@@ -95,6 +96,7 @@ linters:
       replace-allow-list:
         - github.com/assurrussa/gomessenger
         - github.com/assurrussa/gomessenger/adapters/inbox
+        - github.com/assurrussa/gomessenger/adapters/kafka
         - github.com/assurrussa/gomessenger/adapters/nats
         - github.com/assurrussa/gomessenger/adapters/outbox
         - github.com/assurrussa/gomessenger/observability

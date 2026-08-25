@@ -7,6 +7,7 @@ import (
 
 	messenger "github.com/assurrussa/gomessenger"
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	kafkaadapter "github.com/assurrussa/gomessenger/adapters/kafka"
 	natsadapter "github.com/assurrussa/gomessenger/adapters/nats"
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
 	"github.com/assurrussa/gomessenger/observability"
@@ -112,6 +113,20 @@ func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("topology: %v", err)
+	}
+	kafkaSource, err := kafkaadapter.Topic("download", command.Info())
+	if err != nil {
+		t.Fatalf("Kafka source topic: %v", err)
+	}
+	if _, err := kafkaadapter.RetryTopic(kafkaSource, "download-worker", 0); err != nil {
+		t.Fatalf("Kafka retry topic: %v", err)
+	}
+	kafkaConsumerConfig := kafkaadapter.HandlerConfig{
+		Namespace: "download", ConsumerID: "download-worker", Logger: logger,
+		Observers: []messenger.Observer{telemetry}, Propagator: observability.NewTraceContextPropagator(),
+	}
+	if kafkaConsumerConfig.Logger == nil || kafkaConsumerConfig.Propagator == nil {
+		t.Fatal("Kafka consumer observability configuration did not compile")
 	}
 	consumerConfig := natsadapter.HandlerConfig{
 		Logger: logger, Observers: []messenger.Observer{telemetry},

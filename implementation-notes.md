@@ -1,5 +1,59 @@
 # Implementation notes
 
+## 2026-08-25 — native transactional Kafka adapter
+
+- Added the independent `adapters/kafka` module on franz-go v1.21.6 with adapter-owned clients, required stable process
+  identity, one static group member and transactional ID per worker, read-committed consumption, disabled auto-commit,
+  and all-ISR transactional direct publish.
+- Kept native command/event envelope v1 as the only Kafka wire contract. Source topics are
+  `namespace.kind.descriptor.vN`; reserved kind segments keep dotted namespaces unambiguous, and the record key is the
+  domain key or message ID. Queries, CloudEvents modes, and arbitrary payloads remain outside the adapter.
+- Added consumer-specific retry tiers, replay ingress, DLQ topics, exact not-before control metadata, durable Inbox
+  attempts, and Kafka transactions that atomically commit source offsets with retry or DLQ records. Retry topics require
+  unlimited time and size retention; later source records may overtake retries.
+- Added bounded Kafka DLQ v1 inspection and deterministic protected replay. Replay validates canonical bytes, descriptor
+  source topic, record key, consumer target, and attempt generation without exposing payload or handler error in plans;
+  bounded failure text is normalized and truncated on UTF-8 boundaries so emitted records always decode.
+- Aligned adapter-owned franz-go producer batch caps with the full envelope plus duplicated Kafka record key for
+  source/retry/replay and the larger DLQ message bound. Source and replay-ingress record timestamps now represent
+  publication time while logical creation time remains immutable in the envelope.
+- Hardened transport lifecycle around pre-start drain, active direct transactions, and fresh bounded abort cleanup;
+  serialized transaction admission honors caller cancellation, while shutdown waits for admitted finalization until its
+  deadline and then force-closes the client.
+- Hardened consumer pause/drain boundaries: delayed retry snapshots pause state before pausing service topics and resumes
+  only topics newly paused by that wait; a second drain check after `PollRecords` leaves a concurrently fetched offset
+  unprocessed and uncommitted. Unit regressions and a two-second Kafka retry followed by a barrier cover both paths.
+- Wired `TransportConfig.Logger` to adapter-owned startup/readiness, producer and consumer transaction, abort/fencing,
+  and topology events. Structured attributes remain infrastructure-only and exclude record keys, payloads, and headers;
+  franz-go client logging remains a separate explicit connection option.
+- Closed follow-up review gaps by cloning retained broker input, replacing raw franz-go options with sealed
+  connection-only wrappers, validating topology before starting consumer workers, and deriving rebalance timeout from
+  bounded broker finalization instead of handler duration.
+- Closed final Kafka review gaps: direct publishes recheck expiry after serialized admission and classify deterministic
+  topic incompatibility as permanent for Outbox relay; consumer transaction finalization now preserves force
+  cancellation; hooks cannot receive mutable records or the live client; consumer-only wiring registers the shared
+  transport explicitly for managed shutdown.
+- Removed naming collisions in consumer service topics/groups and transactional IDs. Kafka source derivation now
+  reserves the `gm` segment and every service-name helper revalidates its canonical source; transactional IDs use a
+  versioned SHA-256 digest of the framed group, instance, and worker tuple.
+- Made full-jitter retry delays strictly positive so a valid retry configuration cannot randomly terminate a worker.
+- Added declarative topology spec `1.0` for partitions, replication factor, minimum ISR, retention time/bytes, and
+  maximum message bytes. Apply creates missing topics or strengthens managed configurations only; partition drift is an
+  ordering-sensitive conflict, replication is verified across every partition, unsafe drift is refused, and no
+  resource is deleted/recreated.
+- Extended `gomessengerctl` under `kafka` while preserving existing NATS commands. TLS, CA/mTLS, PLAIN, and SCRAM
+  connection flags are available; SASL passwords are read from a named environment variable.
+- Added clean-consumer and release-module coverage plus `make test-kafka`. The local gate exposed and fixed an invalid
+  franz-go idempotence option, a Kafka 4.x inter-broker transaction-listener requirement in the harness, poll-timeout
+  classification, and a pause-state restoration bug. The complete direct/Outbox/Inbox/retry/DLQ/replay pipeline passed
+  against official Kafka 4.1.2 and 4.3.1 images, including source envelopes and expanded DLQ records above franz-go's
+  default record-batch limit.
+- Split hosted `Full gate` work into parallel static, test/race, and checkptr shards while preserving `CI / Full gate`
+  as their required aggregate result. The static shard uses the pinned official golangci-lint action, a prebuilt binary,
+  and its analysis cache; local `make lint` and `make check` retain the complete read-only module-isolation contract.
+- The completed source batch passed `make check`: formatting, build, vet, lint, unit, race, checkptr, 91.4% root
+  coverage, clean consumer probes, and the durable transactional E2E.
+
 ## 2026-08-24 — typed local query facade
 
 - Added `KindQuery`, `Query[Q,R]`, `Querier[Q,R]`, payload and message handlers, typed query middleware, builder

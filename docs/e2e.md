@@ -52,3 +52,20 @@ and SQLite backend resolve as published `v0.11.0` modules. It is not a published
 module. `make test-e2e` proves the local checkout;
 `make test-consumer-release VERSION=vX.Y.Z` remains the separate proof that all
 public GoMessenger tags resolve without local replacements.
+
+## Kafka compatibility pipeline
+
+The same E2E module contains an opt-in Kafka pipeline. It is skipped when no broker is declared, so the source-only
+`make check` gate remains Docker-free. Run the explicit local gate with:
+
+```sh
+make test-kafka
+```
+
+The harness starts official single-node Kafka 4.1.2 and 4.3.1 images one at a time with separate internal/external
+listeners and one-partition transaction/group metadata topics. It proves declarative topic convergence, transactional
+direct publish, retry hand-off, Inbox attempt accounting, Outbox relay and duplicate suppression, transactional DLQ,
+protected replay, static worker identity, read-committed visibility, and graceful runtime shutdown.
+
+This gate is intentionally local rather than a hosted-CI Kafka service. It does not prove multi-broker failover,
+capacity, production credentials, deployment, or a live operational smoke.

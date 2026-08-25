@@ -14,6 +14,7 @@ cd "$workdir"
 go mod init example.com/gomessenger-release-consumer
 go get "github.com/assurrussa/gomessenger@${version}"
 go get "github.com/assurrussa/gomessenger/adapters/inbox@${version}"
+go get "github.com/assurrussa/gomessenger/adapters/kafka@${version}"
 go get "github.com/assurrussa/gomessenger/adapters/nats@${version}"
 go get "github.com/assurrussa/gomessenger/adapters/outbox@${version}"
 go get "github.com/assurrussa/gomessenger/observability@${version}"

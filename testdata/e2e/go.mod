@@ -5,12 +5,14 @@ go 1.27.0
 require (
 	github.com/assurrussa/gomessenger v0.0.0
 	github.com/assurrussa/gomessenger/adapters/inbox v0.0.0
+	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
 	github.com/assurrussa/outbox v0.11.0
 	github.com/assurrussa/outbox/backends/sqlite v0.11.0
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
+	github.com/twmb/franz-go v1.21.6
 	modernc.org/sqlite v1.57.0
 )
 
@@ -32,9 +34,12 @@ require (
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pressly/goose/v3 v3.26.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.18.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
@@ -50,6 +55,8 @@ require (
 replace github.com/assurrussa/gomessenger => ../..
 
 replace github.com/assurrussa/gomessenger/adapters/inbox => ../../adapters/inbox
+
+replace github.com/assurrussa/gomessenger/adapters/kafka => ../../adapters/kafka
 
 replace github.com/assurrussa/gomessenger/adapters/nats => ../../adapters/nats
 

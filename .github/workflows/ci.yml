@@ -17,8 +17,42 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
-  check:
-    name: Full gate
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            go.sum
+            adapters/*/go.sum
+            observability/go.sum
+            tools/gomessengerctl/go.sum
+            testdata/*/go.sum
+      - name: Run formatting, build, and vet checks
+        run: make fmt-check build vet
+      - name: Lint root module
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
+        with:
+          version: v2.13.1
+          install-mode: binary
+          working-directory: .
+          args: --timeout=5m ./...
+          verify: true
+      - name: Lint nested modules
+        run: make lint-modules
+      - name: Verify static checks did not mutate tracked files
+        run: git diff --exit-code -- .
+
+  tests:
+    name: Tests and race
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -34,12 +68,51 @@ jobs:
             observability/go.sum
             tools/gomessengerctl/go.sum
             testdata/*/go.sum
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
-      - name: Run read-only release gate
-        run: make check
-      - name: Verify gate did not mutate tracked files
+      - name: Run unit, race, coverage, consumer, and E2E checks
+        run: make test test-race cover test-consumer test-e2e
+      - name: Verify tests did not mutate tracked files
         run: git diff --exit-code -- .
+
+  checkptr:
+    name: Checkptr
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            go.sum
+            adapters/*/go.sum
+            observability/go.sum
+            tools/gomessengerctl/go.sum
+            testdata/*/go.sum
+      - name: Run checkptr tests
+        run: make test-checkptr
+      - name: Verify checkptr did not mutate tracked files
+        run: git diff --exit-code -- .
+
+  check:
+    name: Full gate
+    if: ${{ always() }}
+    needs: [static, tests, checkptr]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every release-gate shard passed
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          CHECKPTR_RESULT: ${{ needs.checkptr.result }}
+        run: |
+          if [ "$STATIC_RESULT" = success ] && [ "$TESTS_RESULT" = success ] && [ "$CHECKPTR_RESULT" = success ]; then
+            exit 0
+          fi
+          echo "static=$STATIC_RESULT tests=$TESTS_RESULT checkptr=$CHECKPTR_RESULT" >&2
+          exit 1
 
   postgres:
     name: PostgreSQL integration

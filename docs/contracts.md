@@ -41,7 +41,7 @@ return `ErrRuntimeClosed`.
 
 Every query gets a new message ID, UTC time, source, `KindQuery`, correlation/causation lineage, and propagated trace
 headers. There is no public query `Outgoing`, receipt, subject/key, scheduling, expiry, or arbitrary-header API. A query
-never serializes or becomes `Delivery`; native envelopes, Outbox, NATS subjects/routes, and CloudEvents accept only
+never serializes or becomes `Delivery`; native envelopes, Outbox, NATS/Kafka routes, and CloudEvents accept only
 commands and events.
 
 The manifest remains spec `1.0` and records only the query request descriptor, its required local route, and one handler
@@ -88,7 +88,7 @@ The receipt state says what the selected route has durably accepted:
 - `completed`: local synchronous handlers completed;
 - `accepted`: bounded local asynchronous work entered the runtime;
 - `staged`: a canonical envelope was persisted to the transactional outbox;
-- `broker_confirmed`: JetStream returned a publish acknowledgement.
+- `broker_confirmed`: JetStream returned a publish acknowledgement or a Kafka producer transaction committed.
 
 A successful receipt does not mean that every remote consumer has completed. That completion is observable at the
 consumer boundary, not at publish time.
@@ -138,11 +138,13 @@ is returned without remapping.
 rejects delivery after the deadline. A route must not reinterpret message creation time as an attempt time.
 
 The outbox uses `NotBefore` as `availableAt`; immediate messages use immutable `Time`. This keeps a retried unique write
-equivalent. The NATS adapter delays a future `NotBefore` and classifies an expired message as permanent.
+equivalent. The NATS and Kafka adapters durably delay a future `NotBefore` and classify an expired message as
+permanent.
 
 For incoming CloudEvents, an explicit `time` is canonical. If it is omitted, the adapter derives immutable millisecond
 time from a UUIDv7 event ID; an event with neither `time` nor a UUIDv7 ID is invalid. Broker storage timestamps never
-enter canonical message metadata.
+enter canonical message metadata. Kafka source and replay-ingress records use producer publication time; immutable
+logical `Time` remains inside the canonical envelope.
 
 ## Failure classification
 
@@ -186,16 +188,63 @@ to `DLQSubject`; finite limits must be at least `DefaultMaxDLQMessageBytes`. `De
 limit, while `DevStream` remains bound to the 1 MiB source-envelope contract. `DLQSubject` must differ from the
 consumer's exact input subject to prevent recursive dead-letter delivery.
 
+## Kafka adapter contract
+
+Kafka carries only canonical native command/event envelopes. Source topics are
+`namespace.kind.descriptor.vN`; `Topic` is the authoritative derivation. The record key is `Metadata.Key`, falling back
+to message ID. `RetryTopic`, `ReplayTopic`, `DLQTopic`, and `ConsumerGroup` derive consumer-specific service names.
+Identifiers are bounded ASCII letters, digits, dots, and hyphens. Namespace segments named `command` or `event` are
+reserved so source-topic derivation is injective. The `gm` segment is reserved in both source namespaces and descriptor
+names so the `.gm.` consumer-service boundary is unambiguous. Service-name helpers accept only canonical source topics.
+Queries, CloudEvents modes, arbitrary payloads, and reflection-derived names are rejected.
+
+`TransportConfig.InstanceID` is required, stable across restart, and unique per live process replica. Each concurrency
+worker owns one static group member and one transactional ID. Transactional IDs use a versioned SHA-256 derivation over
+the complete group, instance, and worker tuple so dotted identifiers cannot collapse tuple boundaries. Adapter-enforced
+clients use all-ISR acknowledgement, idempotence, read-committed isolation, and disabled auto-commit. Host-provided
+options are connection concerns only and enter through sealed `ConnectionOption` constructors; hooks that receive
+mutable producer or consumer records or expose the live client are rejected, and raw franz-go options cannot replace
+producer, transaction, group, subscription, or isolation policy. Hosts register the shared transport explicitly so
+consumer-only processes retain managed client shutdown. Before any worker polls, startup
+verifies required topic presence, equal partition counts, and unlimited retry retention. Rebalance completion is bounded
+by broker transaction finalization rather than handler duration.
+Waiting for the serialized direct-producer transaction slot remains caller-cancellable; an admitted transaction uses a
+fresh bounded broker context so commit or abort finalization is not interrupted by a late caller cancellation.
+
+On handler success, the consumed offset commits in a Kafka transaction. On retry, the same canonical bytes and key are
+produced to a consumer retry tier atomically with that offset. The exact due time is a reserved control header; the tier
+is only a scheduling bucket. Retry topics have unlimited time and size retention. A worker polls while waiting so group
+liveness is maintained. `MaxAttempts`, Inbox savepoint behavior, permanent outcomes, and attempt generations retain the
+same handler-invocation meaning as the JetStream path.
+
+Permanent and exhausted records are handed to the consumer-specific Kafka DLQ atomically with the consumed offset. DLQ
+v1 is bounded and records source position, original key/bytes, message identity, attempt/generation, failure class,
+bounded error, and failure time. Offline inspection/replay plans expose neither original bytes nor handler error.
+Confirmed replay validates source descriptor, key, canonical bytes, consumer target, and deterministic fresh attempt
+generation, then transactionally publishes to the protected replay topic. It does not delete the DLQ record or bypass a
+completed Inbox identity.
+
+Kafka key/partition ordering holds while a record remains on its source topic. Moving a failed record to a retry topic
+allows later source records to overtake it. The adapter promises no cross-topic strict ordering and no exactly-once
+external effects.
+
 ## Logging and observations
 
 Logging is disabled by default. `Logger` is transport-neutral; `AdaptSlog` is the standard adapter. A nil slog logger is
 a no-op, while direct nil configuration is rejected. Registered observers form an ordered fan-out. One observer panic
 is recovered, logged, and cannot stop later observers.
 
+Kafka `TransportConfig.Logger` receives adapter-owned transport startup/readiness, producer and consumer transaction,
+abort/fencing, and topology failure/change events. These events contain only stable infrastructure attributes such as
+transport, consumer, route, topic, operation, action, counts, and errors. Record keys, payloads, message bodies, and
+headers are excluded. `WithClientLogger` independently enables franz-go's internal client logger and is not part of this
+transport-neutral safety contract.
+
 Observations may contain message, consumer and service identity, route, handler, duration, attempt, duplicate state,
 and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler. Message
 IDs, attempts, and other high-cardinality values may be trace/log attributes but are never Prometheus metric labels.
-Core infrastructure logs and observations never include payloads, query results, message bodies, or arbitrary headers.
+Core infrastructure logs and observations never include record keys, payloads, query results, message bodies, or
+arbitrary headers.
 
 ## Lifecycle
 
@@ -203,7 +252,9 @@ Managed services implement `Run`, `Readiness`, `BeginDrain`, and `Shutdown`.
 
 1. `Run` starts all registered services and cancels peers if one terminates unexpectedly. It emits a service observation
    and does not restart the failed service.
-2. `Readiness` succeeds only when every service can accept work and its declared topology has no outstanding change.
+2. `Readiness` succeeds only when every service can accept work and its adapter-specific required resources are safe.
+   Kafka consumers check broker connectivity, topic presence, equal partition counts, and unlimited retry retention;
+   the complete managed Kafka policy is verified separately with `PlanTopology`.
 3. `BeginDrain` closes admission without cancelling already accepted work, including when it races with service
    startup; a service drained before `Run` does not begin pulling.
 4. `Shutdown` waits for accepted work. If its context expires, the runtime force-cancels service contexts and returns
@@ -223,6 +274,15 @@ delivery-contract changes are reported as conflicts for an operator to resolve. 
 subset onto the broker's latest configuration, preserving host-owned fields. A single apply creates missing streams
 before their declared consumers.
 
+Kafka topology spec `1.0` explicitly declares every source/retry/replay/DLQ topic and its partitions, replication
+factor, minimum ISR, retention time, retention bytes, and maximum message bytes. Service topics must match source
+partition count; retry tiers are contiguous from `t0` and have unlimited time and size retention. Apply may create a
+missing topic or increase a managed monotonic configuration. Partition-count drift, heterogeneous or incompatible
+replication, cleanup-policy drift, decreases, deletion, and recreation are conflicts. Fields outside the managed subset
+are preserved.
+
 Hosts retain ownership of connections, credentials, database migrations, logging, process signals, and deployment.
 That ownership includes provisioning the DLQ subject and setting NATS `max_payload`; consumer readiness rejects missing
-or undersized DLQ capacity instead of deferring a deterministic size failure to terminal hand-off.
+or undersized DLQ capacity instead of deferring a deterministic size failure to terminal hand-off. For Kafka, hosts own
+broker endpoints, TLS/SASL input, stable instance identity, capacity policy, and reviewed topology application; the
+adapter owns the concrete franz-go clients and mandatory transactional safety settings.

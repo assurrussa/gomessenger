@@ -24,6 +24,10 @@ const (
 	exitUsage            = 2
 	exitConflict         = 3
 	dlqReplayUnavailable = "DLQ record is not replayable"
+	commandValidate      = "validate"
+	commandPlan          = "plan"
+	commandApply         = "apply"
+	commandInspect       = "inspect"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -34,17 +38,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	switch args[0] {
+	case "kafka":
+		return runKafka(args[1:], stdout, stderr)
 	case "manifest":
-		if args[1] != "validate" {
+		if args[1] != commandValidate {
 			usage(stderr)
 			return exitUsage
 		}
 		return validateManifest(args[2:], stdout, stderr)
 	case "topology":
 		switch args[1] {
-		case "validate":
+		case commandValidate:
 			return validateTopology(args[2:], stdout, stderr)
-		case "plan", "apply":
+		case commandPlan, commandApply:
 			return manageTopology(args[1], args[2:], stdout, stderr)
 		default:
 			usage(stderr)
@@ -52,7 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	case "dlq":
 		switch args[1] {
-		case "inspect":
+		case commandInspect:
 			return inspectDLQ(args[2:], stdout, stderr)
 		case "replay":
 			return replayDLQ(args[2:], stdout, stderr)
@@ -124,7 +130,7 @@ func manageTopology(action string, args []string, stdout, stderr io.Writer) int 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	var changes []natsadapter.Change
-	if action == "plan" {
+	if action == commandPlan {
 		changes, err = natsadapter.PlanTopology(ctx, connection, topology)
 	} else {
 		changes, err = natsadapter.ApplyTopology(ctx, connection, topology)
@@ -304,4 +310,10 @@ func usage(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, "       gomessengerctl dlq inspect --file record.json")
 	_, _ = fmt.Fprintln(writer,
 		"       gomessengerctl dlq replay --file record.json [--confirm] [--server nats://localhost:4222]")
+	_, _ = fmt.Fprintln(writer, "       gomessengerctl kafka topology validate --file topology.json")
+	_, _ = fmt.Fprintln(writer,
+		"       gomessengerctl kafka topology plan|apply --file topology.json --instance-id INSTANCE [--brokers localhost:9092]")
+	_, _ = fmt.Fprintln(writer, "       gomessengerctl kafka dlq inspect --file record.json")
+	_, _ = fmt.Fprintln(writer,
+		"       gomessengerctl kafka dlq replay --file record.json [--confirm --instance-id INSTANCE] [--brokers localhost:9092]")
 }

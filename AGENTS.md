@@ -16,14 +16,17 @@ Supported modules:
 
 - `github.com/assurrussa/gomessenger`
 - `github.com/assurrussa/gomessenger/adapters/outbox`
+- `github.com/assurrussa/gomessenger/adapters/kafka`
 - `github.com/assurrussa/gomessenger/adapters/nats`
 - `github.com/assurrussa/gomessenger/adapters/inbox`
 - `github.com/assurrussa/gomessenger/observability`
 - `github.com/assurrussa/gomessenger/tools/gomessengerctl`
 
-The host owns database and NATS connections, process supervision, transaction
-boundaries, configuration, and deployment. Keep reflection-derived wire names,
-driver dependencies, and transport types out of the root facade.
+The host owns database and NATS connections, Kafka broker/TLS/SASL input and
+stable replica identity, process supervision, transaction boundaries,
+configuration, and deployment. The Kafka adapter owns its franz-go clients and
+mandatory transactional options. Keep reflection-derived wire names, driver
+dependencies, and transport types out of the root facade.
 
 Repository gates prove controlled contracts, not operational production
 readiness. Do not describe GoMessenger as production-proven until the pilot in
@@ -49,6 +52,8 @@ in public documentation.
 - `make prepare` runs mutating formatting and `go mod tidy` for all modules.
 - `make test-integration` reruns adapter and embedded-JetStream/SQLite E2E
   suites. Infrastructure-specific Outbox backend suites remain in that repo.
+- `make test-kafka` runs the opt-in local transactional pipeline against official
+  Kafka 4.1.2 and 4.3.1 Docker images; it is not part of hosted CI.
 - `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres` runs the
   PostgreSQL migration, conflict, rollback/retry, concurrency, and prune gate.
 - `make bench-all` records allocation-aware local dispatch benchmarks.

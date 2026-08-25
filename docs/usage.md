@@ -2,7 +2,8 @@
 
 This guide shows how a host application composes GoMessenger from a typed contract through transactional delivery,
 durable consumption, and graceful shutdown. GoMessenger supplies messaging contracts and adapters; the host still owns
-database and NATS connections, migrations, topology, transaction boundaries, process supervision, and deployment.
+database connections, broker endpoints and credentials, migrations, topology policy, transaction boundaries, process
+supervision, and deployment. The Kafka adapter creates franz-go clients from that host input.
 
 The snippets below belong in an application's composition root. Variables such as `database`, `natsConnection`,
 `outboxRuntime`, and business repositories are deliberately host-owned dependencies.
@@ -15,6 +16,7 @@ The snippets below belong in an application's composition root. Variables such a
 | Execute a local request/reply query              | `messenger.NewLocalSyncRoute()`     | the handler returned one typed result               |
 | Isolate a local query behind bounded workers     | `messenger.NewLocalAsyncRoute(...)` | `Query` waited for the queued handler result        |
 | Publish directly to JetStream                    | `natsadapter.NewRoute(...)`         | JetStream returned `PubAck`                         |
+| Publish directly to Kafka                       | `kafkaadapter.NewRoute(...)`        | the Kafka producer transaction committed            |
 | Commit a business write and message together     | `outboxadapter.NewProducer(...)`    | the envelope was staged in the caller's transaction |
 
 ## Local typed queries
@@ -58,7 +60,7 @@ receipt, scheduling, expiry, or arbitrary-header API.
 
 Global middleware may replace context or return an error, but successful completion without a result is
 `ErrQueryResultMissing`. Use `ChainQueryHandler` for typed caching or synthetic results. Queries never serialize, enter
-`Delivery`, or use Outbox, Inbox, JetStream, retry, receipts, DLQ, or replay. Distributed request/reply is not
+`Delivery`, or use Outbox, Inbox, JetStream, Kafka, retry, receipts, DLQ, or replay. Distributed request/reply is not
 implemented; see [ADR-0003](decisions/0003-distributed-queries.md).
 
 ## Durable end-to-end flow
@@ -72,7 +74,7 @@ producer host
                          |
                   Outbox relay job
                          |
-                  NATS JetStream <-- PubAck
+                  JetStream/Kafka <-- PubAck or transaction commit
                          |
 consumer host      pull consumer
                          |
@@ -82,7 +84,7 @@ consumer host      pull consumer
                          |
                      commit succeeds
                          |
-                    broker DoubleAck
+                    broker DoubleAck/offset transaction
 ```
 
 Delivery is at-least-once. A crash after the Inbox commit but before broker acknowledgement causes redelivery; the
@@ -117,8 +119,9 @@ request/reply handler, and `MustEvent` for an event that may have independently 
 
 ## 2. Compose a transactional producer
 
-Provision the source stream and a separately sized DLQ stream before starting traffic. Production hosts should plan and
-apply declarative topology with `gomessengerctl`; `DevStream` and `DevDLQStream` are convenient local-test defaults.
+Provision the source and separately sized DLQ resources before starting traffic. Production hosts should plan and apply
+declarative topology with `gomessengerctl`; `DevStream` and `DevDLQStream` are convenient NATS local-test defaults. For
+Kafka topic policy and composition, use the [Kafka adapter guide](kafka.md).
 
 Create the broker-confirmed route, register its relay capability on the Outbox service, and only then create the staging
 route. The default relay job name and schema used by `NewRelayJob` match the defaults used by `NewProducer`.
@@ -274,6 +277,15 @@ terminal handling.
 For commands use `NewCommandConsumer`; commands require the native wire mode. Events may use the native envelope or
 CloudEvents structured/binary mode, but producer and consumer configuration must agree.
 
+### Kafka alternative
+
+For Kafka, create one `kafkaadapter.Transport` from host brokers, TLS/SASL options, and a stable unique `InstanceID`.
+Give it to `kafkaadapter.NewRoute` and `NewEventConsumer`/`NewCommandConsumer`; attach the route and consumer to the same
+runtime. The route is also an `outboxadapter.EnvelopePublisher`, so the Outbox relay wiring is unchanged. Kafka supports
+native envelopes only. Its consumer atomically commits success offsets or produces retry/DLQ records with the consumed
+offset, while Inbox still owns the handler database transaction. The complete example, topology JSON, CLI flags, and
+ordering boundary are in [Kafka adapter](kafka.md).
+
 ## 4. Run and drain managed services
 
 `Builder.Use` adds consumers and workers to the returned `Runtime`. The host must supervise `Runtime.Run`, expose
@@ -334,6 +346,10 @@ uses one invocation; an envelope deferred by `NotBefore` does not invoke the han
 permanent outcome or attempt exhaustion, the adapter keeps retrying the confirmed DLQ hand-off without invoking the
 handler again. The source message is acknowledged only after the DLQ record is published successfully.
 
+On Kafka, retry/DLQ publication and the consumed offset are one transaction. Retry uses consumer-specific topics with
+unlimited retention and an exact due-time header; later source records may overtake a failed record. On NATS, the
+current delivery remains unacknowledged until confirmed hand-off and active handlers use progress acknowledgements.
+
 `AckWait` is the broker redelivery deadline, while `Timeout` bounds the handler invocation. The Inbox transaction has
 an additional `FinalizationTimeout`, which defaults to 5 seconds, for commit or rollback; increase it for a remote or
 otherwise slow database without extending handler execution. Active handlers send progress acknowledgements every
@@ -341,10 +357,11 @@ otherwise slow database without extending handler execution. Active handlers sen
 
 ## Startup checklist
 
-1. Provision compatible source and DLQ topology and validate NATS payload limits.
+1. Provision compatible source/retry/replay/DLQ topology and validate broker message limits.
 2. Apply host-owned Outbox and Inbox migrations.
 3. Register the relay job before any producer can stage its job name/schema.
-4. Build consumers with stable IDs, bounded concurrency, timeouts, retries, and DLQ subjects.
+4. Build consumers with stable IDs, bounded concurrency, timeouts, retries, and DLQ targets; Kafka also requires a
+   stable unique process `InstanceID`.
 5. Start and supervise Outbox and GoMessenger runtimes; expose their readiness independently.
 6. Enable producer traffic only after the relay and consumers are ready.
 7. On shutdown, stop admission, drain within a deadline, then close host-owned connections.
@@ -352,4 +369,4 @@ otherwise slow database without extending handler execution. Active handlers sen
 The complete executable reference is the Docker-free
 [durable pipeline E2E](e2e.md), backed by `testdata/e2e`. It covers producer rollback, relay `PubAck`, lost-ACK
 redelivery, Inbox suppression, retry, permanent DLQ, replay, trace propagation, and drain/redelivery through public
-APIs.
+APIs. The same module contains an opt-in real Kafka pipeline run by `make test-kafka` against Kafka 4.1.2 and 4.3.1.
