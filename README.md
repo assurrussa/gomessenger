@@ -1,6 +1,7 @@
 # GoMessenger
 
 [![CI](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/assurrussa/gomessenger)](https://github.com/assurrussa/gomessenger/releases/latest)
 ![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -10,8 +11,8 @@ Build commands, local queries, and events with explicit transaction, delivery, r
 
 Transactional Outbox/Inbox, NATS JetStream, Kafka, bounded retries, DLQ/replay, tracing, and managed lifecycle.
 
-> **Pre-release:** GoMessenger has no published SemVer module tags yet. `v0.1.0` is being prepared and must pass the
-> published clean-consumer gate before the install commands and release badges are added.
+> **Release status:** `v0.1.0` is published and passes the clean published-consumer gate. The real-service pilot remains
+> pending, so controlled repository gates are not a production-readiness claim.
 
 ## What it is
 
@@ -40,9 +41,41 @@ If all work is process-local, GoBus or direct function calls may be enough. If t
 workflow with timers and compensation, use a workflow engine. See the [use-case comparison](docs/comparison.md) before
 choosing an abstraction.
 
-## Install status
+## Install
 
-No GoMessenger `go get` command is advertised before the first tags exist. To evaluate the current checkout:
+GoMessenger requires Go 1.27+. For local commands, queries, and events:
+
+```sh
+go get github.com/assurrussa/gomessenger@v0.1.0
+```
+
+For durable NATS JetStream delivery with Inbox and transactional Outbox integration:
+
+```sh
+go get github.com/assurrussa/gomessenger@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/inbox@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/nats@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/outbox@v0.1.0
+```
+
+For durable Kafka delivery with Inbox and transactional Outbox integration:
+
+```sh
+go get github.com/assurrussa/gomessenger@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/inbox@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/kafka@v0.1.0 \
+  github.com/assurrussa/gomessenger/adapters/outbox@v0.1.0
+```
+
+Optional telemetry and CLI modules use the same release version:
+
+```sh
+go get github.com/assurrussa/gomessenger/observability@v0.1.0
+go install github.com/assurrussa/gomessenger/tools/gomessengerctl@v0.1.0
+```
+
+Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.11.0`; the
+host selects and installs its matching database backend separately. To evaluate the current checkout instead:
 
 ```sh
 git clone https://github.com/assurrussa/gomessenger.git
@@ -150,10 +183,10 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 | `.../observability` | Prometheus, OpenTelemetry spans, W3C Trace Context |
 | `.../tools/gomessengerctl` | manifest/topology validation, plan/apply, DLQ inspect/replay |
 
-The initial release is being prepared as `v0.1.0`. Outbox root and its PostgreSQL/SQLite backend tags at `v0.11.0` are
-the pinned durable-producer dependencies. During repository development `go.work` selects local GoMessenger modules;
-published consumers must use matching path-qualified tags and no local `replace` directives. See the
-[release process](docs/release.md) for dependency order and the post-publication probe.
+The initial `v0.1.0` release is published for every module above and passed the clean post-publication consumer probe.
+Outbox root and its PostgreSQL/SQLite backend tags at `v0.11.0` are the pinned durable-producer dependencies. During
+repository development `go.work` selects local GoMessenger modules; published consumers use matching path-qualified
+tags and no local `replace` directives. See the [release process](docs/release.md) for dependency order and verification.
 
 ## Minimal local query example
 

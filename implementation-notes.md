@@ -1,5 +1,16 @@
 # Implementation notes
 
+## 2026-08-26 — v0.1.0 multi-module release
+
+- Published immutable `v0.1.0` tags in dependency order for the root, Inbox, Outbox, observability, NATS, Kafka, and
+  `gomessengerctl` modules. Each published module now uses exact `v0.1.0` requirements and contains no development
+  `replace`; local pre-tag replacements remain confined to `go.work` and checkout-only fixtures.
+- PR #6 passed the hosted aggregate gate, including static analysis, unit/race/checkptr, PostgreSQL 18, Kafka 4.1.2 and
+  4.3.1, durable E2E, coverage, and benchmark comparison. The final local `make check` passed with 91.4% root coverage.
+- The clean post-publication consumer downloaded every library module, installed `gomessengerctl`, and compiled the
+  public facade without local replacements. GitHub Release `v0.1.0` is published; the separate real-service pilot
+  remains pending, so the release is not described as production-proven.
+
 ## 2026-08-26 — upgrade-sql review fixes
 
 - Made Kafka retry preflight expiry-aware without moving application code into the rebalance-blocked section. The
