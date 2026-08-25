@@ -19,8 +19,9 @@ import (
 var migrations embed.FS
 
 type backend struct {
-	db    *sql.DB
-	clock func() time.Time
+	db         *sql.DB
+	clock      func() time.Time
+	statements statements
 }
 
 type attemptDecision struct {
@@ -34,18 +35,27 @@ type attemptState struct {
 	terminal bool
 }
 
-// New constructs a SQLite inbox store. The caller owns db and migrations.
-func New(db *sql.DB) (*inbox.Store, error) {
+// New constructs a SQLite inbox store. The caller owns db, migrations, and
+// connection-pool sizing.
+func New(db *sql.DB, options ...Option) (*inbox.Store, error) {
 	if db == nil {
 		return nil, errors.New("inbox/sqlite: nil database")
 	}
-	return inbox.New(&backend{db: db, clock: time.Now})
+	names, err := resolveNamespace(options...)
+	if err != nil {
+		return nil, err
+	}
+	return inbox.New(&backend{db: db, clock: time.Now, statements: newStatements(names)})
 }
 
 // Migrate applies the embedded additive inbox schema.
-func Migrate(ctx context.Context, db *sql.DB) error {
+func Migrate(ctx context.Context, db *sql.DB, options ...Option) error {
 	if db == nil {
 		return errors.New("inbox/sqlite: nil database")
+	}
+	names, err := resolveNamespace(options...)
+	if err != nil {
+		return err
 	}
 	paths, err := fs.Glob(migrations, "migrations/*.sql")
 	if err != nil {
@@ -56,7 +66,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if readErr != nil {
 			return fmt.Errorf("inbox/sqlite: read migration %s: %w", path, readErr)
 		}
-		if _, execErr := db.ExecContext(ctx, string(data)); execErr != nil {
+		if _, execErr := db.ExecContext(ctx, names.render(string(data))); execErr != nil {
 			return fmt.Errorf("inbox/sqlite: apply migration %s: %w", path, execErr)
 		}
 	}
@@ -75,10 +85,7 @@ func (b *backend) Process(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	inserted, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox
-        (consumer_id, source, message_id, fingerprint, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (consumer_id, source, message_id) DO NOTHING`,
+	inserted, err := tx.ExecContext(ctx, b.statements.insertIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	if err != nil {
 		return result, fmt.Errorf("inbox/sqlite: insert identity: %w", err)
@@ -98,8 +105,7 @@ func (b *backend) Process(
 	if err := handler(handlerContext); err != nil {
 		return result, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox SET completed_at = ?
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return result, fmt.Errorf("inbox/sqlite: mark complete: %w", err)
 	}
@@ -152,8 +158,7 @@ func (b *backend) ProcessAttempt(
 	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
 		return result, fmt.Errorf("inbox/sqlite: release handler savepoint: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox SET completed_at = ?
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return result, fmt.Errorf("inbox/sqlite: mark attempt complete: %w", err)
 	}
@@ -199,14 +204,10 @@ func (b *backend) markAttemptTerminal(
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
 	var err error
 	if key.AttemptGeneration == "" {
-		_, err = tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempts
-	        SET terminal = 1, updated_at = ?
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?`, b.clock().UTC(),
+		_, err = tx.ExecContext(ctx, b.statements.markTerminal, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String())
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempt_generations
-	        SET terminal = 1, updated_at = ?
-	        WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`, b.clock().UTC(),
+		_, err = tx.ExecContext(ctx, b.statements.markTerminalGeneration, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String(), attemptFingerprint[:])
 	}
 	if err != nil {
@@ -221,10 +222,7 @@ func (b *backend) prepareAttemptIdentity(
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) (inbox.Result, bool, error) {
-	inserted, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox
-        (consumer_id, source, message_id, fingerprint, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (consumer_id, source, message_id) DO NOTHING`,
+	inserted, err := tx.ExecContext(ctx, b.statements.insertIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	if err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: insert attempt identity: %w", err)
@@ -238,9 +236,7 @@ func (b *backend) prepareAttemptIdentity(
 	}
 	var stored []byte
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+	if err := tx.QueryRowContext(ctx, b.statements.readIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: read attempt identity: %w", err)
 	}
@@ -250,7 +246,7 @@ func (b *backend) prepareAttemptIdentity(
 	if !completedAt.Valid {
 		return inbox.Result{}, false, nil
 	}
-	state, err := readAttempt(ctx, tx, key, inbox.AttemptFingerprint(key, fingerprint))
+	state, err := b.readAttempt(ctx, tx, key, inbox.AttemptFingerprint(key, fingerprint))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return inbox.Result{}, false, err
 	}
@@ -268,7 +264,7 @@ func (b *backend) nextAttempt(
 	maxAttempts uint64,
 ) (attemptDecision, error) {
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
-	state, err := readAttempt(ctx, tx, key, attemptFingerprint)
+	state, err := b.readAttempt(ctx, tx, key, attemptFingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		if insertErr := b.insertAttempt(ctx, tx, key, attemptFingerprint); insertErr != nil {
 			return attemptDecision{}, fmt.Errorf("inbox/sqlite: insert handler attempt: %w", insertErr)
@@ -297,15 +293,11 @@ func (b *backend) insertAttempt(
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_attempts
-	        (consumer_id, source, message_id, fingerprint, attempts, updated_at)
-	        VALUES (?, ?, ?, ?, 1, ?)`, key.ConsumerID, key.Source,
+		_, err := tx.ExecContext(ctx, b.statements.insertAttempt, key.ConsumerID, key.Source,
 			key.MessageID.String(), fingerprint[:], b.clock().UTC())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_attempt_generations
-	    (consumer_id, source, message_id, fingerprint, attempts, updated_at)
-	    VALUES (?, ?, ?, ?, 1, ?)`, key.ConsumerID, key.Source,
+	_, err := tx.ExecContext(ctx, b.statements.insertAttemptGeneration, key.ConsumerID, key.Source,
 		key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	return err
 }
@@ -317,20 +309,16 @@ func (b *backend) incrementAttempt(
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempts
-	        SET attempts = attempts + 1, updated_at = ?
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?`, b.clock().UTC(),
+		_, err := tx.ExecContext(ctx, b.statements.incrementAttempt, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempt_generations
-	    SET attempts = attempts + 1, updated_at = ?
-	    WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`, b.clock().UTC(),
+	_, err := tx.ExecContext(ctx, b.statements.incrementAttemptGeneration, b.clock().UTC(),
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:])
 	return err
 }
 
-func readAttempt(
+func (b *backend) readAttempt(
 	ctx context.Context,
 	tx *sql.Tx,
 	key inbox.Key,
@@ -340,14 +328,10 @@ func readAttempt(
 	var terminal bool
 	var err error
 	if key.AttemptGeneration == "" {
-		err = tx.QueryRowContext(ctx, `SELECT attempts, terminal
-	        FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+		err = tx.QueryRowContext(ctx, b.statements.readAttempt,
 			key.ConsumerID, key.Source, key.MessageID.String()).Scan(&attempt, &terminal)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT attempts, terminal
-	        FROM gomessenger_inbox_attempt_generations
-	        WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`,
+		err = tx.QueryRowContext(ctx, b.statements.readAttemptGeneration,
 			key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:]).Scan(&attempt, &terminal)
 	}
 	if err != nil {
@@ -374,9 +358,7 @@ func (b *backend) ForgetAttempt(
 	defer func() { _ = tx.Rollback() }()
 	var stored []byte
 	var completedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+	err = tx.QueryRowContext(ctx, b.statements.readIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
@@ -397,10 +379,10 @@ func (b *backend) ForgetAttempt(
 		return nil
 	}
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
-	if err := deleteAttempt(ctx, tx, key, attemptFingerprint); err != nil {
+	if err := b.deleteAttempt(ctx, tx, key, attemptFingerprint); err != nil {
 		return fmt.Errorf("inbox/sqlite: delete handler attempt: %w", err)
 	}
-	hasAttempts, err := hasAttempts(ctx, tx, key)
+	hasAttempts, err := b.hasAttempts(ctx, tx, key)
 	if err != nil {
 		return err
 	}
@@ -410,8 +392,7 @@ func (b *backend) ForgetAttempt(
 		}
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox
-        WHERE consumer_id = ? AND source = ? AND message_id = ? AND completed_at IS NULL`,
+	if _, err := tx.ExecContext(ctx, b.statements.deleteIncompleteIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return fmt.Errorf("inbox/sqlite: delete incomplete identity: %w", err)
 	}
@@ -421,31 +402,25 @@ func (b *backend) ForgetAttempt(
 	return nil
 }
 
-func deleteAttempt(
+func (b *backend) deleteAttempt(
 	ctx context.Context,
 	tx *sql.Tx,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+		_, err := tx.ExecContext(ctx, b.statements.deleteAttempt,
 			key.ConsumerID, key.Source, key.MessageID.String())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempt_generations
-	    WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`,
+	_, err := tx.ExecContext(ctx, b.statements.deleteAttemptGeneration,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:])
 	return err
 }
 
-func hasAttempts(ctx context.Context, tx *sql.Tx, key inbox.Key) (bool, error) {
+func (b *backend) hasAttempts(ctx context.Context, tx *sql.Tx, key inbox.Key) (bool, error) {
 	var exists bool
-	err := tx.QueryRowContext(ctx, `SELECT
-	    EXISTS(SELECT 1 FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?)
-	    OR EXISTS(SELECT 1 FROM gomessenger_inbox_attempt_generations
-	        WHERE consumer_id = ? AND source = ? AND message_id = ?)`,
+	err := tx.QueryRowContext(ctx, b.statements.hasAttempts,
 		key.ConsumerID, key.Source, key.MessageID.String(),
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&exists)
 	if err != nil {
@@ -460,31 +435,13 @@ func (b *backend) Prune(ctx context.Context, before time.Time, limit int) (int64
 		return 0, fmt.Errorf("inbox/sqlite: begin prune: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempt_generations
-	    WHERE (consumer_id, source, message_id) IN (
-	        SELECT consumer_id, source, message_id FROM gomessenger_inbox
-	        WHERE completed_at < ?
-	        ORDER BY completed_at, consumer_id, source, message_id
-	        LIMIT ?
-	    )`, before, limit); err != nil {
+	if _, err := tx.ExecContext(ctx, b.statements.pruneAttemptGenerations, before, limit); err != nil {
 		return 0, fmt.Errorf("inbox/sqlite: prune attempt generations: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempts
-        WHERE (consumer_id, source, message_id) IN (
-            SELECT consumer_id, source, message_id FROM gomessenger_inbox
-            WHERE completed_at < ?
-            ORDER BY completed_at, consumer_id, source, message_id
-            LIMIT ?
-        )`, before, limit); err != nil {
+	if _, err := tx.ExecContext(ctx, b.statements.pruneAttempts, before, limit); err != nil {
 		return 0, fmt.Errorf("inbox/sqlite: prune attempts: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox
-        WHERE rowid IN (
-            SELECT rowid FROM gomessenger_inbox
-            WHERE completed_at < ?
-            ORDER BY completed_at, consumer_id, source, message_id
-            LIMIT ?
-        )`, before, limit)
+	result, err := tx.ExecContext(ctx, b.statements.pruneInbox, before, limit)
 	if err != nil {
 		return 0, fmt.Errorf("inbox/sqlite: prune: %w", err)
 	}
@@ -506,9 +463,7 @@ func (b *backend) handleExisting(
 ) (inbox.Result, bool, error) {
 	var stored []byte
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`,
+	if err := tx.QueryRowContext(ctx, b.statements.readIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: read identity: %w", err)
 	}

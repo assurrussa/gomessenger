@@ -31,11 +31,13 @@ into the root facade or hide materially different ordering and retry behavior.
 - Use consumer-specific retry tiers, replay ingress, DLQ topics, and consumer groups. Default retry tiers are 1 second,
   10 seconds, 1 minute, and 5 minutes. Retry topics have unlimited time and size retention.
 - Preserve exact `not-before` in control headers. Topic tier is a scheduling bucket, not the logical retry deadline.
-- Use blocked-rebalance polling only for retry preflight and exact cursor rewind. An early retry pauses only its concrete
-  topic-partition, verifies the local and uncommitted leader-epoch/offset rewind, and is represented only by its
-  partition and deadline in a bounded worker-local scheduler. Release the rebalance block before handlers, Inbox work,
-  or Kafka transactions; continue polling other partitions and resume only scheduler-owned pauses at their deadline.
-  Fail the worker closed when the rewind cannot be confirmed.
+- Use blocked-rebalance polling only for bounded retry preflight and exact cursor rewind. Preflight validates control
+  metadata plus native envelope structure, descriptor, key, and expiry without calling the application codec, and never
+  schedules a `not-before` at or beyond `ExpiresAt`. An early retry pauses only its concrete topic-partition, verifies
+  the local and uncommitted leader-epoch/offset rewind, and is represented only by its partition and deadline in a
+  bounded worker-local scheduler. Release the rebalance block before custom codec, handler, Inbox, or Kafka transaction
+  work; continue polling other partitions and resume only scheduler-owned pauses at their deadline. Fail the worker
+  closed when the rewind cannot be confirmed.
 - Verify topic presence, equal partition counts, and unlimited retry retention before starting workers. Bound group
   rebalance completion by broker transaction finalization rather than handler execution time.
 - Preserve source ordering only until the first failure. Records routed through retry topics may be overtaken.

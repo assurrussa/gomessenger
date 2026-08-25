@@ -5,6 +5,11 @@ durable consumption, and graceful shutdown. GoMessenger supplies messaging contr
 database connections, broker endpoints and credentials, migrations, topology policy, transaction boundaries, process
 supervision, and deployment. The Kafka adapter creates franz-go clients from that host input.
 
+To see those boundaries execute before adapting them to a host, run the checkout-level
+[PostgreSQL + NATS durable demo](../examples/durable-postgres-nats). It intentionally exercises retry rollback, Inbox
+duplicate suppression, permanent DLQ hand-off, and replay. The demo uses local GoMessenger replacements and is not a
+published-module or production-readiness proof.
+
 The snippets below belong in an application's composition root. Variables such as `database`, `natsConnection`,
 `outboxRuntime`, and business repositories are deliberately host-owned dependencies.
 
@@ -204,21 +209,32 @@ cannot be made atomic that way.
 
 ## 3. Compose a durable consumer
 
-Apply the additive Inbox migrations before constructing the store. Size a shared connection pool for the sum of all
-active consumer concurrency values plus application and maintenance headroom.
+Apply the additive Inbox migrations before constructing the store. The Inbox transaction remains open for the full
+handler invocation so the business writes and completion marker commit atomically. `database/sql` is the host-managed
+backpressure boundary; size a shared pool for the sum of all active consumer concurrency values plus application and
+maintenance headroom.
 
 ```go
 const consumerConcurrency = 8
 
 database.SetMaxOpenConns(consumerConcurrency + 4)
-if err := inboxpgsql.Migrate(ctx, database); err != nil {
+inboxOptions := []inboxpgsql.Option{
+inboxpgsql.WithSchema("messaging"),
+inboxpgsql.WithTablePrefix("site_"),
+}
+if err := inboxpgsql.Migrate(ctx, database, inboxOptions...); err != nil {
 return err
 }
-inboxStore, err := inboxpgsql.New(database)
+inboxStore, err := inboxpgsql.New(database, inboxOptions...)
 if err != nil {
 return err
 }
 ```
+
+The host must create the PostgreSQL schema and grant access before migration. Both backends default to the
+`gomessenger_` prefix; SQLite accepts `WithTablePrefix` but has no schema option. Always pass the same namespace options
+to `Migrate` and `New`. A new prefix or schema is an independent Inbox and does not automatically inherit, rename, or
+copy existing deduplication history.
 
 Construct one consumer with a stable `ConsumerID`. Renaming it creates a different durable consumer and normally
 reprocesses retained messages.

@@ -10,6 +10,7 @@ use (
 	./testdata/consumer
 	./testdata/e2e
 	./tools/gomessengerctl
+	./examples/durable-postgres-nats
 )
 
 replace (

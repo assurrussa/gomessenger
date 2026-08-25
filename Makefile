@@ -1,10 +1,11 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
-MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl
-LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl
+MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
+LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 E2E_MODULE := testdata/e2e
+DEMO_COMPOSE := examples/durable-postgres-nats/compose.yaml
 
-.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-kafka test-postgres check bench-all release-ready release-readiness
+.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-kafka test-postgres check bench-all release-ready release-readiness demo-durable-postgres-nats demo-durable-postgres-nats-down
 
 prepare:
 	@$(GO) work sync
@@ -18,7 +19,7 @@ fmt-check:
 
 build:
 	@for module in $(MODULES); do \
-		if [ "$$module" = "tools/gomessengerctl" ]; then \
+		if [ "$$module" = "tools/gomessengerctl" ] || [ "$$module" = "examples/durable-postgres-nats" ]; then \
 			(cd $$module && GOWORK=off $(GO) build -o /dev/null .) || exit 1; \
 		else \
 			(cd $$module && GOWORK=off $(GO) build ./...) || exit 1; \
@@ -100,3 +101,9 @@ release-readiness:
 
 bench-all:
 	@GOWORK=off $(GO) test -run '^$$' -bench . -benchmem ./...
+
+demo-durable-postgres-nats:
+	@docker compose -f $(DEMO_COMPOSE) up --build --abort-on-container-exit --exit-code-from demo
+
+demo-durable-postgres-nats-down:
+	@docker compose -f $(DEMO_COMPOSE) down --volumes --remove-orphans

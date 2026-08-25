@@ -42,7 +42,11 @@ type decodedMessage struct {
 	handle    func(context.Context) error
 }
 
-type decoder func([]byte) (decodedMessage, error)
+type preparedEnvelope struct {
+	envelope messenger.Envelope
+}
+
+type decoder func(preparedEnvelope) (decodedMessage, error)
 
 type consumerState uint8
 
@@ -98,15 +102,21 @@ func NewCommandConsumer[T any](
 	if handler == nil {
 		return nil, fmt.Errorf("%w: nil command handler", ErrInvalidConfig)
 	}
-	decode := func(data []byte) (decodedMessage, error) {
-		canonical, err := messenger.CanonicalizeEnvelope(data)
+	decode := func(prepared preparedEnvelope) (decodedMessage, error) {
+		metadata := prepared.envelope.Metadata()
+		payloadBytes, encoding, err := prepared.envelope.Payload()
 		if err != nil {
 			return decodedMessage{}, err
 		}
-		message, err := messenger.DecodeCommand(descriptor, canonical)
+		canonical, err := messenger.MarshalEnvelope(metadata, payloadBytes, encoding)
 		if err != nil {
 			return decodedMessage{}, err
 		}
+		payload, err := messenger.DecodeCommandPayload(descriptor, payloadBytes)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+		message := messenger.Message[T]{Metadata: metadata, Payload: payload}
 		return decodedMessage{
 			metadata: message.Metadata, canonical: canonical,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
@@ -126,15 +136,21 @@ func NewEventConsumer[T any](
 	if handler == nil {
 		return nil, fmt.Errorf("%w: nil event handler", ErrInvalidConfig)
 	}
-	decode := func(data []byte) (decodedMessage, error) {
-		canonical, err := messenger.CanonicalizeEnvelope(data)
+	decode := func(prepared preparedEnvelope) (decodedMessage, error) {
+		metadata := prepared.envelope.Metadata()
+		payloadBytes, encoding, err := prepared.envelope.Payload()
 		if err != nil {
 			return decodedMessage{}, err
 		}
-		message, err := messenger.DecodeEvent(descriptor, canonical)
+		canonical, err := messenger.MarshalEnvelope(metadata, payloadBytes, encoding)
 		if err != nil {
 			return decodedMessage{}, err
 		}
+		payload, err := messenger.DecodeEventPayload(descriptor, payloadBytes)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+		message := messenger.Message[T]{Metadata: metadata, Payload: payload}
 		return decodedMessage{
 			metadata: message.Metadata, canonical: canonical,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
@@ -392,7 +408,7 @@ func (c *Consumer) runWorker(ctx context.Context, index int, ready func()) error
 
 type preparedRecord struct {
 	control     controlMetadata
-	decoded     decodedMessage
+	envelope    preparedEnvelope
 	observedAt  time.Time
 	retryAt     time.Time
 	failureKind string
@@ -648,27 +664,66 @@ func (c *Consumer) prepareRecord(record *kgo.Record) preparedRecord {
 			attempt: max(1, control.attempt),
 		}
 	}
-	decoded, err := c.decode(record.Value)
+	now := c.clock().UTC()
+	envelope, err := messenger.UnmarshalEnvelope(record.Value)
 	if err != nil {
 		return preparedRecord{
-			control: control, failureKind: "decode", failure: err, attempt: max(1, control.attempt),
+			control: control, observedAt: now, failureKind: failureKindDecode, failure: err,
+			attempt: max(1, control.attempt),
 		}
 	}
-	if err := validateRecordKey(record.Key, decoded.metadata); err != nil {
+	metadata := envelope.Metadata()
+	messageID := metadata.ID.String()
+	if err := validateEnvelopeDescriptor(envelope, c.descriptor); err != nil {
 		return preparedRecord{
-			control: control, decoded: decoded, failureKind: "identity_conflict", failure: err,
-			attempt: max(1, control.attempt), messageID: decoded.metadata.ID.String(),
+			control: control, observedAt: now, failureKind: failureKindDecode, failure: err,
+			attempt: max(1, control.attempt), messageID: messageID,
 		}
 	}
-	now := c.clock().UTC()
-	retryAt, timingErr := retryDue(control.notBefore, decoded.metadata.ExpiresAt, now)
+	if err := validateRecordKey(record.Key, metadata); err != nil {
+		return preparedRecord{
+			control: control, observedAt: now, failureKind: "identity_conflict", failure: err,
+			attempt: max(1, control.attempt), messageID: messageID,
+		}
+	}
+	retryAt, timingErr := retryDue(control.notBefore, metadata.ExpiresAt, now)
 	if timingErr != nil {
 		return preparedRecord{
-			control: control, decoded: decoded, observedAt: now, failureKind: "expired", failure: timingErr,
-			attempt: max(1, control.attempt), messageID: decoded.metadata.ID.String(),
+			control: control, observedAt: now, failureKind: "expired", failure: timingErr,
+			attempt: max(1, control.attempt), messageID: messageID,
 		}
 	}
-	return preparedRecord{control: control, decoded: decoded, observedAt: now, retryAt: retryAt}
+	if !retryAt.IsZero() {
+		return preparedRecord{control: control, observedAt: now, retryAt: retryAt}
+	}
+	return preparedRecord{
+		control:    control,
+		envelope:   preparedEnvelope{envelope: envelope},
+		observedAt: now,
+	}
+}
+
+func validateEnvelopeDescriptor(envelope messenger.Envelope, descriptor messenger.DescriptorInfo) error {
+	if envelope.Kind != descriptor.Kind || envelope.Name != descriptor.Name ||
+		envelope.SchemaVersion != descriptor.SchemaVersion || envelope.ContentType != descriptor.ContentType ||
+		envelope.DataEncoding != descriptor.DataEncoding || envelope.Schema != descriptor.Schema {
+		return fmt.Errorf("%w: envelope does not match %s v%d",
+			messenger.ErrDescriptorConflict, descriptor.Name, descriptor.SchemaVersion)
+	}
+	return nil
+}
+
+func retryDue(notBefore, expiresAt, now time.Time) (time.Time, error) {
+	if !expiresAt.IsZero() && !expiresAt.After(now) {
+		return time.Time{}, ErrMessageExpired
+	}
+	if notBefore.IsZero() || !notBefore.After(now) {
+		return time.Time{}, nil
+	}
+	if !expiresAt.IsZero() && !expiresAt.After(notBefore) {
+		return time.Time{}, ErrMessageExpired
+	}
+	return notBefore, nil
 }
 
 func (c *Consumer) processPreparedRecord(
@@ -690,7 +745,11 @@ func (c *Consumer) processPreparedRecord(
 		)
 	}
 	control := prepared.control
-	decoded := prepared.decoded
+	decoded, err := c.decode(prepared.envelope)
+	if err != nil {
+		return c.deadLetterRecord(ctx, session, record, control, failureKindDecode, err,
+			max(1, control.attempt), prepared.envelope.envelope.ID.String())
+	}
 	now := c.clock().UTC()
 	if !decoded.metadata.ExpiresAt.IsZero() && !decoded.metadata.ExpiresAt.After(now) {
 		return c.deadLetterRecord(ctx, session, record, control, "expired", ErrMessageExpired,
@@ -895,19 +954,6 @@ func (c *Consumer) logDeferredPartition(ctx context.Context, record *kgo.Record,
 		return
 	}
 	logInfrastructure(ctx, c.config.Logger, messenger.LogDebug, "Kafka retry partition deferred", attrs...)
-}
-
-func retryDue(notBefore, expiresAt, now time.Time) (time.Time, error) {
-	if !expiresAt.IsZero() && !expiresAt.After(now) {
-		return time.Time{}, ErrMessageExpired
-	}
-	if notBefore.IsZero() || !notBefore.After(now) {
-		return time.Time{}, nil
-	}
-	if !expiresAt.IsZero() && !expiresAt.After(notBefore) {
-		return time.Time{}, ErrMessageExpired
-	}
-	return notBefore, nil
 }
 
 func handlerTransactionTimeout(handlerTimeout, finalizationTimeout time.Duration) time.Duration {

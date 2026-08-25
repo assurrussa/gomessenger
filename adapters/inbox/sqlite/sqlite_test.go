@@ -416,6 +416,147 @@ func TestStore_PruneUsesBoundedBatch(t *testing.T) {
 	}
 }
 
+func TestStore_CustomTablePrefixCoversLifecycle(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	options := []inboxsqlite.Option{inboxsqlite.WithTablePrefix("site_")}
+	if err := inboxsqlite.Migrate(t.Context(), db, options...); err != nil {
+		t.Fatalf("first custom migration: %v", err)
+	}
+	if err := inboxsqlite.Migrate(t.Context(), db, options...); err != nil {
+		t.Fatalf("idempotent custom migration: %v", err)
+	}
+	store, err := inboxsqlite.New(db, options...)
+	if err != nil {
+		t.Fatalf("new custom store: %v", err)
+	}
+
+	assertSQLiteNamespace(t, db)
+
+	identityKey := inbox.Key{
+		ConsumerID: testConsumerID,
+		Source:     testSource,
+		MessageID:  mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000021"),
+	}
+	identityFingerprint := inbox.FingerprintEnvelope([]byte("custom-identity"))
+	var identityCalls atomic.Int32
+	handler := func(context.Context) error {
+		identityCalls.Add(1)
+		return nil
+	}
+	result, processErr := store.Process(t.Context(), identityKey, identityFingerprint, handler)
+	if processErr != nil || result.Duplicate {
+		t.Fatalf("custom identity = %#v, %v", result, processErr)
+	}
+	result, processErr = store.Process(t.Context(), identityKey, identityFingerprint, handler)
+	if processErr != nil || !result.Duplicate || identityCalls.Load() != 1 {
+		t.Fatalf("custom duplicate = %#v, calls=%d, error=%v", result, identityCalls.Load(), processErr)
+	}
+
+	attemptKey := inbox.Key{
+		ConsumerID: testConsumerID,
+		Source:     testSource,
+		MessageID:  mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000022"),
+	}
+	attemptFingerprint := inbox.FingerprintEnvelope([]byte("custom-attempt"))
+	if result, processErr := store.ProcessAttempt(
+		t.Context(), attemptKey, attemptFingerprint, 2, func(context.Context) error { return nil },
+	); processErr != nil || result.Attempt != 1 {
+		t.Fatalf("custom attempt = %#v, %v", result, processErr)
+	}
+
+	generationKey := inbox.Key{
+		ConsumerID:        testConsumerID,
+		Source:            testSource,
+		MessageID:         mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000023"),
+		AttemptGeneration: "gm-custom-replay",
+	}
+	generationFingerprint := inbox.FingerprintEnvelope([]byte("custom-generation"))
+	if result, processErr := store.ProcessAttempt(
+		t.Context(), generationKey, generationFingerprint, 2, func(context.Context) error { return nil },
+	); processErr != nil || result.Attempt != 1 {
+		t.Fatalf("custom attempt generation = %#v, %v", result, processErr)
+	}
+
+	forgottenKey := inbox.Key{
+		ConsumerID:        testConsumerID,
+		Source:            testSource,
+		MessageID:         mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000024"),
+		AttemptGeneration: "gm-custom-forget",
+	}
+	forgottenFingerprint := inbox.FingerprintEnvelope([]byte("custom-forget"))
+	wantRetry := errors.New("retry")
+	if result, processErr := store.ProcessAttempt(
+		t.Context(), forgottenKey, forgottenFingerprint, 2, func(context.Context) error { return wantRetry },
+	); !errors.Is(processErr, wantRetry) || result.Attempt != 1 {
+		t.Fatalf("custom failed generation = %#v, %v", result, processErr)
+	}
+	if err := store.ForgetAttempt(t.Context(), forgottenKey, forgottenFingerprint); err != nil {
+		t.Fatalf("forget custom generation: %v", err)
+	}
+	assertSQLiteRowCount(t, db, "site_inbox_attempts", 1)
+	assertSQLiteRowCount(t, db, "site_inbox_attempt_generations", 1)
+	assertSQLiteRowCount(t, db, "site_inbox", 3)
+
+	deleted, err := store.Prune(t.Context(), time.Now().Add(time.Minute), 10)
+	if err != nil || deleted != 3 {
+		t.Fatalf("custom prune = %d, %v", deleted, err)
+	}
+	assertSQLiteRowCount(t, db, "site_inbox", 0)
+	assertSQLiteRowCount(t, db, "site_inbox_attempts", 0)
+	assertSQLiteRowCount(t, db, "site_inbox_attempt_generations", 0)
+}
+
+func assertSQLiteNamespace(t *testing.T, db *sql.DB) {
+	t.Helper()
+	const objectTypeTable = "table"
+	want := map[string]string{
+		"site_inbox":                     objectTypeTable,
+		"site_inbox_attempts":            objectTypeTable,
+		"site_inbox_attempt_generations": objectTypeTable,
+		"site_inbox_completed_at_idx":    "index",
+	}
+	rows, err := db.QueryContext(t.Context(), `SELECT name, type FROM sqlite_master
+		WHERE name LIKE 'site_%' OR name LIKE 'gomessenger_%'`)
+	if err != nil {
+		t.Fatalf("inspect custom namespace: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	seen := make(map[string]string, len(want))
+	for rows.Next() {
+		var name, objectType string
+		if err := rows.Scan(&name, &objectType); err != nil {
+			t.Fatalf("scan custom namespace: %v", err)
+		}
+		seen[name] = objectType
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate custom namespace: %v", err)
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("custom namespace objects = %#v, want %#v", seen, want)
+	}
+	for name, objectType := range want {
+		if seen[name] != objectType {
+			t.Fatalf("custom namespace object %q = %q, want %q", name, seen[name], objectType)
+		}
+	}
+}
+
+func assertSQLiteRowCount(t *testing.T, db *sql.DB, table string, want int) {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM "`+table+`"`).Scan(&count); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	if count != want {
+		t.Fatalf("%s rows = %d, want %d", table, count, want)
+	}
+}
+
 func openDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")

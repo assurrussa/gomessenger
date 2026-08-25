@@ -5,4 +5,5 @@
 .vscode
 *.out
 *.test
+/examples/durable-postgres-nats/gomessenger-durable-postgres-nats
 .DS_Store

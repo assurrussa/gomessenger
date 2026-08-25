@@ -7,6 +7,11 @@ modules.
 GoMessenger is additive. A service can introduce one descriptor and route at a time while existing GoBus handlers,
 outbox jobs, and webhook contracts continue unchanged.
 
+Before adopting it, use the [use-case comparison](docs/comparison.md) to decide whether GoBus, direct broker APIs,
+synchronous RPC, or a workflow engine is the smaller boundary. The
+[PostgreSQL + NATS durable demo](examples/durable-postgres-nats) is the fastest checkout-level evaluation of the full
+Outbox/Inbox path; it does not replace the published-module probe or real-service pilot.
+
 ## From GoBus only
 
 Keep GoBus for low-level process-local work that does not need the shared facade. Introduce GoMessenger when code wants

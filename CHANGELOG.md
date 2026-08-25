@@ -34,6 +34,10 @@ All notable changes to this project will be documented in this file.
   and operational validation;
 - local method benchmarks for command send, query execution, and event publication;
 - clean local and published-consumer verification paths;
+- a runnable PostgreSQL-to-Outbox-to-JetStream-to-Inbox demo with intentional retry, duplicate suppression, permanent
+  DLQ hand-off, and confirmed replay;
+- public positioning as typed durable messaging for Go, a pre-release-safe README path, and an explicit use-case
+  comparison against smaller, broker-native, workflow, RPC, and custom alternatives;
 - GitHub Actions for the full read-only gate, PostgreSQL and Kafka integration, and raw `benchstat` comparisons.
 
 ### Fixed

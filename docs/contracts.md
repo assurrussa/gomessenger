@@ -110,6 +110,14 @@ marker. The unique key serializes concurrent new identities. Bounded handling ke
 handler savepoint in that transaction, so failed business writes roll back while the invocation count commits; an
 already persisted incomplete identity is row-locked before the next attempt.
 
+That SQL transaction remains open for the full handler invocation. The host sizes and monitors the shared
+`database/sql` pool; it is the intended connection backpressure boundary and the Inbox adapter adds no second semaphore.
+The default table prefix is `gomessenger_`. PostgreSQL and SQLite accept `WithTablePrefix`; PostgreSQL also accepts
+`WithSchema` and fully qualifies every relation without creating the schema. Prefixes are empty or match
+`[a-z_][a-z0-9_]*` up to 38 bytes; schemas use the same form up to 63 bytes, and generated identifiers are SQL-quoted.
+`Migrate` and `New` must receive the same options. Selecting another prefix or schema creates an independent Inbox and
+does not migrate existing identity or attempt history.
+
 Attempt generations do not change the logical inbox key or bypass a completed identity. A confirmed DLQ replay carries
 a consumer-scoped generation derived from that DLQ hand-off. The first delivery in a new generation atomically starts a
 fresh bounded counter; redeliveries in the same generation continue that counter, and interleaved generations retain
@@ -213,12 +221,17 @@ fresh bounded broker context so commit or abort finalization is not interrupted 
 
 On handler success, the consumed offset commits in a Kafka transaction. On retry, the same canonical bytes and key are
 produced to a consumer retry tier atomically with that offset. The exact due time is a reserved control header; the tier
-is only a scheduling bucket. Retry topics have unlimited time and size retention. An early retry record pauses and
-rewinds only its concrete topic-partition to the exact leader epoch and offset; an unconfirmed rewind fails the worker
-closed. A bounded deadline scheduler retains no record payload, polling continues for other partitions, and only
-scheduler-owned pauses resume at their due time so the record is fetched again. Rebalance blocking covers only the
-preflight and rewind, never handler, Inbox, or Kafka transaction execution. `MaxAttempts`, Inbox savepoint behavior,
-permanent outcomes, and attempt generations retain the same handler-invocation meaning as the JetStream path.
+is only a scheduling bucket. Retry topics have unlimited time and size retention. A bounded preflight validates control
+metadata plus the native envelope structure, descriptor, record key, and expiry without invoking the application codec.
+A retry is deferred only when its exact `not-before` precedes `ExpiresAt`; an expired or impossible window becomes a
+terminal outcome instead of a scheduled pause. An early retry record pauses and rewinds only its concrete
+topic-partition to the exact leader epoch and offset; an unconfirmed rewind fails the worker closed. A bounded deadline
+scheduler retains no record payload, polling continues for other partitions, and only scheduler-owned pauses resume at
+their due time so the record is fetched again. The worker calls `AllowRebalance` before canonicalization, custom
+`Codec.Decode`, Inbox, handler, or Kafka transaction execution. Invalid control or envelope metadata and expired records
+enter their transactional DLQ hand-off only after that release. A valid early retry does not invoke its codec until the
+partition resumes and the record is fetched again. `MaxAttempts`, Inbox savepoint behavior, permanent outcomes, and
+attempt generations retain the same handler-invocation meaning as the JetStream path.
 
 Permanent and exhausted records are handed to the consumer-specific Kafka DLQ atomically with the consumed offset. DLQ
 v1 is bounded and records source position, original key/bytes, message identity, attempt/generation, failure class,

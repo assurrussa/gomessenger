@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
+	"github.com/assurrussa/gomessenger/adapters/inbox"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -40,6 +42,39 @@ type consumerSessionRecorder struct {
 type forceCancellationSession struct {
 	consumerSessionRecorder
 	endStarted chan struct{}
+}
+
+type passthroughAttemptBackend struct{}
+
+func (passthroughAttemptBackend) Process(
+	ctx context.Context,
+	_ inbox.Key,
+	_ inbox.Fingerprint,
+	handler inbox.Handler,
+) (inbox.Result, error) {
+	return inbox.Result{}, handler(ctx)
+}
+
+func (passthroughAttemptBackend) ProcessAttempt(
+	ctx context.Context,
+	_ inbox.Key,
+	_ inbox.Fingerprint,
+	_ uint64,
+	handler inbox.Handler,
+) (inbox.Result, error) {
+	return inbox.Result{Attempt: 1}, handler(ctx)
+}
+
+func (passthroughAttemptBackend) ForgetAttempt(context.Context, inbox.Key, inbox.Fingerprint) error {
+	return nil
+}
+
+func (passthroughAttemptBackend) Prune(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
+type rebalanceCodecPayload struct {
+	OrderID string `json:"orderId"`
 }
 
 func (recorder *consumerSessionRecorder) GroupMetadata() (string, int32) {
@@ -347,6 +382,238 @@ func TestConsumerPollTimeoutAllowsRebalance(t *testing.T) {
 	if got := session.allowRebalanceCalls.Load(); got != 1 {
 		t.Fatalf("AllowRebalance calls after timeout = %d, want 1", got)
 	}
+}
+
+func TestConsumerAllowsRebalanceBeforeBlockingCustomCodec(t *testing.T) {
+	native, key := testNativeEnvelope(t)
+	session := &consumerSessionRecorder{}
+	decodeStarted := make(chan struct{})
+	releaseDecode := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseDecode) })
+	var decodeCalls atomic.Int32
+	var allowAtDecode atomic.Int32
+	var consumer *Consumer
+	consumer = newRebalanceCodecConsumer(t, func(data []byte) (rebalanceCodecPayload, error) {
+		decodeCalls.Add(1)
+		allowAtDecode.Store(session.allowRebalanceCalls.Load())
+		close(decodeStarted)
+		<-releaseDecode
+		var payload rebalanceCodecPayload
+		return payload, json.Unmarshal(data, &payload)
+	}, func(context.Context, messenger.Message[rebalanceCodecPayload]) error {
+		consumer.BeginDrain()
+		return nil
+	})
+	record := &kgo.Record{
+		Topic: testSourceTopic, Partition: 0, LeaderEpoch: 2, Offset: 7, Key: key, Value: native,
+	}
+	session.fetches = fetchesWithRecord(record)
+	done := make(chan error, 1)
+	go func() {
+		done <- consumer.runWorkerSession(
+			t.Context(), session, nil, consumer.prepareRecord, consumer.processPreparedRecord,
+		)
+	}()
+
+	select {
+	case <-decodeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("custom codec did not start")
+	}
+	if got := allowAtDecode.Load(); got != 1 {
+		t.Fatalf("AllowRebalance calls when custom codec started = %d, want 1", got)
+	}
+	if session.beginCalls.Load() != 0 {
+		t.Fatalf("Kafka transaction began while custom codec was blocked")
+	}
+	releaseOnce.Do(func() { close(releaseDecode) })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runWorkerSession: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not finish after custom codec was released")
+	}
+	if got := decodeCalls.Load(); got != 1 {
+		t.Fatalf("custom codec calls = %d, want 1", got)
+	}
+	if session.beginCalls.Load() != 1 || session.endCalls.Load() != 1 {
+		t.Fatalf("transaction calls = begin:%d end:%d, want 1 each",
+			session.beginCalls.Load(), session.endCalls.Load())
+	}
+}
+
+func TestConsumerEarlyRetryDefersCodecUntilRefetch(t *testing.T) {
+	native, key := testNativeEnvelope(t)
+	session := &consumerSessionRecorder{}
+	var decodeCalls atomic.Int32
+	var allowAtDecode atomic.Int32
+	var consumer *Consumer
+	consumer = newRebalanceCodecConsumer(t, func(data []byte) (rebalanceCodecPayload, error) {
+		decodeCalls.Add(1)
+		allowAtDecode.Store(session.allowRebalanceCalls.Load())
+		var payload rebalanceCodecPayload
+		return payload, json.Unmarshal(data, &payload)
+	}, func(context.Context, messenger.Message[rebalanceCodecPayload]) error {
+		consumer.BeginDrain()
+		return nil
+	})
+	due := time.Now().UTC().Add(50 * time.Millisecond)
+	record := &kgo.Record{
+		Topic: consumer.retryTopics[0], Partition: 0, LeaderEpoch: 4, Offset: 12, Key: key, Value: native,
+		Headers: controlHeaders(controlMetadata{
+			source:  sourcePosition{topic: testSourceTopic, partition: 0, offset: 3},
+			attempt: 1, notBefore: due,
+		}),
+	}
+	var pollIndex atomic.Int32
+	session.poll = func(ctx context.Context, _ int) kgo.Fetches {
+		switch pollIndex.Add(1) {
+		case 1:
+			return fetchesWithRecord(record)
+		case 2:
+			if got := decodeCalls.Load(); got != 0 {
+				t.Fatalf("custom codec ran during early retry deferral: %d calls", got)
+			}
+			if got := session.allowRebalanceCalls.Load(); got != 1 {
+				t.Fatalf("AllowRebalance calls after early retry deferral = %d, want 1", got)
+			}
+			<-ctx.Done()
+			return kgo.NewErrFetch(ctx.Err())
+		case 3:
+			return fetchesWithRecord(record)
+		default:
+			<-ctx.Done()
+			return kgo.NewErrFetch(ctx.Err())
+		}
+	}
+
+	if err := consumer.runWorkerSession(
+		t.Context(), session, nil, consumer.prepareRecord, consumer.processPreparedRecord,
+	); err != nil {
+		t.Fatalf("runWorkerSession: %v", err)
+	}
+	if got := decodeCalls.Load(); got != 1 {
+		t.Fatalf("custom codec calls after refetch = %d, want 1", got)
+	}
+	if got := allowAtDecode.Load(); got != 3 {
+		t.Fatalf("AllowRebalance calls when refetched codec ran = %d, want 3", got)
+	}
+	if got := pollIndex.Load(); got != 3 {
+		t.Fatalf("poll calls = %d, want 3", got)
+	}
+	partition := topicPartition{topic: record.Topic, partition: record.Partition}
+	if containsPartition(session.PauseFetchPartitions(nil), partition) {
+		t.Fatalf("retry partition %v remained paused after deadline", partition)
+	}
+}
+
+func TestConsumerPreflightRejectsRetryAtOrBeyondExpiryWithoutCustomCodec(t *testing.T) {
+	now := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
+	native, key := testNativeEnvelope(t)
+	envelope, err := messenger.UnmarshalEnvelope(native)
+	if err != nil {
+		t.Fatalf("UnmarshalEnvelope: %v", err)
+	}
+	payload, encoding, err := envelope.Payload()
+	if err != nil {
+		t.Fatalf("Payload: %v", err)
+	}
+	metadata := envelope.Metadata()
+	metadata.ExpiresAt = now.Add(time.Minute)
+	native, err = messenger.MarshalEnvelope(metadata, payload, encoding)
+	if err != nil {
+		t.Fatalf("MarshalEnvelope: %v", err)
+	}
+	var decodeCalls atomic.Int32
+	consumer := newRebalanceCodecConsumer(t, func([]byte) (rebalanceCodecPayload, error) {
+		decodeCalls.Add(1)
+		return rebalanceCodecPayload{}, nil
+	}, func(context.Context, messenger.Message[rebalanceCodecPayload]) error {
+		t.Fatal("handler ran for an undeliverable retry")
+		return nil
+	})
+	consumer.clock = func() time.Time { return now }
+	record := &kgo.Record{
+		Topic: consumer.retryTopics[0], Partition: 0, Offset: 12, Key: key, Value: native,
+		Headers: controlHeaders(controlMetadata{
+			source:  sourcePosition{topic: testSourceTopic, partition: 0, offset: 3},
+			attempt: 1, notBefore: now.Add(2 * time.Minute),
+		}),
+	}
+
+	prepared := consumer.prepareRecord(record)
+	if !errors.Is(prepared.failure, ErrMessageExpired) || prepared.failureKind != "expired" {
+		t.Fatalf("preflight failure = %q, %v, want expired", prepared.failureKind, prepared.failure)
+	}
+	if !prepared.retryAt.IsZero() {
+		t.Fatalf("preflight retry deadline = %s, want none", prepared.retryAt)
+	}
+	if prepared.messageID != metadata.ID.String() {
+		t.Fatalf("preflight message ID = %q, want %q", prepared.messageID, metadata.ID.String())
+	}
+	if got := decodeCalls.Load(); got != 0 {
+		t.Fatalf("custom codec calls during expiry preflight = %d, want 0", got)
+	}
+}
+
+func TestConsumerPreflightRejectsMalformedEnvelopeBeforeRetryDeferral(t *testing.T) {
+	now := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
+	consumer := &Consumer{
+		descriptor: messenger.MustEvent("orders.created", 1, messenger.JSON[rebalanceCodecPayload]()).Info(),
+		clock:      func() time.Time { return now }, sourceTopic: testSourceTopic,
+		retrySet: map[string]struct{}{testSourceTopic + ".gm.worker.retry.0": {}},
+	}
+	retryTopic := testSourceTopic + ".gm.worker.retry.0"
+	record := &kgo.Record{
+		Topic: retryTopic, Partition: 0, Offset: 1, Key: []byte(testDomainKey), Value: []byte(`{"invalid":`),
+		Headers: controlHeaders(controlMetadata{
+			source:  sourcePosition{topic: testSourceTopic, partition: 0, offset: 0},
+			attempt: 1, notBefore: now.Add(time.Minute),
+		}),
+	}
+
+	prepared := consumer.prepareRecord(record)
+	if prepared.failure == nil || prepared.failureKind != failureKindDecode {
+		t.Fatalf("preflight failure = %q, %v, want decode", prepared.failureKind, prepared.failure)
+	}
+	if !prepared.retryAt.IsZero() {
+		t.Fatalf("preflight retry deadline = %s, want none", prepared.retryAt)
+	}
+}
+
+func newRebalanceCodecConsumer(
+	t *testing.T,
+	decode func([]byte) (rebalanceCodecPayload, error),
+	handler messenger.Handler[rebalanceCodecPayload],
+) *Consumer {
+	t.Helper()
+	codec, err := messenger.CustomCodec(
+		"application/json",
+		messenger.DataJSON,
+		func(payload rebalanceCodecPayload) ([]byte, error) { return json.Marshal(payload) },
+		decode,
+	)
+	if err != nil {
+		t.Fatalf("custom codec: %v", err)
+	}
+	store, err := inbox.New(passthroughAttemptBackend{})
+	if err != nil {
+		t.Fatalf("new passthrough Inbox: %v", err)
+	}
+	consumer, err := NewEventConsumer(
+		&Transport{config: TransportConfig{OperationTimeout: time.Second}},
+		store,
+		messenger.MustEvent("orders.created", 1, codec),
+		handler,
+		HandlerConfig{Namespace: testNamespace, ConsumerID: testConsumerID},
+	)
+	if err != nil {
+		t.Fatalf("new event consumer: %v", err)
+	}
+	return consumer
 }
 
 func TestConsumerDrainAfterPollDoesNotProcessFetchedRecord(t *testing.T) {

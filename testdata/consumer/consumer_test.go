@@ -2,11 +2,14 @@ package consumer_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	inboxpgsql "github.com/assurrussa/gomessenger/adapters/inbox/pgsql"
+	inboxsqlite "github.com/assurrussa/gomessenger/adapters/inbox/sqlite"
 	kafkaadapter "github.com/assurrussa/gomessenger/adapters/kafka"
 	natsadapter "github.com/assurrussa/gomessenger/adapters/nats"
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
@@ -34,6 +37,19 @@ func (putter) PutVersionedUnique(
 }
 
 type backend struct{}
+
+func compileSQLInboxNamespaceAPI(ctx context.Context, db *sql.DB) {
+	postgresOptions := []inboxpgsql.Option{
+		inboxpgsql.WithSchema("messaging"),
+		inboxpgsql.WithTablePrefix("site_"),
+	}
+	_, _ = inboxpgsql.New(db, postgresOptions...)
+	_ = inboxpgsql.Migrate(ctx, db, postgresOptions...)
+
+	sqliteOptions := []inboxsqlite.Option{inboxsqlite.WithTablePrefix("site_")}
+	_, _ = inboxsqlite.New(db, sqliteOptions...)
+	_ = inboxsqlite.Migrate(ctx, db, sqliteOptions...)
+}
 
 func (backend) Process(
 	ctx context.Context,

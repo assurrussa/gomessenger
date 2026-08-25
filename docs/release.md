@@ -102,6 +102,23 @@ The script accepts only an exact stable `vX.Y.Z` tag, creates a clean temporary 
 by that tag, compiles the command/query/event facade and adapters, installs the published `gomessengerctl` module, and
 uses no local replacement. Record this separately from the local gate in the release notes.
 
+## Post-publication adoption surface
+
+Only after the published clean-consumer probe succeeds:
+
+1. replace the README pre-release notice with exact `go get MODULE@vX.Y.Z` commands for the local-only, NATS durable,
+   and Kafka durable scenarios;
+2. add and verify the latest-release and pkg.go.dev badges; add Go Report Card and coverage badges only when their
+   linked reports exist and describe the released repository state;
+3. retain the public description `Typed durable messaging for Go: commands, local queries, events, Outbox/Inbox, NATS
+   JetStream, Kafka, retries, and DLQ.` and keep topics focused on implemented messaging contracts;
+4. identify public material as `GoMessenger — typed durable messaging for Go` or `assurrussa/gomessenger` so the name
+   remains searchable without implying a universal messenger;
+5. publish release notes and technical launch material only with an explicit separation between source gates,
+   published-module verification, the still-pending real-service pilot, and any later deployment/manual smoke.
+
+Do not add `exactly-once`, `event-sourcing`, `saga`, or `workflow-engine` topics: those are not current product claims.
+
 ## Operational rollout
 
 Published packages are not a deployed service. For an infrastructure migration:

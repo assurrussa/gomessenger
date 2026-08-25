@@ -92,7 +92,7 @@ func TestDecodeDLQRecordRequiresSourcePositionFields(t *testing.T) {
 	record := DLQRecord{
 		SpecVersion: DLQSpecVersion, ConsumerID: testConsumerID, SourceTopic: testSourceTopic,
 		SourcePartition: 0, SourceOffset: 0, RecordKeyBase64: "", OriginalBase64: "",
-		Attempt: 1, FailureKind: "decode", Error: "empty", FailedAt: time.Now().UTC(),
+		Attempt: 1, FailureKind: failureKindDecode, Error: "empty", FailedAt: time.Now().UTC(),
 	}
 	encoded, err := encodeDLQRecord(record)
 	if err != nil {
@@ -136,7 +136,7 @@ func TestDLQFailureTextRoundTripsAsBoundedUTF8(t *testing.T) {
 				sourceControl(source),
 				"",
 				1,
-				"decode",
+				failureKindDecode,
 				errors.New(test.failure),
 				time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC),
 			)
@@ -162,7 +162,7 @@ func TestReplayRejectsUndecodableOriginal(t *testing.T) {
 		SourcePartition: 0, SourceOffset: 1,
 		RecordKeyBase64: base64.StdEncoding.EncodeToString([]byte("key")),
 		OriginalBase64:  base64.StdEncoding.EncodeToString([]byte("not an envelope")),
-		Attempt:         1, FailureKind: "decode", Error: "bad", FailedAt: time.Now().UTC(),
+		Attempt:         1, FailureKind: failureKindDecode, Error: "bad", FailedAt: time.Now().UTC(),
 	}
 	if _, err := PlanDLQReplay(record); err == nil {
 		t.Fatal("invalid original record was replayable")

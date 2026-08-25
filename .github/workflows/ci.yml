@@ -33,6 +33,7 @@ jobs:
             adapters/*/go.sum
             observability/go.sum
             tools/gomessengerctl/go.sum
+            examples/*/go.sum
             testdata/*/go.sum
       - name: Run formatting, build, and vet checks
         run: make fmt-check build vet
@@ -67,6 +68,7 @@ jobs:
             adapters/*/go.sum
             observability/go.sum
             tools/gomessengerctl/go.sum
+            examples/*/go.sum
             testdata/*/go.sum
       - name: Run unit, race, coverage, consumer, and E2E checks
         run: make test test-race cover test-consumer test-e2e
@@ -89,6 +91,7 @@ jobs:
             adapters/*/go.sum
             observability/go.sum
             tools/gomessengerctl/go.sum
+            examples/*/go.sum
             testdata/*/go.sum
       - name: Run checkptr tests
         run: make test-checkptr
