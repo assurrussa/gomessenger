@@ -95,25 +95,6 @@ jobs:
       - name: Verify checkptr did not mutate tracked files
         run: git diff --exit-code -- .
 
-  check:
-    name: Full gate
-    if: ${{ always() }}
-    needs: [static, tests, checkptr]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Verify every release-gate shard passed
-        env:
-          STATIC_RESULT: ${{ needs.static.result }}
-          TESTS_RESULT: ${{ needs.tests.result }}
-          CHECKPTR_RESULT: ${{ needs.checkptr.result }}
-        run: |
-          if [ "$STATIC_RESULT" = success ] && [ "$TESTS_RESULT" = success ] && [ "$CHECKPTR_RESULT" = success ]; then
-            exit 0
-          fi
-          echo "static=$STATIC_RESULT tests=$TESTS_RESULT checkptr=$CHECKPTR_RESULT" >&2
-          exit 1
-
   postgres:
     name: PostgreSQL integration
     runs-on: ubuntu-latest
@@ -146,3 +127,51 @@ jobs:
         env:
           GOMESSENGER_POSTGRES_DSN: postgres://gomessenger:gomessenger@127.0.0.1:5432/gomessenger?sslmode=disable
         run: make test-postgres
+
+  kafka:
+    name: Kafka integration (${{ matrix.kafka_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        kafka_version: [4.1.2, 4.3.1]
+    env:
+      KAFKA_VERSIONS: ${{ matrix.kafka_version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            go.sum
+            adapters/inbox/go.sum
+            adapters/kafka/go.sum
+            adapters/outbox/go.sum
+            testdata/e2e/go.sum
+      - name: Run transactional Kafka integration gate
+        run: make test-kafka
+
+  check:
+    name: Full gate
+    if: ${{ always() }}
+    needs: [static, tests, checkptr, postgres, kafka]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every release-gate shard passed
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          CHECKPTR_RESULT: ${{ needs.checkptr.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
+          KAFKA_RESULT: ${{ needs.kafka.result }}
+        run: |
+          if [ "$STATIC_RESULT" = success ] && [ "$TESTS_RESULT" = success ] && [ "$CHECKPTR_RESULT" = success ] && \
+             [ "$POSTGRES_RESULT" = success ] && [ "$KAFKA_RESULT" = success ]; then
+            exit 0
+          fi
+          echo "static=$STATIC_RESULT tests=$TESTS_RESULT checkptr=$CHECKPTR_RESULT postgres=$POSTGRES_RESULT kafka=$KAFKA_RESULT" >&2
+          exit 1

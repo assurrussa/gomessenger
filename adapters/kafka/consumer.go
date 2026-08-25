@@ -758,23 +758,20 @@ func (c *Consumer) waitUntilDue(ctx context.Context, session transactionalConsum
 		if remaining <= 0 {
 			return nil
 		}
-		wait := min(remaining, time.Second)
-		pollContext, cancel := context.WithTimeout(ctx, wait)
-		fetches := session.PollRecords(pollContext, 1)
-		pollErr := pollContext.Err()
-		cancel()
-		if err := fetchError(fetches, pollErr); err != nil {
-			return fmt.Errorf("messenger/kafka: delayed retry poll: %w", err)
-		}
-		if !fetches.RecordIter().Done() {
-			return errors.New("messenger/kafka: paused retry worker fetched an unexpected record")
-		}
+
+		// franz-go manages group heartbeats and rebalance callbacks independently
+		// of PollRecords. Polling while topics are paused is unsafe because records
+		// buffered before the pause may still be returned and must not be discarded.
+		timer := time.NewTimer(min(remaining, time.Second))
 		select {
+		case <-timer.C:
+			continue
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
 		case <-c.drain:
+			timer.Stop()
 			return context.Canceled
-		default:
 		}
 	}
 }

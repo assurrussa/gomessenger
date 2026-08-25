@@ -153,8 +153,11 @@ source retention as already-old records.
 
 One worker is one Kafka group member and processes one record at a time. On success, the consumed offset commits in a
 Kafka transaction. On a retryable failure, the same canonical bytes and key move to the selected retry topic with an
-exact `not-before`, atomically with the source offset. A worker keeps polling for group liveness while a fetched retry is
-not due. `MaxAttempts` counts application handler invocations, not broker deliveries or `NotBefore` deferrals.
+exact `not-before`, atomically with the source offset. While a fetched retry is not due, the worker pauses its assigned
+GoMessenger topics and waits without calling `PollRecords`, preserving any records franz-go buffered before the pause.
+franz-go continues broker heartbeats independently. This creates bounded head-of-line blocking for all partitions
+assigned to that worker until the retry becomes due; other workers remain available. `MaxAttempts` counts application
+handler invocations, not broker deliveries or `NotBefore` deferrals.
 
 On permanent failure or exhaustion, a bounded Kafka DLQ v1 record and the consumed offset commit in the same
 transaction. The DLQ record retains the original source position, key, canonical bytes, consumer, attempt generation,
@@ -198,15 +201,15 @@ presence, equal partition counts, and unlimited retry retention; topology drift 
 Readiness repeats those checks with broker connectivity. Consumer rebalance timeout follows the bounded broker
 finalization window rather than handler duration. Run topology plan separately to verify every managed field.
 
-`make check` compiles, vets, lints, and tests the Kafka module without requiring Docker. The explicit local compatibility
-gate uses official single-node Kafka images and is intentionally not a hosted-CI service:
+`make check` compiles, vets, lints, and tests the Kafka module without requiring Docker. The same script is the local
+compatibility entry point, while hosted CI runs one independent matrix job per supported Kafka version:
 
 ```sh
 make test-kafka
 ```
 
 It runs the transactional direct/Outbox/Inbox/retry/DLQ/replay pipeline against Kafka 4.1.2 and 4.3.1. Passing it proves
-the local checkout and those scenarios, not production capacity, multi-broker failover, deployment, or a live smoke.
+the tested checkout and scenarios, not production capacity, multi-broker failover, deployment, or a live smoke.
 
 The design rationale and deliberately separate NATS/Kafka implementations are recorded in
 [ADR-0004](decisions/0004-kafka-adapter.md).

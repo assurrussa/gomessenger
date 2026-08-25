@@ -134,6 +134,28 @@ Descriptors use explicit stable wire names, schema versions, content types, data
 Go type names and package paths never become the wire contract implicitly. Native envelopes carry `dataEncoding` as
 `json`, `text`, or `binary`, so custom codecs do not infer their representation from a media-type prefix.
 
+## Local method-call benchmarks
+
+Representative GitHub-hosted benchmark results for the synchronous local public path (Linux/amd64, Intel Xeon Platinum
+8573C, Go 1.27, ten samples):
+
+| Public method | Scenario | Median time/op | Approx. calls/s | B/op | allocs/op |
+|---------------|----------|---------------:|----------------:|-----:|----------:|
+| `Messenger.Send` | one local command handler | 1.066 µs | ~938k | 1472 | 9 |
+| `Messenger.Query` | one local query handler and typed result | 937.6 ns | ~1.07M | 1296 | 10 |
+| `Messenger.Publish` | one local event subscriber | 1.086 µs | ~921k | 1472 | 9 |
+
+The calls/s column is the reciprocal of the median single-thread time/op, not a concurrency or durable-throughput
+claim. These benchmarks exercise `NewLocalSyncRoute` with no-op application handlers. They do not include NATS, Kafka,
+Outbox, Inbox, SQL, network latency, retries, or telemetry exporters. Reproduce the sample with:
+
+```sh
+GOWORK=off go test -run '^$' -bench '^BenchmarkMessengerLocal' -benchmem -count=10 .
+```
+
+GitHub Actions retains the raw samples and `benchstat` comparison. Command and query results in this snapshot did not
+change significantly from the base commit.
+
 ## Transactional outbox producer
 
 Use `adapters/outbox` when a business write and message publication must commit or roll back together. Register the
@@ -354,6 +376,15 @@ non-destructive topic planning. It intentionally does not reuse the NATS engine 
 Retry may be overtaken by later source records, so ordering is guaranteed only before the first failure. See the
 [Kafka adapter guide](docs/kafka.md) and [ADR-0004](docs/decisions/0004-kafka-adapter.md).
 
+## Level 2 roadmap
+
+The next maturity level is an operational messaging platform, not a workflow framework. Work is ordered evidence-first:
+pilot and performance baseline, schema compatibility, broker capability declarations, partition-key and ordering
+semantics, batching only when profiling justifies it, then load, soak, and chaos validation. Saga engines, workflow
+orchestration, and generic distributed request/reply remain out of scope.
+
+See the [Level 2 roadmap](docs/level-2-roadmap.md) for workstreams and exit criteria.
+
 ## CloudEvents
 
 The NATS adapter supports the native envelope for commands and events, plus CloudEvents 1.0 structured and binary modes
@@ -410,8 +441,9 @@ make bench-all
 
 `make check` covers every module, static lint, race and checkptr builds, a 90% root coverage gate, an isolated
 clean-consumer module, and the Docker-free durable pipeline E2E. `make test-e2e` reruns only that full
-Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the separate local Docker gate against official Kafka 4.1.2
-and 4.3.1 images; it is intentionally not a hosted-CI service. Release requirements are prepared and checked explicitly:
+Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the local Docker entry point against official Kafka 4.1.2
+and 4.3.1 images; hosted CI runs each version in an independent matrix job. Release requirements are prepared and
+checked explicitly:
 
 ```sh
 make check
@@ -428,12 +460,13 @@ A published release is verified separately, after all dependency-ordered module 
 make test-consumer-release VERSION=v0.1.0
 ```
 
-GitHub Actions runs the same read-only gate and a PostgreSQL integration job. A separate workflow compares base and
-head benchmarks with pinned `benchstat`, uploads raw samples, and reports when the base predates the Go module instead
-of failing the first comparison. It does not enforce an unstable cross-machine performance threshold.
+GitHub Actions runs static, race, checkptr, PostgreSQL, and Kafka integration shards; the aggregate `Full gate`
+requires all of them. A separate workflow compares base and head benchmarks with pinned `benchstat`, uploads raw samples,
+and reports when the base predates the Go module instead of failing the first comparison. It does not enforce an unstable
+cross-machine performance threshold.
 
 See the [practical usage guide](docs/usage.md), [Kafka guide](docs/kafka.md), [contracts](docs/contracts.md),
-[architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md),
+[architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md), [Level 2 roadmap](docs/level-2-roadmap.md),
 [adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
 [first real-project pilot decision](docs/decisions/0002-real-project-pilot.md). Distributed request/reply remains a
 separate, unimplemented boundary in [ADR-0003](docs/decisions/0003-distributed-queries.md).
