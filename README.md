@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/assurrussa/gomessenger)](https://github.com/assurrussa/gomessenger/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/assurrussa/gomessenger.svg)](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.1.0)
 ![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
