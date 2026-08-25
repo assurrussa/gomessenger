@@ -40,6 +40,10 @@ func TestReleaseConsumerProbeRequiresExactTagAndInstallsCLI(t *testing.T) {
 		"install github.com/assurrussa/gomessenger/tools/gomessengerctl@v1.2.3") {
 		t.Fatalf("CLI module was not installed:\n%s", commands)
 	}
+	if !strings.Contains(string(commands),
+		"get github.com/assurrussa/gomessenger/adapters/kafka@v1.2.3") {
+		t.Fatalf("Kafka adapter module was not resolved:\n%s", commands)
+	}
 
 	for _, version := range []string{"v1.2.3-rc1", "v1foo.2bar.3baz", "v1.2.3.4"} {
 		t.Run(version, func(t *testing.T) {

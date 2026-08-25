@@ -10,7 +10,7 @@ typed descriptor + payload
        /      \
 local route   one-way transport route
    |           /          \
-GoBus     outbox stage   JetStream publish
+GoBus     outbox stage   JetStream/Kafka publish
   |           |                |
 query R       v                v
         relay worker ----> durable consumer
@@ -44,7 +44,7 @@ builder requires one handler and one sealed `LocalQueryRoute`. Sync dispatch use
 `DispatchResult`; async dispatch uses bounded `SubmitResult` and still waits for one result through `Messenger.Query`.
 
 Queries receive generated metadata, lineage, trace propagation, middleware, observations, panic isolation, and async
-lifecycle behavior, but they do not become `Delivery`. They have no result envelope, receipt, Outbox, Inbox, NATS,
+lifecycle behavior, but they do not become `Delivery`. They have no result envelope, receipt, Outbox, Inbox, NATS/Kafka,
 retry, DLQ, or replay path. Native envelope validation and transport adapters explicitly reject `KindQuery`.
 
 A cross-process query additionally needs a result codec/envelope, absolute deadlines, best-effort cancellation, remote
@@ -58,9 +58,10 @@ For a command or event, `Messenger` creates metadata, lazily encodes the payload
 configured route. The route determines the meaning of successful admission and returns an explicit receipt. A query
 instead hands an internal result call to its local route and returns `R` directly.
 
-Local routes invoke handlers in the same process. The NATS route publishes the canonical envelope directly. The outbox
-route persists the same envelope and a relay later gives those exact bytes to an envelope publisher. No relay decode and
-rebuild step is allowed because that could change identity or timestamps.
+Local routes invoke handlers in the same process. The NATS route publishes the canonical envelope directly and waits
+for `PubAck`; the Kafka route commits it in a producer transaction. The outbox route persists the same envelope and a
+relay later gives those exact bytes to either envelope publisher. No relay decode and rebuild step is allowed because
+that could change identity or timestamps.
 
 ## Producer transaction
 
@@ -77,15 +78,16 @@ that later delivery.
 
 ## Consumer transaction
 
-The NATS consumer passes canonical bytes and a stable key to the inbox. PostgreSQL and SQLite backends begin a database
-transaction, expose it in the handler context, run the handler, and mark the key complete in that same transaction.
+NATS and Kafka consumers pass canonical bytes and a stable key to the inbox. PostgreSQL and SQLite backends begin a
+database transaction, expose it in the handler context, run the handler, and mark the key complete in that same
+transaction.
 
 This boundary provides the following invariant:
 
 > A successful database effect and its inbox completion marker commit together, or both roll back.
 
-The broker ACK happens only after commit. A crash between commit and ACK creates a duplicate delivery that the inbox
-recognizes without running the handler again.
+The NATS ACK or Kafka offset transaction happens only after commit. A crash between those boundaries creates a
+duplicate delivery that the inbox recognizes without running the handler again.
 
 Bounded NATS handling records its attempt before invoking application code. A savepoint isolates handler business
 writes: a failed invocation rolls those writes back while the outer transaction commits the attempt counter. Database
@@ -118,6 +120,12 @@ NATS consumers use pull delivery, bounded workers, explicit acknowledgement dead
 handlers, bounded application attempts, and a confirmed DLQ hand-off. Broker delivery stays unlimited until that
 hand-off succeeds, preventing a failed DLQ publish from stranding an unacknowledged final delivery.
 
+Kafka uses a separate adapter implementation because its safety boundary is different: descriptor-derived partitioned
+topics, stable group members, read-committed isolation, and transactions that atomically combine consumed offsets with
+retry/DLQ production. Retry topics preserve exact due time but permit later source records to overtake failed work.
+Consumer readiness checks the resources required to run safely; declarative planning separately checks the complete
+managed topic policy. See [ADR-0004](decisions/0004-kafka-adapter.md).
+
 ## Observability
 
 The optional observability module implements the root `Observer` contract and a W3C Trace Context propagator. It records
@@ -138,6 +146,11 @@ original subject and bytes, a DLQ-record-specific JetStream message ID, and requ
 headers select a fresh durable attempt generation for that hand-off; broker redelivery keeps the same generation. It
 cannot mutate the subject, delete the record, or print payload and secret headers. NATS publish permissions must prevent
 ordinary direct publishers from forging reserved replay metadata.
+
+Kafka uses its own bounded DLQ v1 rather than translating the NATS record. Its offline plan validates original source,
+record key, canonical bytes, and deterministic consumer replay topic. Confirmed replay commits to that protected topic
+with a DLQ-specific attempt generation. Both adapters retain the original DLQ record and preserve completed Inbox
+suppression.
 
 ## Compatibility boundaries
 

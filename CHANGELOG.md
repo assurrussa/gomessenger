@@ -19,11 +19,15 @@ All notable changes to this project will be documented in this file.
 - PostgreSQL and SQLite inbox deduplication;
 - NATS JetStream routing, durable consumers, safe topology planning, CloudEvents modes, retry, configurable Inbox
   transaction finalization grace, and confirmed DLQ hand-off;
+- native-envelope Kafka routing, adapter-owned franz-go clients, static transactional consumers, retry topics,
+  atomic offset/retry/DLQ hand-off, protected replay, and non-destructive topic planning;
 - optional Prometheus/OpenTelemetry observations and W3C Trace Context propagation across all wire modes and Outbox;
 - manifest, topology, and safe offline/confirmed DLQ replay command-line tooling;
 - a Docker-free transactional Outbox-to-JetStream-to-Inbox E2E gate covering
   rollback, lost ACK, retry, trace propagation, permanent DLQ, replay deduplication, inbox suppression, and
   drain/redelivery;
+- an opt-in local Docker gate covering direct publish, Outbox relay, Inbox suppression, retry, DLQ, and replay against
+  official Kafka 4.1.2 and 4.3.1 images;
 - an explicit local-versus-distributed query boundary, a versioned distributed request/reply ADR, and a selected
   article-publication audit pilot that remains pending until the library is published;
 - clean local and published-consumer verification paths;

@@ -6,6 +6,7 @@ import (
 
 	"github.com/assurrussa/gomessenger"
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	kafkaadapter "github.com/assurrussa/gomessenger/adapters/kafka"
 	natsadapter "github.com/assurrussa/gomessenger/adapters/nats"
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
 	"github.com/assurrussa/gomessenger/observability"
@@ -43,6 +44,10 @@ func TestImports(t *testing.T) {
 	_ = inbox.Key{}
 	_ = natsadapter.HandlerConfig{
 		Logger: logger, Propagator: observability.NewTraceContextPropagator(),
+	}
+	_ = kafkaadapter.HandlerConfig{
+		Namespace: "consumer", ConsumerID: "consumer-probe", Logger: logger,
+		Propagator: observability.NewTraceContextPropagator(),
 	}
 	_ = outboxadapter.ProducerConfig{Name: "consumer.probe"}
 }

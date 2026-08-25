@@ -2,7 +2,7 @@
 
 GoMessenger is a typed CQRS toolkit for Go 1.27+: commands, local request/reply queries, and events share one explicit
 descriptor, handler, middleware, lifecycle, and observability facade. One-way commands and events can additionally use
-transactional outbox staging, NATS JetStream delivery, and durable inbox deduplication.
+transactional outbox staging, NATS JetStream or Kafka delivery, and durable inbox deduplication.
 
 The root module is intentionally small: standard library plus
 [`gobus`](https://github.com/assurrussa/gobus). Broker, SQL, Prometheus, and OpenTelemetry dependencies live in optional
@@ -15,7 +15,7 @@ process boundary or must survive a restart. Local `Query[Q,R]` delegates to GoBu
 metadata lineage, middleware, observations, DI binding, and bounded async isolation.
 
 Distributed queries are not implemented. A local query never uses `Delivery`, a native envelope, `Receipt`, Outbox,
-Inbox, NATS, retry, or DLQ. Remote request/reply requires the separate contract in
+Inbox, NATS, Kafka, retry, or DLQ. Remote request/reply requires the separate contract in
 [ADR-0003](docs/decisions/0003-distributed-queries.md). GoMessenger is not a replacement for a database transaction,
 workflow engine, or streaming analytics platform.
 
@@ -23,6 +23,7 @@ The durable contract is **at-least-once**:
 
 - an outbox route reports success only after the envelope is staged in the caller's database transaction;
 - a direct NATS route reports success only after a JetStream `PubAck`;
+- a direct Kafka route reports success only after its producer transaction commits;
 - a durable consumer acknowledges only after its inbox transaction and handler commit;
 - stable message identity and an inbox prevent repeating the same committed consumer transaction;
 - external side effects still need their own idempotency key or transactional boundary. The library does not claim
@@ -37,6 +38,7 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 | `github.com/assurrussa/gomessenger` | CQRS descriptors, local queries, envelopes, local routes, runtime, manifest |
 | `.../adapters/outbox`               | transactional staging and a broker relay job                     |
 | `.../adapters/nats`                 | JetStream producers, consumers, topology, CloudEvents            |
+| `.../adapters/kafka`                | transactional Kafka producers, consumers, topology, retry/DLQ   |
 | `.../adapters/inbox`                | atomic PostgreSQL and SQLite consumer deduplication              |
 | `.../observability`                 | Prometheus, OpenTelemetry spans, W3C Trace Context                |
 | `.../tools/gomessengerctl`          | manifest/topology validation, plan/apply, DLQ inspect/replay      |
@@ -54,7 +56,7 @@ returned `Runtime`.
 ```text
 business code -> Messenger.Query -> local result handler -> typed result
              `-> Send/Publish -> local handler
-                              `-> Outbox -> relay -> JetStream -> consumer -> Inbox transaction -> handler -> ACK
+                              `-> Outbox -> relay -> JetStream/Kafka -> consumer -> Inbox transaction -> handler -> ACK/offset
 ```
 
 Use the route that matches the required success boundary:
@@ -63,6 +65,7 @@ Use the route that matches the required success boundary:
 - for a query, `NewLocalSyncRoute` returns the handler result and `NewLocalAsyncRoute` queues bounded work but
   `Messenger.Query` still waits for exactly one result;
 - `natsadapter.NewRoute` returns after JetStream `PubAck`;
+- `kafkaadapter.NewRoute` returns after a Kafka producer transaction commits;
 - `outboxadapter.NewProducer` returns after staging inside the caller's transaction. The receipt is provisional until
   that transaction commits.
 
@@ -283,8 +286,10 @@ builder.UseMiddleware(func(
 
 Logging is disabled by default. `AdaptSlog(nil)` is a safe no-op adapter; direct `WithLogger(nil)` is a configuration
 error. Observer registrations are additive. A panic in one observer is logged and isolated from the remaining
-observers. Core logging contains infrastructure state only—observer/service failures, ACK/NAK, heartbeat, and DLQ
-hand-off failures—and never logs payloads, message bodies, or arbitrary headers.
+observers. Kafka `TransportConfig.Logger` reports adapter-owned startup/readiness, producer and consumer transaction,
+abort/fencing, and topology failures or applied changes. Core logging contains infrastructure state only and never logs
+record keys, payloads, message bodies, or arbitrary headers. `WithClientLogger` is a separate explicit opt-in to
+franz-go's own client logs.
 
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.
@@ -330,7 +335,7 @@ a handler executing on the same runtime.
 
 - Return `messenger.Permanent(err)` for a non-retryable handler failure.
 - Return `messenger.RetryAfter(err, delay)` for an explicit durable delay.
-- Other errors use bounded full-jitter exponential retry in the NATS adapter.
+- Other errors use bounded full-jitter exponential retry in the NATS and Kafka adapters.
 - `MaxAttempts` bounds handler invocations, not broker deliveries. A `NotBefore` deferral does not invoke the handler or
   consume an attempt.
 - `AckWait` is a broker redelivery deadline, not a handler timeout. It must be at least 100 ms and may be shorter than
@@ -340,6 +345,14 @@ a handler executing on the same runtime.
   `MaxAttempts`. A permanent outcome is persisted independently of the attempt count, so an interrupted hand-off cannot
   invoke that handler again after restart.
 - `NotBefore` becomes a retry delay until due; `ExpiresAt` becomes a permanent expired outcome.
+
+## Kafka
+
+The independent Kafka module provides native-envelope transactional publish, Outbox relay, read-committed consumers,
+consumer-specific retry topics, atomic retry/DLQ offset hand-off, protected replay, static worker identity, and
+non-destructive topic planning. It intentionally does not reuse the NATS engine or support CloudEvents/query transport.
+Retry may be overtaken by later source records, so ordering is guaranteed only before the first failure. See the
+[Kafka adapter guide](docs/kafka.md) and [ADR-0004](docs/decisions/0004-kafka-adapter.md).
 
 ## CloudEvents
 
@@ -365,6 +378,12 @@ gomessengerctl topology apply --file topology.json --server nats://localhost:422
 gomessengerctl dlq inspect --file record.json
 gomessengerctl dlq replay --file record.json
 gomessengerctl dlq replay --file record.json --confirm --server nats://localhost:4222
+gomessengerctl kafka topology validate --file kafka-topology.json
+gomessengerctl kafka topology plan --file kafka-topology.json --brokers localhost:9092 --instance-id ops-a
+gomessengerctl kafka topology apply --file kafka-topology.json --brokers localhost:9092 --instance-id ops-a
+gomessengerctl kafka dlq inspect --file kafka-record.json
+gomessengerctl kafka dlq replay --file kafka-record.json
+gomessengerctl kafka dlq replay --file kafka-record.json --confirm --brokers localhost:9092 --instance-id ops-a
 ```
 
 `topology plan` exits with code `3` when the printed plan contains a conflict.
@@ -384,13 +403,15 @@ make prepare
 make check
 make test-e2e
 make test-integration
+make test-kafka
 GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres
 make bench-all
 ```
 
 `make check` covers every module, static lint, race and checkptr builds, a 90% root coverage gate, an isolated
 clean-consumer module, and the Docker-free durable pipeline E2E. `make test-e2e` reruns only that full
-Outbox-to-JetStream-to-Inbox path. Release requirements are prepared and checked explicitly:
+Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the separate local Docker gate against official Kafka 4.1.2
+and 4.3.1 images; it is intentionally not a hosted-CI service. Release requirements are prepared and checked explicitly:
 
 ```sh
 make check
@@ -411,7 +432,8 @@ GitHub Actions runs the same read-only gate and a PostgreSQL integration job. A 
 head benchmarks with pinned `benchstat`, uploads raw samples, and reports when the base predates the Go module instead
 of failing the first comparison. It does not enforce an unstable cross-machine performance threshold.
 
-See the [practical usage guide](docs/usage.md), [contracts](docs/contracts.md), [architecture](docs/architecture.md),
-[durable pipeline E2E](docs/e2e.md), [adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
+See the [practical usage guide](docs/usage.md), [Kafka guide](docs/kafka.md), [contracts](docs/contracts.md),
+[architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md),
+[adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
 [first real-project pilot decision](docs/decisions/0002-real-project-pilot.md). Distributed request/reply remains a
 separate, unimplemented boundary in [ADR-0003](docs/decisions/0003-distributed-queries.md).
