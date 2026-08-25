@@ -1,5 +1,43 @@
 # Implementation notes
 
+## 2026-08-26 — upgrade-sql review fixes
+
+- Made Kafka retry preflight expiry-aware without moving application code into the rebalance-blocked section. The
+  bounded preflight now validates the native envelope, descriptor, record key, and retry window before scheduling;
+  `not-before` at or beyond `ExpiresAt`, already expired messages, and malformed envelopes proceed to post-release
+  terminal handling without pausing a partition. Custom codec decoding remains after `AllowRebalance`, and valid early
+  retries still retain only partition/deadline state until refetch.
+- Made the checkout demo's build read-only by compiling both main modules to `/dev/null`, ignoring the demo executable in
+  Git and Docker contexts, and removing the accidentally tracked workstation binary.
+- The review-fix batch passed the Kafka module tests, the full `make check` gate with 91.4% root coverage, and the live
+  transactional Kafka pipeline against official 4.1.2 and 4.3.1 images. The build gate also left the demo executable
+  absent from the worktree.
+
+## 2026-08-25 — adoption and positioning surface
+
+- Reframed the README around `Typed durable messaging for Go`, with an immediate problem statement, honest pre-release
+  status, local quickstart, guarantees, non-goals, route-selection table, and durable demo path. Release-dependent
+  `go get`, latest-release, and pkg.go.dev claims remain deferred until the dependency-ordered tags pass the clean
+  published-consumer probe.
+- Added a use-case comparison that states when GoBus, raw JetStream, raw franz-go/Kafka, Watermill, a workflow engine,
+  synchronous RPC, or a custom Outbox/Inbox is the smaller or more appropriate boundary. It avoids exactly-once,
+  universal broker, workflow, or production-proven claims.
+- Added `examples/durable-postgres-nats`, a compose-managed one-shot application using PostgreSQL 18, NATS JetStream,
+  the PostgreSQL Outbox backend, a namespaced PostgreSQL Inbox, intentional retry rollback, distinct duplicate broker
+  delivery, permanent DLQ hand-off, and deterministic confirmed replay. The checkout-local module is included in
+  formatting, build, vet, lint, unit, race, and checkptr gates without presenting its local replacements as release
+  evidence.
+- Recorded the post-publication README/badge/launch checklist and linked the runnable demo from usage, E2E, migration,
+  and README navigation. GitHub About and topics were already aligned with the recommended positioning; no release,
+  tag, commit, or push is part of this batch.
+- The live compose smoke rejected an initially invalid 50 ms Outbox idle interval, then passed after using the backend's
+  supported 200 ms value. The successful rerun reused the already migrated PostgreSQL container and proved idempotent
+  migration plus retry, one Inbox-suppressed distinct delivery, permanent DLQ hand-off, first replay commit, and
+  deterministic duplicate replay. Demo containers, network, and volume were removed afterward.
+- The completed adoption batch passed `make check` outside the filesystem sandbox: formatting, build, vet, lint, unit,
+  race, checkptr, 91.4% root coverage, clean consumer, and the durable embedded-JetStream E2E. A first sandboxed run was
+  discarded because its local-socket policy prevented every embedded NATS server from becoming ready.
+
 ## 2026-08-25 — native transactional Kafka adapter
 
 - Added the independent `adapters/kafka` module on franz-go v1.21.6 with adapter-owned clients, required stable process
@@ -23,11 +61,21 @@
 - Removed worker-wide Kafka retry head-of-line blocking with `BlockRebalanceOnPoll`, a fast record preflight, exact
   leader-epoch/offset rewind, and a bounded per-worker deadline heap that retains no payload. An early retry pauses only
   its concrete topic-partition, preserves foreign pauses, fails the worker closed if the rewind is not confirmed, and
-  is fetched again after the scheduler-owned pause resumes. Handler, Inbox, and Kafka transaction work runs after
-  `AllowRebalance`; a second drain check still leaves a concurrently fetched offset unprocessed and uncommitted. Unit
-  regressions cover multiple deadlines, other-partition progress, offset safety, resume/refetch, foreign pauses,
-  cancellation, drain, rebalance release, and fail-closed rewind; the live Kafka scenario uses two partitions and one
-  worker to prove a barrier completes before a two-second retry deadline and exactly one second attempt follows.
+  is fetched again after the scheduler-owned pause resumes. The blocked section performs bounded control and native
+  envelope/descriptor/key/timing validation plus any exact pause/rewind; custom `Codec.Decode`, handler, Inbox, and Kafka
+  transaction work run after `AllowRebalance`. Valid early retries do not invoke the codec until refetch. Unit
+  regressions cover multiple deadlines, other-partition progress, offset safety, resume/refetch, blocking codecs,
+  foreign pauses, cancellation, drain, rebalance release, and fail-closed rewind; the live Kafka scenario uses two
+  partitions and one worker to prove a barrier completes before a two-second retry deadline and exactly one second
+  attempt follows.
+- Added validated and SQL-quoted Inbox namespaces while preserving existing calls without options and the
+  `gomessenger_` defaults. PostgreSQL and SQLite accept `WithTablePrefix`; PostgreSQL additionally accepts `WithSchema`
+  and qualifies all runtime and migration relations without creating the schema. Statements are rendered once per
+  backend, migrations use the same resolved names, and changing namespace intentionally creates a separate Inbox without
+  copying prior history. The full-handler SQL transaction and host-owned `database/sql` pool backpressure remain intact.
+- This namespace/rebalance follow-up passed `make check`, the PostgreSQL 18 DSN gate in a disposable container, and the
+  transactional Kafka pipeline against official 4.1.2 and 4.3.1 images. The shared wiki lint passed with only its
+  pre-existing stale-raw warnings; these controlled gates do not establish production readiness.
 - Wired `TransportConfig.Logger` to adapter-owned startup/readiness, producer and consumer transaction, abort/fencing,
   topology, and retry partition deferral events. Structured attributes remain infrastructure-only and exclude record
   keys, payloads, and headers; franz-go client logging remains a separate explicit connection option.

@@ -1,79 +1,58 @@
 # GoMessenger
 
-GoMessenger is a typed CQRS toolkit for Go 1.27+: commands, local request/reply queries, and events share one explicit
-descriptor, handler, middleware, lifecycle, and observability facade. One-way commands and events can additionally use
-transactional outbox staging, NATS JetStream or Kafka delivery, and durable inbox deduplication.
+[![CI](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml)
+![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The root module is intentionally small: standard library plus
-[`gobus`](https://github.com/assurrussa/gobus). Broker, SQL, Prometheus, and OpenTelemetry dependencies live in optional
+**Typed durable messaging for Go.**
+
+Build commands, local queries, and events with explicit transaction, delivery, retry, and broker semantics.
+
+Transactional Outbox/Inbox, NATS JetStream, Kafka, bounded retries, DLQ/replay, tracing, and managed lifecycle.
+
+> **Pre-release:** GoMessenger has no published SemVer module tags yet. `v0.1.0` is being prepared and must pass the
+> published clean-consumer gate before the install commands and release badges are added.
+
+## What it is
+
+GoMessenger is a typed facade for Go 1.27+ services that need both process-local messaging and durable one-way delivery.
+Commands, local request/reply queries, and events share explicit descriptors, middleware, lifecycle, and observations;
+one-way commands and events can additionally use transactional Outbox staging, NATS JetStream or Kafka delivery, and a
+durable SQL Inbox.
+
+It keeps transport truth visible. An Outbox receipt means staged in the caller's transaction, a NATS receipt means
+JetStream returned `PubAck`, a Kafka receipt means the producer transaction committed, and a consumer ACK/offset follows
+the committed Inbox transaction. The root module remains standard library plus
+[`gobus`](https://github.com/assurrussa/gobus); broker, SQL, Prometheus, and OpenTelemetry dependencies live in optional
 nested modules.
 
-## When to use it
+## Why it exists
 
-Use GoMessenger when an application wants one typed command/query/event facade, or when a one-way message may cross a
-process boundary or must survive a restart. Local `Query[Q,R]` delegates to GoBus result dispatch but adds descriptors,
-metadata lineage, middleware, observations, DI binding, and bounded async isolation.
+Use GoMessenger when a service needs at least one of these boundaries:
 
-Distributed queries are not implemented. A local query never uses `Delivery`, a native envelope, `Receipt`, Outbox,
-Inbox, NATS, Kafka, retry, or DLQ. Remote request/reply requires the separate contract in
-[ADR-0003](docs/decisions/0003-distributed-queries.md). GoMessenger is not a replacement for a database transaction,
-workflow engine, or streaming analytics platform.
+- a business write and outgoing command/event must commit or roll back together;
+- broker redelivery must not repeat an already committed SQL handler effect;
+- retry, terminal failure, DLQ, and replay must be bounded and explicit;
+- local commands, local queries, and durable events should use stable typed descriptors without pretending that NATS
+  and Kafka have identical semantics.
 
-The durable contract is **at-least-once**:
+If all work is process-local, GoBus or direct function calls may be enough. If the problem is a durable multi-step
+workflow with timers and compensation, use a workflow engine. See the [use-case comparison](docs/comparison.md) before
+choosing an abstraction.
 
-- an outbox route reports success only after the envelope is staged in the caller's database transaction;
-- a direct NATS route reports success only after a JetStream `PubAck`;
-- a direct Kafka route reports success only after its producer transaction commits;
-- a durable consumer acknowledges only after its inbox transaction and handler commit;
-- stable message identity and an inbox prevent repeating the same committed consumer transaction;
-- external side effects still need their own idempotency key or transactional boundary. The library does not claim
-  exactly-once effects.
+## Install status
 
-## Requirements and modules
+No GoMessenger `go get` command is advertised before the first tags exist. To evaluate the current checkout:
 
-GoMessenger requires Go 1.27 because the builder and messenger expose generic methods.
-
-| Module                              | Responsibility                                                   |
-|-------------------------------------|------------------------------------------------------------------|
-| `github.com/assurrussa/gomessenger` | CQRS descriptors, local queries, envelopes, local routes, runtime, manifest |
-| `.../adapters/outbox`               | transactional staging and a broker relay job                     |
-| `.../adapters/nats`                 | JetStream producers, consumers, topology, CloudEvents            |
-| `.../adapters/kafka`                | transactional Kafka producers, consumers, topology, retry/DLQ   |
-| `.../adapters/inbox`                | atomic PostgreSQL and SQLite consumer deduplication              |
-| `.../observability`                 | Prometheus, OpenTelemetry spans, W3C Trace Context                |
-| `.../tools/gomessengerctl`          | manifest/topology validation, plan/apply, DLQ inspect/replay      |
-
-The initial GoMessenger release is being prepared as `v0.1.0`. Outbox root and SQLite backend `v0.11.0` are already
-published and are the pinned durable-producer dependencies. During repository development `go.work` selects local
-GoMessenger modules; published consumer modules must use path-qualified tags and no local `replace` directives.
-
-## How to use it
-
-Start with one explicit command, query, or event descriptor, select its route, build the messenger, and inject a narrow
-`Sender`, `Querier`, or `Publisher` into business code. Durable consumers are separate managed services attached to the
-returned `Runtime`.
-
-```text
-business code -> Messenger.Query -> local result handler -> typed result
-             `-> Send/Publish -> local handler
-                              `-> Outbox -> relay -> JetStream/Kafka -> consumer -> Inbox transaction -> handler -> ACK/offset
+```sh
+git clone https://github.com/assurrussa/gomessenger.git
+cd gomessenger
+GOWORK=off go test ./...
 ```
 
-Use the route that matches the required success boundary:
+## 30-line local quickstart
 
-- `NewLocalSyncRoute` returns after the in-process handler completes;
-- for a query, `NewLocalSyncRoute` returns the handler result and `NewLocalAsyncRoute` queues bounded work but
-  `Messenger.Query` still waits for exactly one result;
-- `natsadapter.NewRoute` returns after JetStream `PubAck`;
-- `kafkaadapter.NewRoute` returns after a Kafka producer transaction commits;
-- `outboxadapter.NewProducer` returns after staging inside the caller's transaction. The receipt is provisional until
-  that transaction commits.
-
-For a durable flow, provision topology, apply Outbox and Inbox migrations, register the relay before producer traffic,
-start the managed runtimes, and expose readiness before accepting traffic. See the
-[practical usage guide](docs/usage.md) for the complete producer, consumer, failure, and shutdown sequence.
-
-## Minimal local example
+The smallest local command is:
 
 ```go
 type ResizeMedia struct {
@@ -98,6 +77,83 @@ _, err = resizeSender.Send(ctx, ResizeMedia{JobID: 42})
 
 The equivalent runnable API is compiled as `ExampleMessenger_Send`; `testdata/consumer` separately compiles the
 complete public facade from an external Go module.
+
+For the durable path, run the [PostgreSQL + NATS demo](examples/durable-postgres-nats):
+
+```sh
+make demo-durable-postgres-nats
+```
+
+It performs a business write and Outbox stage in one PostgreSQL transaction, relays through JetStream, retries an
+intentional handler failure, suppresses a distinct duplicate delivery in the Inbox, moves a permanent failure to the
+DLQ, and confirms replay. The example is a checkout-level demonstration with local GoMessenger replacements; it is not
+evidence of published-module resolution or production readiness.
+
+## Guarantees
+
+The durable contract is **at-least-once**:
+
+- an Outbox route reports success only after the envelope is staged in the caller's database transaction;
+- a direct NATS route reports success only after a JetStream `PubAck`;
+- a direct Kafka route reports success only after its producer transaction commits;
+- a durable consumer acknowledges only after its Inbox transaction and handler commit;
+- stable message identity and an Inbox suppress a second execution of the same committed consumer transaction;
+- concurrency, envelopes, headers, handler attempts, retry delays, and shutdown waits are bounded by explicit
+  configuration or documented limits.
+
+## Non-goals
+
+- No exactly-once external effects: HTTP calls, email, object storage, and writes to another database still need their
+  own idempotency or durable hand-off.
+- No distributed queries: `Query[Q,R]` is process-local. Remote request/reply remains the separate, unimplemented
+  contract in [ADR-0003](docs/decisions/0003-distributed-queries.md).
+- No workflow, saga, event-sourcing, service-discovery, or streaming-analytics engine.
+- No automatic ownership of host database connections, broker credentials, migrations, topology policy, supervision,
+  or deployment.
+- No claim of universal broker abstraction or production-proven maturity; the real-service pilot in
+  [ADR-0002](docs/decisions/0002-real-project-pilot.md) is still pending.
+
+## Choose a route
+
+Start with an explicit descriptor, choose the success boundary, build the messenger, and inject a narrow `Sender`,
+`Querier`, or `Publisher` into business code. Durable consumers are separate managed services.
+
+| Route | A successful call means | Important boundary |
+|---|---|---|
+| `NewLocalSyncRoute` | the in-process handler completed | no restart durability |
+| `NewLocalAsyncRoute` | bounded runtime work completed for queries or was accepted for one-way work | no restart durability |
+| `natsadapter.NewRoute` | JetStream returned `PubAck` | not atomic with a separate business database write |
+| `kafkaadapter.NewRoute` | the producer transaction committed | not atomic with a separate business database write |
+| `outboxadapter.NewProducer` | the envelope was staged in the active host transaction | provisional until that transaction commits |
+
+```text
+business code -> Messenger.Query -> local result handler -> typed result
+             `-> Send/Publish -> local handler
+                              `-> Outbox -> relay -> JetStream/Kafka -> consumer -> Inbox transaction -> handler -> ACK/offset
+```
+
+For a durable flow, provision topology, apply Outbox and Inbox migrations, register the relay before producer traffic,
+start the managed runtimes, and expose readiness before accepting traffic. The [practical usage guide](docs/usage.md)
+shows the full composition and shutdown order.
+
+## Modules and release status
+
+GoMessenger requires Go 1.27 because the builder and messenger expose generic methods.
+
+| Module | Responsibility |
+|---|---|
+| `github.com/assurrussa/gomessenger` | descriptors, local queries, envelopes, local routes, runtime, manifest |
+| `.../adapters/outbox` | transactional staging and broker relay job |
+| `.../adapters/nats` | JetStream producers, consumers, topology, CloudEvents |
+| `.../adapters/kafka` | transactional Kafka producers, consumers, topology, retry/DLQ |
+| `.../adapters/inbox` | atomic PostgreSQL and SQLite consumer deduplication |
+| `.../observability` | Prometheus, OpenTelemetry spans, W3C Trace Context |
+| `.../tools/gomessengerctl` | manifest/topology validation, plan/apply, DLQ inspect/replay |
+
+The initial release is being prepared as `v0.1.0`. Outbox root and its PostgreSQL/SQLite backend tags at `v0.11.0` are
+the pinned durable-producer dependencies. During repository development `go.work` selects local GoMessenger modules;
+published consumers must use matching path-qualified tags and no local `replace` directives. See the
+[release process](docs/release.md) for dependency order and the post-publication probe.
 
 ## Minimal local query example
 
@@ -258,22 +314,38 @@ if err != nil {
 ```
 
 Run the embedded additive inbox migrations explicitly with `inboxpgsql.Migrate` or `inboxsqlite.Migrate` before
-constructing consumers. They include the durable handler-attempt count and permanent-outcome state required by NATS
+constructing consumers. They include the durable handler-attempt count and permanent-outcome state required by durable
 consumers. Hosts own database connections, migration ordering, NATS connections, credentials, and process supervision.
 
-Each active consumer worker may hold one SQL transaction for the full handler invocation. When several consumers share
-one `sql.DB`, configure `SetMaxOpenConns` to at least the sum of their `HandlerConfig.Concurrency` values, plus explicit
-headroom for application and maintenance queries. A smaller pool turns configured consumer concurrency into database
-connection contention and can exhaust handler deadlines before application code runs.
+Each active consumer worker holds one SQL transaction for the full handler invocation. This is the atomic boundary for
+business writes and the Inbox completion marker; do not move the handler outside it. The adapter adds no connection
+semaphore: `database/sql` is the host-managed backpressure boundary. When several consumers share one `sql.DB`, configure
+`SetMaxOpenConns` to at least the sum of their `HandlerConfig.Concurrency` values, plus explicit headroom for application
+and maintenance queries. A smaller pool becomes the bottleneck before Go dispatch and can exhaust handler deadlines
+before application code runs.
 
 `Timeout` bounds application handler execution. The Inbox transaction receives an additional
 `FinalizationTimeout` (5 seconds by default) to commit or roll back after that deadline. Increase it when a remote or
 otherwise slow database needs more finalization time; it does not extend the handler deadline.
 
-Inbox table names are currently fixed as `gomessenger_inbox`, `gomessenger_inbox_attempts`, and
-`gomessenger_inbox_attempt_generations`; there is no table-prefix or schema option. PostgreSQL hosts that use a
-non-default schema must apply migrations and configure the same stable connection-level `search_path` for every pooled
-connection. SQLite uses the fixed names in the selected database file.
+Both SQL backends default to the `gomessenger_` prefix and therefore preserve `gomessenger_inbox`,
+`gomessenger_inbox_attempts`, and `gomessenger_inbox_attempt_generations`. Pass the same options to migration and runtime
+construction when a host needs another namespace:
+
+```go
+postgresInbox := []inboxpgsql.Option{
+	inboxpgsql.WithSchema("messaging"), // the host creates the schema and grants access
+	inboxpgsql.WithTablePrefix("site_"),
+}
+if err := inboxpgsql.Migrate(ctx, database, postgresInbox...); err != nil {
+	return err
+}
+store, err := inboxpgsql.New(database, postgresInbox...)
+```
+
+`WithTablePrefix` is also available for SQLite; SQLite has no schema option. PostgreSQL qualifies every relation instead
+of relying on `search_path`, and its migrator never creates the configured schema. Changing the prefix or schema selects
+a separate Inbox: migrations do not rename, copy, or otherwise transfer existing deduplication history.
 
 Provision source and DLQ capacity separately. `DevStream` keeps native source messages at the 1 MiB envelope bound;
 `DevDLQStream` reserves `DefaultMaxDLQMessageBytes` for the expanded JSON DLQ record. The NATS server/account
@@ -383,7 +455,7 @@ pilot and performance baseline, schema compatibility, broker capability declarat
 semantics, batching only when profiling justifies it, then load, soak, and chaos validation. Saga engines, workflow
 orchestration, and generic distributed request/reply remain out of scope.
 
-See the [Level 2 roadmap](docs/level-2-roadmap.md) for workstreams and exit criteria.
+See the [Level 2 roadmap](docs/roadmap.md) for workstreams and exit criteria.
 
 ## CloudEvents
 
@@ -466,7 +538,7 @@ and reports when the base predates the Go module instead of failing the first co
 cross-machine performance threshold.
 
 See the [practical usage guide](docs/usage.md), [Kafka guide](docs/kafka.md), [contracts](docs/contracts.md),
-[architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md), [Level 2 roadmap](docs/level-2-roadmap.md),
-[adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
+[architecture](docs/architecture.md), [durable pipeline E2E](docs/e2e.md), [use-case comparison](docs/comparison.md),
+[Level 2 roadmap](docs/roadmap.md), [adoption and migration guide](MIGRATION.md), [release order](docs/release.md), and the
 [first real-project pilot decision](docs/decisions/0002-real-project-pilot.md). Distributed request/reply remains a
 separate, unimplemented boundary in [ADR-0003](docs/decisions/0003-distributed-queries.md).

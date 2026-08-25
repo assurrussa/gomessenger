@@ -19,8 +19,9 @@ import (
 var migrations embed.FS
 
 type backend struct {
-	db    *sql.DB
-	clock func() time.Time
+	db         *sql.DB
+	clock      func() time.Time
+	statements statements
 }
 
 type attemptDecision struct {
@@ -34,18 +35,27 @@ type attemptState struct {
 	terminal bool
 }
 
-// New constructs a PostgreSQL inbox store. The caller owns db and migrations.
-func New(db *sql.DB) (*inbox.Store, error) {
+// New constructs a PostgreSQL inbox store. The caller owns db, migrations,
+// connection-pool sizing, and any configured schema.
+func New(db *sql.DB, options ...Option) (*inbox.Store, error) {
 	if db == nil {
 		return nil, errors.New("inbox/pgsql: nil database")
 	}
-	return inbox.New(&backend{db: db, clock: time.Now})
+	names, err := resolveNamespace(options...)
+	if err != nil {
+		return nil, err
+	}
+	return inbox.New(&backend{db: db, clock: time.Now, statements: newStatements(names)})
 }
 
 // Migrate applies the embedded additive inbox schema.
-func Migrate(ctx context.Context, db *sql.DB) error {
+func Migrate(ctx context.Context, db *sql.DB, options ...Option) error {
 	if db == nil {
 		return errors.New("inbox/pgsql: nil database")
+	}
+	names, err := resolveNamespace(options...)
+	if err != nil {
+		return err
 	}
 	paths, err := fs.Glob(migrations, "migrations/*.sql")
 	if err != nil {
@@ -56,7 +66,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if readErr != nil {
 			return fmt.Errorf("inbox/pgsql: read migration %s: %w", path, readErr)
 		}
-		if _, execErr := db.ExecContext(ctx, string(data)); execErr != nil {
+		if _, execErr := db.ExecContext(ctx, names.render(string(data))); execErr != nil {
 			return fmt.Errorf("inbox/pgsql: apply migration %s: %w", path, execErr)
 		}
 	}
@@ -81,11 +91,7 @@ func (b *backend) Process(
 	// rolls all three back, while a committed competitor is observed below as a
 	// completed duplicate. An unconditional FOR UPDATE would only serialize
 	// already completed redeliveries without strengthening that invariant.
-	query := `INSERT INTO gomessenger_inbox
-        (consumer_id, source, message_id, fingerprint, created_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (consumer_id, source, message_id) DO NOTHING`
-	inserted, err := tx.ExecContext(ctx, query,
+	inserted, err := tx.ExecContext(ctx, b.statements.insertIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	if err != nil {
 		return result, fmt.Errorf("inbox/pgsql: insert identity: %w", err)
@@ -105,8 +111,7 @@ func (b *backend) Process(
 	if err := handler(handlerContext); err != nil {
 		return result, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox SET completed_at = $1
-        WHERE consumer_id = $2 AND source = $3 AND message_id = $4`,
+	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return result, fmt.Errorf("inbox/pgsql: mark complete: %w", err)
 	}
@@ -159,8 +164,7 @@ func (b *backend) ProcessAttempt(
 	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
 		return result, fmt.Errorf("inbox/pgsql: release handler savepoint: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox SET completed_at = $1
-        WHERE consumer_id = $2 AND source = $3 AND message_id = $4`,
+	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return result, fmt.Errorf("inbox/pgsql: mark attempt complete: %w", err)
 	}
@@ -206,14 +210,10 @@ func (b *backend) markAttemptTerminal(
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
 	var err error
 	if key.AttemptGeneration == "" {
-		_, err = tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempts
-	        SET terminal = TRUE, updated_at = $1
-	        WHERE consumer_id = $2 AND source = $3 AND message_id = $4`, b.clock().UTC(),
+		_, err = tx.ExecContext(ctx, b.statements.markTerminal, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String())
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempt_generations
-	        SET terminal = TRUE, updated_at = $1
-	        WHERE consumer_id = $2 AND source = $3 AND message_id = $4 AND fingerprint = $5`, b.clock().UTC(),
+		_, err = tx.ExecContext(ctx, b.statements.markTerminalGeneration, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String(), attemptFingerprint[:])
 	}
 	if err != nil {
@@ -228,10 +228,7 @@ func (b *backend) prepareAttemptIdentity(
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) (inbox.Result, bool, error) {
-	inserted, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox
-        (consumer_id, source, message_id, fingerprint, created_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (consumer_id, source, message_id) DO NOTHING`,
+	inserted, err := tx.ExecContext(ctx, b.statements.insertIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	if err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: insert attempt identity: %w", err)
@@ -245,10 +242,8 @@ func (b *backend) prepareAttemptIdentity(
 	}
 	var stored []byte
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3
-        FOR UPDATE`, key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
+	if err := tx.QueryRowContext(ctx, b.statements.lockIdentity,
+		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: lock attempt identity: %w", err)
 	}
 	if !fingerprintsEqual(stored, fingerprint) {
@@ -257,7 +252,7 @@ func (b *backend) prepareAttemptIdentity(
 	if !completedAt.Valid {
 		return inbox.Result{}, false, nil
 	}
-	state, err := readAttempt(ctx, tx, key, inbox.AttemptFingerprint(key, fingerprint))
+	state, err := b.readAttempt(ctx, tx, key, inbox.AttemptFingerprint(key, fingerprint))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return inbox.Result{}, false, err
 	}
@@ -275,7 +270,7 @@ func (b *backend) nextAttempt(
 	maxAttempts uint64,
 ) (attemptDecision, error) {
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
-	state, err := readAttempt(ctx, tx, key, attemptFingerprint)
+	state, err := b.readAttempt(ctx, tx, key, attemptFingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		if insertErr := b.insertAttempt(ctx, tx, key, attemptFingerprint); insertErr != nil {
 			return attemptDecision{}, fmt.Errorf("inbox/pgsql: insert handler attempt: %w", insertErr)
@@ -304,15 +299,11 @@ func (b *backend) insertAttempt(
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_attempts
-	        (consumer_id, source, message_id, fingerprint, attempts, updated_at)
-	        VALUES ($1, $2, $3, $4, 1, $5)`, key.ConsumerID, key.Source,
+		_, err := tx.ExecContext(ctx, b.statements.insertAttempt, key.ConsumerID, key.Source,
 			key.MessageID.String(), fingerprint[:], b.clock().UTC())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_attempt_generations
-	    (consumer_id, source, message_id, fingerprint, attempts, updated_at)
-	    VALUES ($1, $2, $3, $4, 1, $5)`, key.ConsumerID, key.Source,
+	_, err := tx.ExecContext(ctx, b.statements.insertAttemptGeneration, key.ConsumerID, key.Source,
 		key.MessageID.String(), fingerprint[:], b.clock().UTC())
 	return err
 }
@@ -324,20 +315,16 @@ func (b *backend) incrementAttempt(
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempts
-	        SET attempts = attempts + 1, updated_at = $1
-	        WHERE consumer_id = $2 AND source = $3 AND message_id = $4`, b.clock().UTC(),
+		_, err := tx.ExecContext(ctx, b.statements.incrementAttempt, b.clock().UTC(),
 			key.ConsumerID, key.Source, key.MessageID.String())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE gomessenger_inbox_attempt_generations
-	    SET attempts = attempts + 1, updated_at = $1
-	    WHERE consumer_id = $2 AND source = $3 AND message_id = $4 AND fingerprint = $5`, b.clock().UTC(),
+	_, err := tx.ExecContext(ctx, b.statements.incrementAttemptGeneration, b.clock().UTC(),
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:])
 	return err
 }
 
-func readAttempt(
+func (b *backend) readAttempt(
 	ctx context.Context,
 	tx *sql.Tx,
 	key inbox.Key,
@@ -347,15 +334,11 @@ func readAttempt(
 	var terminal bool
 	var err error
 	if key.AttemptGeneration == "" {
-		err = tx.QueryRowContext(ctx, `SELECT attempts, terminal
-	        FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = $1 AND source = $2 AND message_id = $3
-	        FOR UPDATE`, key.ConsumerID, key.Source, key.MessageID.String()).Scan(&attempt, &terminal)
+		err = tx.QueryRowContext(ctx, b.statements.readAttempt,
+			key.ConsumerID, key.Source, key.MessageID.String()).Scan(&attempt, &terminal)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT attempts, terminal
-	        FROM gomessenger_inbox_attempt_generations
-	        WHERE consumer_id = $1 AND source = $2 AND message_id = $3 AND fingerprint = $4
-	        FOR UPDATE`, key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:]).Scan(&attempt, &terminal)
+		err = tx.QueryRowContext(ctx, b.statements.readAttemptGeneration,
+			key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:]).Scan(&attempt, &terminal)
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -381,10 +364,8 @@ func (b *backend) ForgetAttempt(
 	defer func() { _ = tx.Rollback() }()
 	var stored []byte
 	var completedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3
-        FOR UPDATE`, key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt)
+	err = tx.QueryRowContext(ctx, b.statements.lockIdentity,
+		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("inbox/pgsql: commit missing forgotten attempt: %w", err)
@@ -404,10 +385,10 @@ func (b *backend) ForgetAttempt(
 		return nil
 	}
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
-	if err := deleteAttempt(ctx, tx, key, attemptFingerprint); err != nil {
+	if err := b.deleteAttempt(ctx, tx, key, attemptFingerprint); err != nil {
 		return fmt.Errorf("inbox/pgsql: delete handler attempt: %w", err)
 	}
-	hasAttempts, err := hasAttempts(ctx, tx, key)
+	hasAttempts, err := b.hasAttempts(ctx, tx, key)
 	if err != nil {
 		return err
 	}
@@ -417,8 +398,7 @@ func (b *backend) ForgetAttempt(
 		}
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3 AND completed_at IS NULL`,
+	if _, err := tx.ExecContext(ctx, b.statements.deleteIncompleteIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return fmt.Errorf("inbox/pgsql: delete incomplete identity: %w", err)
 	}
@@ -428,31 +408,25 @@ func (b *backend) ForgetAttempt(
 	return nil
 }
 
-func deleteAttempt(
+func (b *backend) deleteAttempt(
 	ctx context.Context,
 	tx *sql.Tx,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) error {
 	if key.AttemptGeneration == "" {
-		_, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = $1 AND source = $2 AND message_id = $3`,
+		_, err := tx.ExecContext(ctx, b.statements.deleteAttempt,
 			key.ConsumerID, key.Source, key.MessageID.String())
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM gomessenger_inbox_attempt_generations
-	    WHERE consumer_id = $1 AND source = $2 AND message_id = $3 AND fingerprint = $4`,
+	_, err := tx.ExecContext(ctx, b.statements.deleteAttemptGeneration,
 		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:])
 	return err
 }
 
-func hasAttempts(ctx context.Context, tx *sql.Tx, key inbox.Key) (bool, error) {
+func (b *backend) hasAttempts(ctx context.Context, tx *sql.Tx, key inbox.Key) (bool, error) {
 	var exists bool
-	err := tx.QueryRowContext(ctx, `SELECT
-	    EXISTS(SELECT 1 FROM gomessenger_inbox_attempts
-	        WHERE consumer_id = $1 AND source = $2 AND message_id = $3)
-	    OR EXISTS(SELECT 1 FROM gomessenger_inbox_attempt_generations
-	        WHERE consumer_id = $1 AND source = $2 AND message_id = $3)`,
+	err := tx.QueryRowContext(ctx, b.statements.hasAttempts,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("inbox/pgsql: inspect remaining handler attempts: %w", err)
@@ -468,9 +442,7 @@ func (b *backend) handleExisting(
 ) (inbox.Result, bool, error) {
 	var stored []byte
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT fingerprint, completed_at
-        FROM gomessenger_inbox
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3`,
+	if err := tx.QueryRowContext(ctx, b.statements.readIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
 		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: read identity: %w", err)
 	}
@@ -492,49 +464,16 @@ func (b *backend) Prune(ctx context.Context, before time.Time, limit int) (int64
 		return 0, fmt.Errorf("inbox/pgsql: begin prune: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := lockPruneBatch(ctx, tx, before, limit); err != nil {
+	if err := b.lockPruneBatch(ctx, tx, before, limit); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `WITH doomed AS (
-	    SELECT consumer_id, source, message_id
-	    FROM gomessenger_inbox
-	    WHERE completed_at < $1
-	    ORDER BY completed_at, consumer_id, source, message_id
-	    LIMIT $2
-	)
-	DELETE FROM gomessenger_inbox_attempt_generations AS attempts
-	USING doomed
-	WHERE attempts.consumer_id = doomed.consumer_id
-	  AND attempts.source = doomed.source
-	  AND attempts.message_id = doomed.message_id`, before, limit); err != nil {
+	if _, err := tx.ExecContext(ctx, b.statements.pruneAttemptGenerations, before, limit); err != nil {
 		return 0, fmt.Errorf("inbox/pgsql: prune attempt generations: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `WITH doomed AS (
-        SELECT consumer_id, source, message_id
-        FROM gomessenger_inbox
-        WHERE completed_at < $1
-        ORDER BY completed_at, consumer_id, source, message_id
-        LIMIT $2
-    )
-    DELETE FROM gomessenger_inbox_attempts AS attempts
-    USING doomed
-    WHERE attempts.consumer_id = doomed.consumer_id
-      AND attempts.source = doomed.source
-      AND attempts.message_id = doomed.message_id`, before, limit); err != nil {
+	if _, err := tx.ExecContext(ctx, b.statements.pruneAttempts, before, limit); err != nil {
 		return 0, fmt.Errorf("inbox/pgsql: prune attempts: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `WITH doomed AS (
-        SELECT consumer_id, source, message_id
-        FROM gomessenger_inbox
-        WHERE completed_at < $1
-        ORDER BY completed_at, consumer_id, source, message_id
-        LIMIT $2
-    )
-    DELETE FROM gomessenger_inbox AS inbox
-    USING doomed
-    WHERE inbox.consumer_id = doomed.consumer_id
-      AND inbox.source = doomed.source
-      AND inbox.message_id = doomed.message_id`, before, limit)
+	result, err := tx.ExecContext(ctx, b.statements.pruneInbox, before, limit)
 	if err != nil {
 		return 0, fmt.Errorf("inbox/pgsql: prune: %w", err)
 	}
@@ -548,13 +487,8 @@ func (b *backend) Prune(ctx context.Context, before time.Time, limit int) (int64
 	return rows, nil
 }
 
-func lockPruneBatch(ctx context.Context, tx *sql.Tx, before time.Time, limit int) error {
-	locked, err := tx.QueryContext(ctx, `SELECT 1
-        FROM gomessenger_inbox
-        WHERE completed_at < $1
-        ORDER BY completed_at, consumer_id, source, message_id
-        LIMIT $2
-        FOR UPDATE`, before, limit)
+func (b *backend) lockPruneBatch(ctx context.Context, tx *sql.Tx, before time.Time, limit int) error {
+	locked, err := tx.QueryContext(ctx, b.statements.lockPruneBatch, before, limit)
 	if err != nil {
 		return fmt.Errorf("inbox/pgsql: lock prune batch: %w", err)
 	}

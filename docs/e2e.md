@@ -53,6 +53,20 @@ module. `make test-e2e` proves the local checkout;
 `make test-consumer-release VERSION=vX.Y.Z` remains the separate proof that all
 public GoMessenger tags resolve without local replacements.
 
+## Runnable adoption demo
+
+`examples/durable-postgres-nats` presents the core path as a visible one-shot application rather than a test harness.
+It uses PostgreSQL for both Outbox/business state and a namespaced Inbox, plus a compose-managed NATS server. Run it with:
+
+```sh
+make demo-durable-postgres-nats
+```
+
+The demo is compiled by `make check` and its live compose run covers business/Outbox atomicity, an intentional retry,
+a distinct duplicate broker delivery, permanent DLQ hand-off, and deterministic confirmed replay. Unlike
+`testdata/e2e`, it is Docker-based and optimized for evaluation logs rather than exhaustive failure assertions. Both
+remain checkout proofs; neither replaces the published clean-consumer gate or real-service pilot.
+
 ## Kafka compatibility pipeline
 
 The same E2E module contains an opt-in Kafka pipeline. It is skipped when no broker is declared, so the source-only

@@ -63,6 +63,97 @@ func TestPostgresInboxIntegration(t *testing.T) {
 	t.Run("concurrent rollback lets waiter commit", func(t *testing.T) {
 		testPostgresConcurrentRollback(t, database)
 	})
+	t.Run("custom schema and prefix", func(t *testing.T) {
+		testPostgresCustomNamespace(t, database)
+	})
+}
+
+func testPostgresCustomNamespace(t *testing.T, database *sql.DB) {
+	t.Helper()
+	const schema = "gomessenger_inbox_test_namespace"
+	if _, err := database.ExecContext(t.Context(), `DROP SCHEMA IF EXISTS "gomessenger_inbox_test_namespace" CASCADE`); err != nil {
+		t.Fatalf("drop prior custom schema: %v", err)
+	}
+	if err := pgsql.Migrate(
+		t.Context(), database, pgsql.WithSchema(schema), pgsql.WithTablePrefix("site_"),
+	); err == nil {
+		t.Fatal("migration unexpectedly created a missing custom schema")
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE SCHEMA "gomessenger_inbox_test_namespace"`); err != nil {
+		t.Fatalf("create custom schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, err := database.ExecContext(
+			context.Background(), `DROP SCHEMA IF EXISTS "gomessenger_inbox_test_namespace" CASCADE`,
+		)
+		if err != nil {
+			t.Errorf("drop custom schema: %v", err)
+		}
+	})
+	options := []pgsql.Option{pgsql.WithSchema(schema), pgsql.WithTablePrefix("site_")}
+	if err := pgsql.Migrate(t.Context(), database, options...); err != nil {
+		t.Fatalf("first custom migration: %v", err)
+	}
+	if err := pgsql.Migrate(t.Context(), database, options...); err != nil {
+		t.Fatalf("idempotent custom migration: %v", err)
+	}
+	store, err := pgsql.New(database, options...)
+	if err != nil {
+		t.Fatalf("new custom store: %v", err)
+	}
+
+	var tableCount int
+	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = $1 AND table_name IN ($2, $3, $4)`, schema,
+		"site_inbox", "site_inbox_attempts", "site_inbox_attempt_generations").Scan(&tableCount); err != nil {
+		t.Fatalf("inspect custom tables: %v", err)
+	}
+	if tableCount != 3 {
+		t.Fatalf("custom table count = %d, want 3", tableCount)
+	}
+	var defaultTableCount int
+	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = $1 AND table_name LIKE 'gomessenger_inbox%'`, schema).Scan(&defaultTableCount); err != nil {
+		t.Fatalf("inspect default tables in custom schema: %v", err)
+	}
+	if defaultTableCount != 0 {
+		t.Fatalf("default tables in custom schema = %d", defaultTableCount)
+	}
+	var indexCount int
+	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM pg_indexes
+		WHERE schemaname = $1 AND indexname = $2`, schema, "site_inbox_completed_at_idx").Scan(&indexCount); err != nil {
+		t.Fatalf("inspect custom index: %v", err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("custom completed-at index count = %d, want 1", indexCount)
+	}
+
+	key := postgresKey(t, "custom-namespace")
+	fingerprint := postgresFingerprint("custom-namespace")
+	var calls atomic.Int32
+	handler := func(context.Context) error {
+		calls.Add(1)
+		return nil
+	}
+	if result, processErr := store.Process(t.Context(), key, fingerprint, handler); processErr != nil || result.Duplicate {
+		t.Fatalf("custom process = %#v, %v", result, processErr)
+	}
+	if result, processErr := store.Process(t.Context(), key, fingerprint, handler); processErr != nil ||
+		!result.Duplicate || calls.Load() != 1 {
+		t.Fatalf("custom duplicate = %#v, calls=%d, error=%v", result, calls.Load(), processErr)
+	}
+
+	attemptKey := postgresKey(t, "custom-namespace-attempt")
+	attemptKey.AttemptGeneration = "gm-custom-replay"
+	if result, processErr := store.ProcessAttempt(
+		t.Context(), attemptKey, postgresFingerprint("custom-namespace-attempt"), 2,
+		func(context.Context) error { return nil },
+	); processErr != nil || result.Attempt != 1 {
+		t.Fatalf("custom attempt generation = %#v, %v", result, processErr)
+	}
+	if pruned, pruneErr := store.Prune(t.Context(), time.Now().Add(time.Minute), 10); pruneErr != nil || pruned != 2 {
+		t.Fatalf("custom prune = %d, %v", pruned, pruneErr)
+	}
 }
 
 func testPostgresDurableAttempts(t *testing.T, database *sql.DB) {

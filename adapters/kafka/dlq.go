@@ -28,6 +28,8 @@ const (
 	DefaultMaxSourceMessageBytes = 2*messenger.DefaultMaxEnvelopeBytes + messenger.DefaultMaxHeaderBytes
 	// DefaultMaxDLQMessageBytes includes bounded Kafka record framing headroom.
 	DefaultMaxDLQMessageBytes = DefaultMaxDLQRecordBytes + messenger.DefaultMaxHeaderBytes
+
+	failureKindDecode = "decode"
 )
 
 // DLQRecord is the stable Kafka dead-letter record committed atomically with

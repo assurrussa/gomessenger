@@ -154,13 +154,18 @@ source retention as already-old records.
 One worker is one Kafka group member and processes one record at a time. On success, the consumed offset commits in a
 Kafka transaction. On a retryable failure, the same canonical bytes and key move to the selected retry topic with an
 exact `not-before`, atomically with the source offset. Workers use franz-go's blocked-rebalance poll mode only for a
-bounded preflight. If a retry record arrives early, the worker snapshots existing partition pauses, pauses only that
-topic-partition, rewinds the local and uncommitted cursor to the record's exact leader epoch and offset, verifies the
-rewind, and then allows rebalancing. A failed verification terminates the worker without processing later offsets.
-The worker retains only the topic-partition and deadline in a bounded scheduler, continues polling other partitions,
-and resumes only pauses it owns when the nearest deadline is due. The record is then fetched again and enters the
-ordinary transactional handler path; handler, Inbox, and Kafka transaction execution never hold the poll rebalance
-block. `MaxAttempts` counts application handler invocations, not broker deliveries or `NotBefore` deferrals.
+bounded preflight: adapter-owned control-header parsing plus native envelope structure, descriptor, record-key, and
+expiry validation, followed by any exact pause/rewind. This bounded work never calls the application codec. A retry is
+scheduled only when its exact `not-before` precedes `ExpiresAt`; an expired or impossible window proceeds to terminal
+hand-off instead of pausing the partition. If a valid retry record arrives early, the worker snapshots existing
+partition pauses, pauses only that topic-partition, rewinds the local and uncommitted cursor to the record's exact leader
+epoch and offset, verifies the rewind, and then allows rebalancing. A failed verification terminates the worker without
+processing later offsets. The worker retains only the topic-partition and deadline in a bounded scheduler, continues
+polling other partitions, and resumes only pauses it owns when the nearest deadline is due. Canonicalization,
+application-supplied `Codec.Decode`, handler, Inbox, and Kafka transaction execution start only after `AllowRebalance`.
+Invalid control or envelope metadata and expired records enter transactional DLQ hand-off only after that release. A
+valid early retry does not invoke its codec until it is fetched again. `MaxAttempts` counts application handler
+invocations, not broker deliveries or `NotBefore` deferrals.
 
 On permanent failure or exhaustion, a bounded Kafka DLQ v1 record and the consumed offset commit in the same
 transaction. The DLQ record retains the original source position, key, canonical bytes, consumer, attempt generation,

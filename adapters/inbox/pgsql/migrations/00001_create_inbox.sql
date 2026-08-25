@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS gomessenger_inbox
+CREATE TABLE IF NOT EXISTS {{inbox}}
 (
     consumer_id  TEXT        NOT NULL,
     source       TEXT        NOT NULL,
@@ -9,6 +9,6 @@ CREATE TABLE IF NOT EXISTS gomessenger_inbox
     PRIMARY KEY (consumer_id, source, message_id)
 );
 
-CREATE INDEX IF NOT EXISTS gomessenger_inbox_completed_at_idx
-    ON gomessenger_inbox (completed_at)
+CREATE INDEX IF NOT EXISTS {{completed_at_index}}
+    ON {{inbox}} (completed_at)
     WHERE completed_at IS NOT NULL;

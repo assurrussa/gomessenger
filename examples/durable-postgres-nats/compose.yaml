@@ -1,0 +1,34 @@
+name: gomessenger-durable-demo
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: gomessenger
+      POSTGRES_USER: gomessenger
+      POSTGRES_PASSWORD: gomessenger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gomessenger -d gomessenger"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  nats:
+    image: nats:2.12.3-alpine
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+
+  demo:
+    build:
+      context: ../..
+      dockerfile: examples/durable-postgres-nats/Dockerfile
+    environment:
+      POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    init: true

@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+.vscode
+coverage
+tmp
+**/*.out
+**/*.test
+examples/durable-postgres-nats/gomessenger-durable-postgres-nats

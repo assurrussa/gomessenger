@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS gomessenger_inbox_attempt_generations
+CREATE TABLE IF NOT EXISTS {{attempt_generations}}
 (
     consumer_id TEXT        NOT NULL,
     source      TEXT        NOT NULL,
