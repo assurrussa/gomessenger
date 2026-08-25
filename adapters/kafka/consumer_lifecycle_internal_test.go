@@ -28,7 +28,7 @@ type consumerSessionRecorder struct {
 	releasePoll chan struct{}
 	pollOnce    sync.Once
 	fetches     kgo.Fetches
-	onPoll      func()
+	pollCalls   atomic.Int32
 	beginCalls  atomic.Int32
 	endCalls    atomic.Int32
 }
@@ -63,6 +63,7 @@ func (recorder *consumerSessionRecorder) ResumeFetchTopics(topics ...string) {
 }
 
 func (recorder *consumerSessionRecorder) PollRecords(ctx context.Context, _ int) kgo.Fetches {
+	recorder.pollCalls.Add(1)
 	if recorder.pollStarted != nil {
 		recorder.pollOnce.Do(func() { close(recorder.pollStarted) })
 	}
@@ -72,9 +73,6 @@ func (recorder *consumerSessionRecorder) PollRecords(ctx context.Context, _ int)
 		case <-ctx.Done():
 			return kgo.NewErrFetch(ctx.Err())
 		}
-	}
-	if recorder.onPoll != nil {
-		recorder.onPoll()
 	}
 	return recorder.fetches
 }
@@ -219,23 +217,29 @@ func TestConsumerRebalanceTimeoutTracksBrokerFinalization(t *testing.T) {
 	}
 }
 
-func TestConsumerDelayedRetryRestoresOnlyNewlyPausedTopics(t *testing.T) {
-	now := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
-	due := now.Add(2 * time.Second)
+func TestConsumerDelayedRetryDoesNotPollBufferedRecordsAndRestoresPauseState(t *testing.T) {
+	due := time.Now().UTC().Add(20 * time.Millisecond)
 	session := &consumerSessionRecorder{
 		paused: map[string]struct{}{"external": {}, testSourceTopic: {}},
-		onPoll: func() {
-			now = due
-		},
+		fetches: kgo.Fetches{{Topics: []kgo.FetchTopic{{
+			Topic: testSourceTopic,
+			Partitions: []kgo.FetchPartition{{
+				Partition: 0,
+				Records:   []*kgo.Record{{Topic: testSourceTopic, Partition: 0, Offset: 12}},
+			}},
+		}}}},
 	}
 	consumer := &Consumer{
 		topics: []string{testSourceTopic, testSourceTopic + ".retry"},
 		drain:  make(chan struct{}),
-		clock:  func() time.Time { return now },
+		clock:  time.Now,
 	}
 
 	if err := consumer.waitUntilDue(t.Context(), session, due); err != nil {
 		t.Fatalf("waitUntilDue: %v", err)
+	}
+	if got := session.pollCalls.Load(); got != 0 {
+		t.Fatalf("PollRecords calls during delayed retry = %d, want 0", got)
 	}
 	want := []string{"external", testSourceTopic}
 	if got := session.pausedTopics(); !slices.Equal(got, want) {

@@ -30,7 +30,15 @@ All notable changes to this project will be documented in this file.
   official Kafka 4.1.2 and 4.3.1 images;
 - an explicit local-versus-distributed query boundary, a versioned distributed request/reply ADR, and a selected
   article-publication audit pilot that remains pending until the library is published;
+- an evidence-driven Level 2 roadmap covering schema compatibility, broker capabilities, partition ordering, batching,
+  and operational validation;
+- local method benchmarks for command send, query execution, and event publication;
 - clean local and published-consumer verification paths;
-- GitHub Actions for the full read-only gate, PostgreSQL integration, and raw `benchstat` comparisons.
+- GitHub Actions for the full read-only gate, PostgreSQL and Kafka integration, and raw `benchstat` comparisons.
+
+### Fixed
+
+- delayed Kafka retry waiting no longer polls paused topics, preserving records that franz-go buffered before the pause;
+- the aggregate GitHub Actions `Full gate` now requires PostgreSQL and both supported Kafka integration jobs.
 
 No release has been published yet.
