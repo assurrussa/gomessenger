@@ -56,6 +56,9 @@ type messageContextKey struct{}
 
 // MetadataFromContext returns the currently handled message metadata.
 func MetadataFromContext(ctx context.Context) (Metadata, bool) {
+	if ctx == nil {
+		return Metadata{}, false
+	}
 	metadata, ok := ctx.Value(messageContextKey{}).(Metadata)
 	if !ok {
 		return Metadata{}, false
@@ -65,8 +68,12 @@ func MetadataFromContext(ctx context.Context) (Metadata, bool) {
 }
 
 // ContextWithMetadata installs immutable message lineage for an adapter or
-// terminal handler entering the typed messenger boundary.
+// terminal handler entering the typed messenger boundary. A nil parent is
+// replaced with context.Background so malformed adapter input cannot panic.
 func ContextWithMetadata(ctx context.Context, metadata Metadata) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	metadata.Headers = maps.Clone(metadata.Headers)
 	return context.WithValue(ctx, messageContextKey{}, metadata)
 }
