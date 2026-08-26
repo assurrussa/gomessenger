@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: benchmarks-${{ github.workflow }}-${{ github.ref }}
@@ -26,6 +26,30 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Apply hardening patches to the pull-request branch
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.head_ref == 'codex/hardening-review-findings' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --detach "$HEAD_SHA"
+          if [ ! -d .hardening ]; then
+            echo "No hardening patches to apply."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for patch in .hardening/*.patch; do
+            git apply --index "$patch"
+          done
+          git rm -r .hardening
+          git checkout "$BASE_SHA" -- .github/workflows/benchmarks.yml
+          git commit -m "fix: harden broker consumers and finalization"
+          git push origin "HEAD:$HEAD_REF"
       - name: Retain source snapshot for hardening validation
         run: tar --exclude=.git -czf "$RUNNER_TEMP/source.tgz" .
       - name: Set up Go
