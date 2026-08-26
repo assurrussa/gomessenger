@@ -25,6 +25,12 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
 	if nilValue(config.Propagator) {
 		config.Propagator = messenger.NoopContextPropagator()
 	}
+	if nilValue(config.PanicReporter) {
+		config.PanicReporter = nil
+	}
+	if nilValue(config.FailureSanitizer) {
+		config.FailureSanitizer = messenger.DefaultFailureSanitizer()
+	}
 	for _, observer := range config.Observers {
 		if nilValue(observer) {
 			return fmt.Errorf("%w: nil observer", ErrInvalidConfig)
@@ -46,7 +52,7 @@ func notifyObservers(ctx context.Context, config HandlerConfig, observation mess
 					logInfrastructure(ctx, config.Logger, messenger.LogError, "messenger observer panicked",
 						messenger.LogAttr{Key: "operation", Value: observation.Operation},
 						messenger.LogAttr{Key: logAttrConsumerID, Value: config.ConsumerID},
-						messenger.LogAttr{Key: "observer_panic", Value: recovered},
+						messenger.LogAttr{Key: "observer_panic", Value: true},
 					)
 				}
 			}()
@@ -75,10 +81,11 @@ func invokeMiddlewares(
 	handlerID string,
 	handler messenger.HandlerFunc,
 	middlewares []messenger.Middleware,
+	panicReporter messenger.PanicReporter,
 ) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("messenger/nats: handler %s panicked: %v\n%s", handlerID, recovered, debug.Stack())
+			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
 		}
 	}()
 	if len(middlewares) == 0 {
