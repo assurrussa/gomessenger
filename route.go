@@ -93,7 +93,22 @@ func (d *delivery) Fingerprint() ([sha256.Size]byte, error) {
 }
 
 func (d *delivery) Invoke(ctx context.Context) error {
+	if ctx == nil || d.invoke == nil {
+		return fmt.Errorf("%w: invalid delivery invocation", ErrInvalidMessage)
+	}
 	return d.invoke(contextWithMetadata(ctx, d.metadata))
+}
+
+func validateImmediateTiming(metadata Metadata, now time.Time) error {
+	now = now.UTC()
+	if !metadata.ExpiresAt.IsZero() && !metadata.ExpiresAt.After(now) {
+		return Permanent(ErrMessageExpired)
+	}
+	if !metadata.NotBefore.IsZero() && metadata.NotBefore.After(now) {
+		return fmt.Errorf("%w: local routes cannot schedule delivery for %s: %w",
+			ErrUnsupportedCapability, metadata.NotBefore.UTC().Format(time.RFC3339Nano), ErrMessageNotReady)
+	}
+	return nil
 }
 
 type localRoute interface {
