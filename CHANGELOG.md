@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- the pull-request and release checklists now require an enabled Codex Code Review result for the current pull-request
+  head before merge or tagging, with an explicit fallback when the connector is unavailable.
+
+### Fixed
+
+- NATS consumer readiness remains false until the pull iterator and worker pool are ready, and becomes false as soon as
+  the pull loop stops;
+- recovered managed-service `BeginDrain` panics now cancel the runtime context and propagate as safe structural errors
+  instead of allowing graceful shutdown to wait indefinitely.
+
 ## [0.2.0] - 2026-08-26
 
 ### Added

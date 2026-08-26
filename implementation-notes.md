@@ -1,5 +1,18 @@
 # Implementation notes
 
+## 2026-08-26 — v0.2.1 lifecycle hardening (unreleased)
+
+- Kept NATS readiness false until its pull iterator and worker pool exist, cleared it as soon as the pull loop stops,
+  and tied it to the live run context so cancellation during startup cannot produce a transient healthy result.
+- Made recovered managed-service `BeginDrain` panics deterministic lifecycle failures: every service still receives the
+  drain request, the active run context is force-cancelled, and `Run`/`Shutdown` retain the safe structural panic error.
+- Added channel-synchronised regressions for the NATS startup window, cancelled startup, and runtime drain-panic path;
+  targeted root and NATS tests passed under the race detector. The final `make check` passed with clean static analysis,
+  all module unit/race/checkptr gates, 91.0% root coverage, the clean consumer probe, and durable embedded-NATS E2E.
+- Added repository, pull-request-template, changelog, and release-runbook gates for an enabled GitHub Codex Code Review
+  result on the current pull-request head. The runbook checks included feature pull requests before local preparation
+  and the final release pull-request head only after the release contents are fixed.
+
 ## 2026-08-26 — v0.2.0 multi-module release
 
 - Selected `v0.2.0` rather than a patch release because the compatible hardening batch adds public `PanicReporter`,
