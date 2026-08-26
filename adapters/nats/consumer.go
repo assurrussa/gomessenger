@@ -82,14 +82,18 @@ type Consumer struct {
 	decode      decoder
 	clock       func() time.Time
 
-	mu          sync.Mutex
-	state       consumerState
-	runStarted  bool
-	forceCancel context.CancelFunc
-	iterator    jetstream.MessagesContext
-	done        chan struct{}
-	doneOnce    sync.Once
+	mu            sync.Mutex
+	state         consumerState
+	runStarted    bool
+	pullLoopReady bool
+	runDone       <-chan struct{}
+	forceCancel   context.CancelFunc
+	iterator      jetstream.MessagesContext
+	done          chan struct{}
+	doneOnce      sync.Once
 
+	// beforePullLoopReady synchronizes the startup window in package tests.
+	beforePullLoopReady func()
 	// beforeShutdownTransition synchronizes the locked transition in package tests.
 	beforeShutdownTransition func()
 }
@@ -300,6 +304,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 	c.runStarted = true
 	c.state = consumerRunning
 	runContext, cancel := context.WithCancel(ctx)
+	c.runDone = runContext.Done()
 	c.forceCancel = cancel
 	c.mu.Unlock()
 	defer cancel()
@@ -341,6 +346,13 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	if !c.markPullLoopReady(runContext) {
+		iterator.Stop()
+		close(jobs)
+		workers.Wait()
+		c.markClosed()
+		return nil
+	}
 	var runErr error
 pullLoop:
 	for {
@@ -363,6 +375,9 @@ pullLoop:
 			break pullLoop
 		}
 	}
+	c.mu.Lock()
+	c.pullLoopReady = false
+	c.mu.Unlock()
 	iterator.Stop()
 	close(jobs)
 	workers.Wait()
@@ -382,9 +397,22 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	state := c.state
+	pullLoopReady := c.pullLoopReady
+	runDone := c.runDone
 	c.mu.Unlock()
 	if state != consumerRunning {
 		return messenger.ErrRuntimeNotRunning
+	}
+	if !pullLoopReady {
+		return fmt.Errorf("%w: NATS consumer pull loop is not ready", messenger.ErrRuntimeNotRunning)
+	}
+	if runDone == nil {
+		return fmt.Errorf("%w: NATS consumer pull loop context is not active", messenger.ErrRuntimeNotRunning)
+	}
+	select {
+	case <-runDone:
+		return fmt.Errorf("%w: NATS consumer pull loop context is not active", messenger.ErrRuntimeNotRunning)
+	default:
 	}
 	if !c.connection.IsConnected() {
 		return errors.New("messenger/nats: connection is not connected")
@@ -462,7 +490,21 @@ func (c *Consumer) beginDrainLocked() jetstream.MessagesContext {
 	if c.state == consumerNew || c.state == consumerRunning {
 		c.state = consumerDraining
 	}
+	c.pullLoopReady = false
 	return c.iterator
+}
+
+func (c *Consumer) markPullLoopReady(ctx context.Context) bool {
+	if c.beforePullLoopReady != nil {
+		c.beforePullLoopReady()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != consumerRunning || ctx.Err() != nil {
+		return false
+	}
+	c.pullLoopReady = true
+	return true
 }
 
 func (c *Consumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) {
@@ -1029,6 +1071,8 @@ func dlqDedupID(
 func (c *Consumer) markClosed() {
 	c.mu.Lock()
 	c.state = consumerClosed
+	c.pullLoopReady = false
+	c.runDone = nil
 	c.mu.Unlock()
 	c.closeDone()
 }

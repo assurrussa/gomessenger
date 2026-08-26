@@ -79,3 +79,35 @@ overrides belong only in `go.work`; clean consumer and E2E modules must resolve
 the published tags with `GOWORK=off`.
 
 Keep `implementation-notes.md` current during large implementation work.
+
+## Code Review Rules
+
+### Lifecycle startup and shutdown
+
+- Flag readiness paths that can succeed before every resource and worker or pull
+  loop required to accept work has started, or after drain begins. The safe path
+  uses an explicit startup-ready condition and deterministic coverage of the
+  startup window and startup failure.
+- Flag recovered lifecycle panics or errors that are only logged while a service
+  or peer can keep waiting. `BeginDrain` and `Shutdown` failures must propagate
+  or force-cancel affected run contexts so bounded shutdown cannot be preceded
+  by an unbounded wait.
+- Changes to `Run`, `Readiness`, `Liveness`, `DeepHealth`, `BeginDrain`, or
+  `Shutdown` must trace every state transition and add deterministic lifecycle
+  coverage for new startup, failure, drain, and cancellation paths.
+
+## Pull request and release review gate
+
+When Codex Code Review is enabled for the connected GitHub repository, do not
+merge a pull request or include it in a release until Codex has completed Code
+Review for the pull request's current head commit, evidenced by a posted review
+or the connector's no-findings reaction. If automatic review did not run,
+request it with `@codex review` and wait for the in-progress reaction to resolve
+into a completed result. A later push requires a review of the new head.
+
+Address actionable findings and resolve their review conversations before
+merge. A rejected finding needs a concise rationale in the conversation. Do not
+create or publish release tags while an included pull request has a pending
+Codex review or unresolved actionable finding. If Code Review is unavailable or
+disabled, report that explicitly and use the normal human and repository gates;
+do not imply that Codex reviewed the change.

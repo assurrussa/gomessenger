@@ -65,6 +65,7 @@ type Runtime struct {
 	// runtime. A started Run remains the lifecycle owner and closes done.
 	shutdownStarted bool
 	shutdownErr     error
+	drainErr        error
 	done            chan struct{}
 	drain           chan struct{}
 	drainOnce       sync.Once
@@ -167,8 +168,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 		}
 	}
 
-	r.beginDrain(ctx)
-	if !gracefulDrain {
+	drainErr := r.beginDrain(ctx)
+	if drainErr != nil {
+		runErr = errors.Join(runErr, drainErr)
+	}
+	if !gracefulDrain || drainErr != nil {
 		cancel()
 	}
 	workers.Wait()
@@ -324,27 +328,40 @@ func (r *Runtime) checkServices(
 
 // BeginDrain marks the runtime unready and asks every service to stop admission.
 func (r *Runtime) BeginDrain() {
-	r.beginDrain(context.Background())
+	_ = r.beginDrain(context.Background())
 }
 
-func (r *Runtime) beginDrain(ctx context.Context) {
+func (r *Runtime) beginDrain(ctx context.Context) error {
 	r.drainOnce.Do(func() {
 		r.mu.Lock()
 		if r.state != runtimeClosed {
 			r.state = runtimeDraining
 		}
 		r.mu.Unlock()
-		for _, configuredService := range r.services {
-			r.beginDrainService(ctx, configuredService)
+		drainErrors := make([]error, len(r.services))
+		for index, configuredService := range r.services {
+			drainErrors[index] = r.beginDrainService(ctx, configuredService)
+		}
+		drainErr := errors.Join(drainErrors...)
+		r.mu.Lock()
+		r.drainErr = drainErr
+		cancel := r.runCancel
+		r.mu.Unlock()
+		if drainErr != nil && cancel != nil {
+			cancel()
 		}
 		close(r.drain)
 	})
+	r.mu.Lock()
+	err := r.drainErr
+	r.mu.Unlock()
+	return err
 }
 
-func (r *Runtime) beginDrainService(ctx context.Context, service namedService) {
+func (r *Runtime) beginDrainService(ctx context.Context, service namedService) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err := ReportHandlerPanic(
+			err = ReportHandlerPanic(
 				ctx,
 				r.panicReporter,
 				"service."+service.id+".begin_drain",
@@ -358,6 +375,7 @@ func (r *Runtime) beginDrainService(ctx context.Context, service namedService) {
 		}
 	}()
 	service.service.BeginDrain()
+	return nil
 }
 
 // Shutdown drains all services and waits for a concurrent Run to finish.
@@ -392,7 +410,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	r.beginDrain(ctx)
+	drainErr := r.beginDrain(ctx)
 	if cancel != nil {
 		select {
 		case <-r.done:
@@ -405,7 +423,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	err := r.shutdownServices(ctx)
+	err := errors.Join(drainErr, r.shutdownServices(ctx))
 	r.mu.Lock()
 	r.shutdownErr = err
 	r.mu.Unlock()

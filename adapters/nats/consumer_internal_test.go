@@ -9,6 +9,7 @@ import (
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
+	"github.com/nats-io/nats-server/v2/server"
 	natsio "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -32,6 +33,108 @@ func TestConsumerFinalizationTimeout(t *testing.T) {
 	const maxDuration = time.Duration(1<<63 - 1)
 	if got := handlerTransactionTimeout(maxDuration-time.Second, 2*time.Second); got != maxDuration {
 		t.Fatalf("saturated transaction timeout = %s, want %s", got, maxDuration)
+	}
+}
+
+func TestConsumerReadinessStaysFalseUntilPullLoopStartupCompletes(t *testing.T) {
+	instance, err := server.NewServer(&server.Options{
+		JetStream:  true,
+		StoreDir:   t.TempDir(),
+		Port:       -1,
+		MaxPayload: DefaultMaxDLQMessageBytes,
+	})
+	if err != nil {
+		t.Fatalf("new NATS server: %v", err)
+	}
+	instance.Start()
+	if !instance.ReadyForConnections(10 * time.Second) {
+		instance.Shutdown()
+		t.Fatal("NATS server not ready")
+	}
+	t.Cleanup(func() {
+		instance.Shutdown()
+		instance.WaitForShutdown()
+	})
+	connection, err := natsio.Connect(instance.ClientURL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(connection.Close)
+
+	command := messenger.MustCommand("startup.readiness", 1, messenger.JSON[struct{}]())
+	subject, err := Subject("startup", command.Info())
+	if err != nil {
+		t.Fatalf("subject: %v", err)
+	}
+	config := HandlerConfig{
+		Stream: "STARTUP_EVENTS", Namespace: "startup", ConsumerID: "startup-readiness-worker",
+		WireMode: WireNative, Concurrency: 2, Timeout: time.Second, FinalizationTimeout: time.Second,
+		MaxAttempts: 3, BaseRetry: time.Millisecond, MaxRetry: time.Second, AckWait: time.Second,
+		DLQSubject: "startup.dlq", Replicas: 1, MemoryStorage: true,
+	}
+	if _, err := ApplyTopology(t.Context(), connection, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(config.Stream, subject),
+			DevDLQStream("STARTUP_DLQ", config.DLQSubject),
+		},
+	}); err != nil {
+		t.Fatalf("apply topology: %v", err)
+	}
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	startupWindow := make(chan struct{})
+	releaseStartup := make(chan struct{})
+	consumer := &Consumer{
+		connection: connection,
+		js:         js,
+		config:     config,
+		descriptor: command.Info(),
+		subject:    subject,
+		done:       make(chan struct{}),
+		beforePullLoopReady: func() {
+			close(startupWindow)
+			<-releaseStartup
+		},
+	}
+	runContext, cancel := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() { runDone <- consumer.Run(runContext) }()
+	select {
+	case <-startupWindow:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("consumer did not enter the startup window")
+	}
+	if err := consumer.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		close(releaseStartup)
+		cancel()
+		t.Fatalf("Readiness during startup = %v, want ErrRuntimeNotRunning", err)
+	}
+	close(releaseStartup)
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run after startup cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer did not stop after startup cancellation")
+	}
+}
+
+func TestConsumerReadinessRejectsCancelledPullLoopContext(t *testing.T) {
+	runContext, cancel := context.WithCancel(t.Context())
+	cancel()
+	consumer := &Consumer{
+		state:         consumerRunning,
+		pullLoopReady: true,
+		runDone:       runContext.Done(),
+	}
+	if err := consumer.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("Readiness with cancelled pull loop = %v, want ErrRuntimeNotRunning", err)
 	}
 }
 

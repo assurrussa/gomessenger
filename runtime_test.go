@@ -274,6 +274,38 @@ func (panickingRunService) BeginDrain() {}
 
 func (panickingRunService) Shutdown(context.Context) error { return nil }
 
+type panickingDrainService struct {
+	started       chan struct{}
+	cancelled     chan struct{}
+	shutdownCalls atomic.Int32
+}
+
+func (s *panickingDrainService) Run(ctx context.Context) error {
+	close(s.started)
+	<-ctx.Done()
+	close(s.cancelled)
+	return ctx.Err()
+}
+
+func (*panickingDrainService) Readiness(context.Context) error { return nil }
+
+func (*panickingDrainService) BeginDrain() { panic("sensitive drain panic") }
+
+func (s *panickingDrainService) Shutdown(context.Context) error {
+	s.shutdownCalls.Add(1)
+	return nil
+}
+
+func assertRuntimeDrainPanicError(t *testing.T, err error) {
+	t.Helper()
+	var panicErr messenger.HandlerPanicError
+	if !errors.As(err, &panicErr) ||
+		panicErr.HandlerPanicID() != "service."+testRuntimeServiceID+".begin_drain" ||
+		strings.Contains(err.Error(), "sensitive drain panic") {
+		t.Fatalf("runtime drain panic error = %#v, %v", panicErr, err)
+	}
+}
+
 func TestRuntimeReportsServicePanicsWithoutExposingDetails(t *testing.T) {
 	var report messenger.PanicReport
 	runtime := runtimeWithServices(
@@ -295,6 +327,74 @@ func TestRuntimeReportsServicePanicsWithoutExposingDetails(t *testing.T) {
 	if report.HandlerID != "service."+testRuntimeServiceID ||
 		report.Value != "sensitive service panic" || len(report.Stack) == 0 {
 		t.Fatalf("runtime panic report = %#v", report)
+	}
+}
+
+func TestRuntimeBeginDrainPanicForceCancelsRun(t *testing.T) {
+	service := &panickingDrainService{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+	reports := make(chan messenger.PanicReport, 1)
+	runtime := runtimeWithServices(
+		t,
+		map[string]messenger.Service{testRuntimeServiceID: service},
+		messenger.WithPanicReporter(messenger.PanicReporterFunc(func(
+			_ context.Context,
+			report messenger.PanicReport,
+		) {
+			reports <- report
+		})),
+	)
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(t.Context()) }()
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("service did not start")
+	}
+
+	runtime.BeginDrain()
+	select {
+	case <-service.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("drain panic did not cancel the service run context")
+	}
+	var runErr error
+	select {
+	case runErr = <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("runtime remained blocked after the drain panic")
+	}
+	assertRuntimeDrainPanicError(t, runErr)
+	select {
+	case report := <-reports:
+		if report.HandlerID != "service."+testRuntimeServiceID+".begin_drain" ||
+			report.Value != "sensitive drain panic" || len(report.Stack) == 0 {
+			t.Fatalf("runtime drain panic report = %#v", report)
+		}
+	default:
+		t.Fatal("drain panic was not reported")
+	}
+	if calls := service.shutdownCalls.Load(); calls != 1 {
+		t.Fatalf("service shutdown calls = %d, want 1", calls)
+	}
+}
+
+func TestRuntimeShutdownBeforeRunRetainsBeginDrainPanic(t *testing.T) {
+	service := &panickingDrainService{}
+	runtime := runtimeWithServices(
+		t,
+		map[string]messenger.Service{testRuntimeServiceID: service},
+	)
+
+	assertRuntimeDrainPanicError(t, runtime.Shutdown(t.Context()))
+	assertRuntimeDrainPanicError(t, runtime.Shutdown(t.Context()))
+	if calls := service.shutdownCalls.Load(); calls != 1 {
+		t.Fatalf("service shutdown calls = %d, want 1", calls)
+	}
+	if err := runtime.Run(t.Context()); !errors.Is(err, messenger.ErrRuntimeClosed) {
+		t.Fatalf("run after failed pre-run shutdown = %v, want ErrRuntimeClosed", err)
 	}
 }
 

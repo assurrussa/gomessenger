@@ -17,19 +17,29 @@ pass the published clean-consumer gate.
 
 ## Pre-release gate
 
-1. Run `make prepare` and inspect generated module sums and formatting changes.
-2. Run `make check`; it includes the Docker-free transactional
+1. Identify every feature pull request included since the previous release. If
+   Codex Code Review is enabled for the repository, verify a completed result
+   on each pull request's final head commit: a posted review or the connector's
+   no-findings reaction. Request a missing review with `@codex review`, wait for
+   the completed result, and resolve every actionable conversation. A new push
+   invalidates the earlier review gate for that pull request.
+2. Run `make prepare` and inspect generated module sums and formatting changes.
+3. Run `make check`; it includes the Docker-free transactional
    Outbox-to-JetStream-to-Inbox E2E under the race detector.
-3. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
+4. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
    `make test-integration` separately reruns embedded JetStream/SQLite adapters and the durable pipeline.
-4. Run `make test-kafka` locally. It runs the transactional pipeline against official Kafka 4.1.2 and 4.3.1 images;
+5. Run `make test-kafka` locally. It runs the transactional pipeline against official Kafka 4.1.2 and 4.3.1 images;
    independent hosted matrix jobs run the same target for both versions.
-5. Run `make bench-all` for dispatch, envelope, registry, or admission-path changes. The benchmark workflow records ten
+6. Run `make bench-all` for dispatch, envelope, registry, or admission-path changes. The benchmark workflow records ten
    base/head samples, uploads raw data, and adds a pinned `benchstat` report without enforcing a machine-dependent
    performance threshold.
-6. Confirm `git diff --check` and that public docs contain no machine-local paths or development-only `replace`
+7. Confirm `git diff --check` and that public docs contain no machine-local paths or development-only `replace`
    examples.
-7. Update `CHANGELOG.md` and replace `Unreleased` wording only when the release contents are fixed.
+8. Update `CHANGELOG.md` and replace `Unreleased` wording only when the release contents are fixed.
+9. On the release pull request's final head commit, wait for the enabled Codex
+   Code Review result and resolve every actionable conversation before merge or
+   tagging. Request a missing review with `@codex review`; a later push requires
+   a new completed result.
 
 Passing local gates proves the checkout, not the published module graph.
 
