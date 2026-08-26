@@ -98,6 +98,9 @@ func (r *Route) publishEnvelope(
 	metadata messenger.Metadata,
 	native []byte,
 ) (messenger.Receipt, error) {
+	if ctx == nil {
+		return messenger.Receipt{}, fmt.Errorf("%w: nil publish context", ErrInvalidConfig)
+	}
 	now := r.clock().UTC()
 	if !metadata.ExpiresAt.IsZero() && !metadata.ExpiresAt.After(now) {
 		return messenger.Receipt{}, messenger.Permanent(ErrMessageExpired)
@@ -141,7 +144,7 @@ func (r *Route) publishEnvelope(
 		MessageID: metadata.ID,
 		Route:     r.name,
 		State:     messenger.ReceiptBrokerConfirmed,
-		At:        now,
+		At:        r.clock().UTC(),
 	}, nil
 }
 
