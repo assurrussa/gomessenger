@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"runtime/debug"
 	"sync/atomic"
 
 	messenger "github.com/assurrussa/gomessenger"
@@ -47,7 +46,14 @@ func handlerCompletionMiddleware(
 	_ string,
 	next messenger.HandlerFunc,
 ) error {
-	return messenger.HandlerCompletionError(ctx, next(ctx))
+	err := next(ctx)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: nil handler context", messenger.ErrInvalidMessage)
+	}
+	return ctx.Err()
 }
 
 func notifyObservers(ctx context.Context, config HandlerConfig, observation messenger.Observation) {
@@ -87,15 +93,10 @@ func invokeMiddlewares(
 	handlerID string,
 	handler messenger.HandlerFunc,
 	middlewares []messenger.Middleware,
-	panicReporters ...messenger.PanicReporter,
 ) (err error) {
-	var panicReporter messenger.PanicReporter
-	if len(panicReporters) > 0 && !nilValue(panicReporters[0]) {
-		panicReporter = panicReporters[0]
-	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
+			err = fmt.Errorf("messenger/nats: handler %s panicked", handlerID)
 		}
 	}()
 	if len(middlewares) == 0 {
