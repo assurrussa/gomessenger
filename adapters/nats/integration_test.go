@@ -333,7 +333,7 @@ func testEventTraceAndMiddlewareRoundTrip(t *testing.T, wireMode nats.WireMode) 
 	event := messenger.MustEvent(testEventName, 1, messenger.JSON[testPayload]())
 	order := make([]string, 0, 5)
 	handled := make(chan messenger.Message[testPayload], 1)
-	observed := make(chan messenger.Observation, 1)
+	observed := make(chan messenger.Observation, 2)
 	config := testHandlerConfig("trace-" + string(wireMode))
 	config.WireMode = wireMode
 	config.Propagator = testTracePropagator{}
@@ -399,7 +399,8 @@ func testEventTraceAndMiddlewareRoundTrip(t *testing.T, wireMode nats.WireMode) 
 		t.Fatalf("publish = %#v, %v", receipt, err)
 	}
 	message := <-handled
-	observation := <-observed
+	handlerObservation := <-observed
+	ackObservation := <-observed
 	if message.Metadata.Headers["traceparent"] == "" || message.Metadata.Headers["tracestate"] != testTraceState {
 		t.Fatalf("message headers = %#v", message.Metadata.Headers)
 	}
@@ -407,9 +408,14 @@ func testEventTraceAndMiddlewareRoundTrip(t *testing.T, wireMode nats.WireMode) 
 	if fmt.Sprint(order) != wantOrder {
 		t.Fatalf("middleware order = %v, want %s", order, wantOrder)
 	}
-	if observation.MessageID != receipt.MessageID || observation.ConsumerID != config.ConsumerID ||
-		observation.Attempt != 1 || observation.Duplicate || observation.Err != nil {
-		t.Fatalf("observation = %#v", observation)
+	if handlerObservation.Operation != messenger.OperationHandle ||
+		handlerObservation.MessageID != receipt.MessageID || handlerObservation.ConsumerID != config.ConsumerID ||
+		handlerObservation.Attempt != 1 || handlerObservation.Duplicate || handlerObservation.Err != nil {
+		t.Fatalf("handler observation = %#v", handlerObservation)
+	}
+	if ackObservation.Operation != messenger.Operation("broker_ack") || ackObservation.MessageID != receipt.MessageID ||
+		ackObservation.ConsumerID != config.ConsumerID || ackObservation.Err != nil {
+		t.Fatalf("ack observation = %#v", ackObservation)
 	}
 	cancel()
 	if err := <-runDone; err != nil {

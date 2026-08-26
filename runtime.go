@@ -4,17 +4,35 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
 )
 
+const defaultRuntimeShutdownTimeout = 30 * time.Second
+
 // Service is a host-supervised managed consumer or worker lifecycle.
+// BeginDrain must be non-blocking, stop admission, and cause a running Run call
+// to return without requiring Shutdown to be invoked first. Shutdown waits for
+// or force-cancels remaining work within its context.
 type Service interface {
 	Run(ctx context.Context) error
 	Readiness(ctx context.Context) error
 	BeginDrain()
 	Shutdown(ctx context.Context) error
+}
+
+// LivenessChecker optionally separates process liveness from readiness and
+// transient broker or topology failures.
+type LivenessChecker interface {
+	Liveness(ctx context.Context) error
+}
+
+// DeepHealthChecker optionally performs expensive topology and infrastructure
+// validation outside the normal readiness probe path.
+type DeepHealthChecker interface {
+	DeepHealth(ctx context.Context) error
 }
 
 // ServiceProvider lets a route contribute one managed service to Builder.
@@ -34,9 +52,11 @@ const (
 // Runtime supervises the services declared on one immutable Builder.
 // It never restarts a service automatically.
 type Runtime struct {
-	services []namedService
-	logger   Logger
-	observer Observer
+	services        []namedService
+	logger          Logger
+	observer        Observer
+	panicReporter   PanicReporter
+	shutdownTimeout time.Duration
 
 	mu        sync.Mutex
 	state     runtimeState
@@ -51,14 +71,25 @@ type Runtime struct {
 	closeOnce       sync.Once
 }
 
-func newRuntime(services []namedService, logger Logger, observer Observer) *Runtime {
+func newRuntime(
+	services []namedService,
+	logger Logger,
+	observer Observer,
+	panicReporter PanicReporter,
+	shutdownTimeout time.Duration,
+) *Runtime {
 	sort.Slice(services, func(i, j int) bool { return services[i].id < services[j].id })
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = defaultRuntimeShutdownTimeout
+	}
 	return &Runtime{
-		services: services,
-		logger:   logger,
-		observer: observer,
-		done:     make(chan struct{}),
-		drain:    make(chan struct{}),
+		services:        services,
+		logger:          logger,
+		observer:        observer,
+		panicReporter:   panicReporter,
+		shutdownTimeout: shutdownTimeout,
+		done:            make(chan struct{}),
+		drain:           make(chan struct{}),
 	}
 }
 
@@ -94,7 +125,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 		go func(service namedService) {
 			defer workers.Done()
 			startedAt := time.Now().UTC()
-			results <- serviceResult{id: service.id, startedAt: startedAt, err: service.service.Run(runContext)}
+			results <- serviceResult{
+				id:        service.id,
+				startedAt: startedAt,
+				err:       r.runManagedService(runContext, service),
+			}
 		}(configuredService)
 	}
 
@@ -132,7 +167,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		}
 	}
 
-	r.BeginDrain()
+	r.beginDrain(ctx)
 	if !gracefulDrain {
 		cancel()
 	}
@@ -146,12 +181,34 @@ func (r *Runtime) Run(ctx context.Context) error {
 			}
 		}
 	}
-	shutdownContext, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	shutdownContext, shutdownCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		r.shutdownTimeout,
+	)
 	shutdownErr := r.shutdownServices(shutdownContext)
 	shutdownCancel()
 	cancel()
+	combinedErr := errors.Join(runErr, shutdownErr)
+	r.mu.Lock()
+	r.shutdownErr = combinedErr
+	r.mu.Unlock()
 	r.markClosed()
-	return errors.Join(runErr, shutdownErr)
+	return combinedErr
+}
+
+func (r *Runtime) runManagedService(ctx context.Context, service namedService) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = ReportHandlerPanic(
+				ctx,
+				r.panicReporter,
+				"service."+service.id,
+				recovered,
+				debug.Stack(),
+			)
+		}
+	}()
+	return service.service.Run(ctx)
 }
 
 func (r *Runtime) reportServiceFailure(ctx context.Context, serviceID string, startedAt time.Time, err error) {
@@ -165,31 +222,112 @@ func (r *Runtime) reportServiceFailure(ctx context.Context, serviceID string, st
 		})
 	}
 	safeLog(ctx, r.logger, LogError, "messenger service stopped",
-		LogAttr{Key: "service_id", Value: serviceID},
-		LogAttr{Key: "error", Value: err},
+		LogAttr{Key: logAttrServiceIDKey, Value: serviceID},
+		LogAttr{Key: logAttrErrorKey, Value: SanitizeError(DefaultFailureSanitizer(), err)},
 	)
 }
 
-// Readiness checks runtime state and each declared service.
+// Readiness checks runtime admission state and each service's lightweight
+// readiness contract. Expensive topology validation belongs in DeepHealth.
 func (r *Runtime) Readiness(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
+	}
 	r.mu.Lock()
 	state := r.state
 	r.mu.Unlock()
 	if state != runtimeRunning {
 		return ErrRuntimeNotRunning
 	}
-	var readinessErrors []error
-	for _, configuredService := range r.services {
-		if err := configuredService.service.Readiness(ctx); err != nil {
-			readinessErrors = append(readinessErrors,
-				fmt.Errorf("messenger: service %s readiness: %w", configuredService.id, err))
-		}
+	return r.checkServices(ctx, "readiness", func(ctx context.Context, service namedService) error {
+		return service.service.Readiness(ctx)
+	})
+}
+
+// Liveness checks that Runtime has not terminated and invokes optional service
+// liveness checks without requiring readiness or topology access.
+func (r *Runtime) Liveness(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
 	}
-	return errors.Join(readinessErrors...)
+	r.mu.Lock()
+	state := r.state
+	r.mu.Unlock()
+	switch state {
+	case runtimeRunning, runtimeDraining:
+	case runtimeClosed:
+		return ErrRuntimeClosed
+	case runtimeNew:
+		return ErrRuntimeNotRunning
+	default:
+		return ErrRuntimeNotRunning
+	}
+	return r.checkServices(ctx, "liveness", func(ctx context.Context, service namedService) error {
+		checker, ok := service.service.(LivenessChecker)
+		if !ok {
+			return nil
+		}
+		return checker.Liveness(ctx)
+	})
+}
+
+// DeepHealth performs explicit, potentially expensive service health and
+// topology checks. It is intended for diagnostics or a low-frequency probe.
+func (r *Runtime) DeepHealth(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
+	}
+	r.mu.Lock()
+	state := r.state
+	r.mu.Unlock()
+	if state != runtimeRunning {
+		return ErrRuntimeNotRunning
+	}
+	return r.checkServices(ctx, "deep health", func(ctx context.Context, service namedService) error {
+		if checker, ok := service.service.(DeepHealthChecker); ok {
+			return checker.DeepHealth(ctx)
+		}
+		return service.service.Readiness(ctx)
+	})
+}
+
+func (r *Runtime) checkServices(
+	ctx context.Context,
+	operation string,
+	check func(context.Context, namedService) error,
+) error {
+	checkErrors := make([]error, len(r.services))
+	var workers sync.WaitGroup
+	for index, configuredService := range r.services {
+		workers.Add(1)
+		go func(index int, service namedService) {
+			defer workers.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					checkErrors[index] = ReportHandlerPanic(
+						ctx,
+						r.panicReporter,
+						"service."+service.id+"."+operation,
+						recovered,
+						debug.Stack(),
+					)
+				}
+			}()
+			if err := check(ctx, service); err != nil {
+				checkErrors[index] = fmt.Errorf("messenger: service %s %s: %w", service.id, operation, err)
+			}
+		}(index, configuredService)
+	}
+	workers.Wait()
+	return errors.Join(checkErrors...)
 }
 
 // BeginDrain marks the runtime unready and asks every service to stop admission.
 func (r *Runtime) BeginDrain() {
+	r.beginDrain(context.Background())
+}
+
+func (r *Runtime) beginDrain(ctx context.Context) {
 	r.drainOnce.Do(func() {
 		r.mu.Lock()
 		if r.state != runtimeClosed {
@@ -197,10 +335,29 @@ func (r *Runtime) BeginDrain() {
 		}
 		r.mu.Unlock()
 		for _, configuredService := range r.services {
-			configuredService.service.BeginDrain()
+			r.beginDrainService(ctx, configuredService)
 		}
 		close(r.drain)
 	})
+}
+
+func (r *Runtime) beginDrainService(ctx context.Context, service namedService) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err := ReportHandlerPanic(
+				ctx,
+				r.panicReporter,
+				"service."+service.id+".begin_drain",
+				recovered,
+				debug.Stack(),
+			)
+			safeLog(ctx, r.logger, LogError, "messenger service drain panicked",
+				LogAttr{Key: logAttrServiceIDKey, Value: service.id},
+				LogAttr{Key: logAttrErrorKey, Value: err},
+			)
+		}
+	}()
+	service.service.BeginDrain()
 }
 
 // Shutdown drains all services and waits for a concurrent Run to finish.
@@ -211,8 +368,9 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	if r.state == runtimeClosed {
+		err := r.shutdownErr
 		r.mu.Unlock()
-		return nil
+		return err
 	}
 	cancel := r.runCancel
 	waitForOwnedShutdown := cancel == nil && r.shutdownStarted
@@ -234,11 +392,14 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	r.BeginDrain()
+	r.beginDrain(ctx)
 	if cancel != nil {
 		select {
 		case <-r.done:
-			return nil
+			r.mu.Lock()
+			err := r.shutdownErr
+			r.mu.Unlock()
+			return err
 		case <-ctx.Done():
 			cancel()
 			return ctx.Err()
@@ -259,6 +420,17 @@ func (r *Runtime) shutdownServices(ctx context.Context) error {
 		workers.Add(1)
 		go func(index int, service namedService) {
 			defer workers.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					shutdownErrors[index] = ReportHandlerPanic(
+						ctx,
+						r.panicReporter,
+						"service."+service.id+".shutdown",
+						recovered,
+						debug.Stack(),
+					)
+				}
+			}()
 			if err := service.service.Shutdown(ctx); err != nil {
 				shutdownErrors[index] = fmt.Errorf("messenger: shutdown service %s: %w", service.id, err)
 			}

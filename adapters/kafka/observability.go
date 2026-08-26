@@ -27,6 +27,10 @@ const (
 	logAttrTopic          = "topic"
 	logAttrTopicCount     = "topic_count"
 	logAttrTransport      = "transport"
+	operationDLQHandoff   = messenger.Operation("dlq_handoff")
+	operationOffsetCommit = messenger.Operation("offset_commit")
+	operationRetryHandoff = messenger.Operation("retry_handoff")
+	operationFailureText  = "messenger/kafka: operation failed"
 )
 
 func applyObservabilityDefaults(config *HandlerConfig) error {
@@ -35,6 +39,12 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
 	}
 	if nilValue(config.Propagator) {
 		config.Propagator = messenger.NoopContextPropagator()
+	}
+	if config.PanicReporter != nil && nilValue(config.PanicReporter) {
+		return fmt.Errorf("%w: nil panic reporter", ErrInvalidConfig)
+	}
+	if nilValue(config.FailureSanitizer) {
+		config.FailureSanitizer = defaultFailureSanitizer{}
 	}
 	for _, observer := range config.Observers {
 		if nilValue(observer) {
@@ -57,7 +67,7 @@ func notifyObservers(ctx context.Context, config HandlerConfig, observation mess
 					logInfrastructure(ctx, config.Logger, messenger.LogError, "messenger observer panicked",
 						messenger.LogAttr{Key: "operation", Value: observation.Operation},
 						messenger.LogAttr{Key: logAttrConsumerID, Value: config.ConsumerID},
-						messenger.LogAttr{Key: "observer_panic", Value: recovered})
+						messenger.LogAttr{Key: "observer_panic", Value: true})
 				}
 			}()
 			observer.Observe(ctx, observation)
@@ -81,10 +91,7 @@ func (t *Transport) logInfrastructure(
 	message string,
 	attrs ...messenger.LogAttr,
 ) {
-	if t == nil {
-		return
-	}
-	if ctx == nil {
+	if t == nil || ctx == nil {
 		return
 	}
 	transportAttrs := make([]messenger.LogAttr, 0, len(attrs)+1)
@@ -103,7 +110,7 @@ func (t *Transport) logFailure(
 ) {
 	attrs = append(attrs,
 		messenger.LogAttr{Key: logAttrOperation, Value: operation},
-		messenger.LogAttr{Key: logAttrError, Value: err},
+		messenger.LogAttr{Key: logAttrError, Value: safeOperationalError(err)},
 	)
 	t.logInfrastructure(ctx, level, message, attrs...)
 }
@@ -117,9 +124,36 @@ func (t *Transport) logTransactionFailure(
 ) {
 	attrs = append(attrs, messenger.LogAttr{Key: logAttrAbortAttempted, Value: true})
 	if abortErr != nil {
-		attrs = append(attrs, messenger.LogAttr{Key: logAttrAbortError, Value: abortErr})
+		attrs = append(attrs, messenger.LogAttr{Key: logAttrAbortError, Value: safeOperationalError(abortErr)})
 	}
 	t.logFailure(ctx, messenger.LogError, "Kafka transaction failed", operation, err, attrs...)
+}
+
+func safeOperationalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return operationalError{cause: err}
+}
+
+type operationalError struct{ cause error }
+
+func (operationalError) Error() string   { return operationFailureText }
+func (e operationalError) Unwrap() error { return e.cause }
+
+func extractDeliveryContext(
+	parent context.Context,
+	config HandlerConfig,
+	headers map[string]string,
+) context.Context {
+	extracted := config.Propagator.Extract(parent, headers)
+	if extracted != nil {
+		return extracted
+	}
+	logInfrastructure(parent, config.Logger, messenger.LogError, "context propagator returned nil",
+		messenger.LogAttr{Key: logAttrConsumerID, Value: config.ConsumerID},
+	)
+	return parent
 }
 
 func invokeMiddlewares(
@@ -128,22 +162,22 @@ func invokeMiddlewares(
 	handlerID string,
 	handler messenger.HandlerFunc,
 	middlewares []messenger.Middleware,
+	panicReporter PanicReporter,
 ) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("messenger/kafka: handler %s panicked: %v\n%s", handlerID, recovered, debug.Stack())
+			err = reportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
 		}
 	}()
-	if len(middlewares) == 0 {
-		return handler(ctx)
-	}
+	var handlerContextErr func() error
 	var invoke func(int, context.Context) error
 	invoke = func(index int, current context.Context) error {
 		if current == nil {
 			return fmt.Errorf("%w: middleware supplied a nil context", messenger.ErrInvalidMessage)
 		}
 		if index == len(middlewares) {
-			return handler(current)
+			handlerContextErr = current.Err
+			return handlerCompletionError(current, handler(current))
 		}
 		var called atomic.Bool
 		next := func(nextContext context.Context) error {
@@ -156,5 +190,11 @@ func invokeMiddlewares(
 		cloned.Headers = maps.Clone(metadata.Headers)
 		return middlewares[index](current, cloned, handlerID, next)
 	}
-	return invoke(0, ctx)
+	err = invoke(0, ctx)
+	if err != nil || handlerContextErr == nil {
+		return err
+	}
+	// A middleware may swallow the handler's error. Recheck the exact context
+	// used by the handler before the Inbox callback is allowed to commit.
+	return handlerContextErr()
 }

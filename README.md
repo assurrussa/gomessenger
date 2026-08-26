@@ -13,7 +13,8 @@ Build commands, local queries, and events with explicit transaction, delivery, r
 Transactional Outbox/Inbox, NATS JetStream, Kafka, bounded retries, DLQ/replay, tracing, and managed lifecycle.
 
 > **Release status:** `v0.1.0` is published and passes the clean published-consumer gate. The real-service pilot remains
-> pending, so controlled repository gates are not a production-readiness claim.
+> pending, so controlled repository gates are not a production-readiness claim. The current checkout contains
+> unreleased follow-up changes beyond that tag.
 
 ## What it is
 
@@ -74,6 +75,11 @@ Optional telemetry and CLI modules use the same release version:
 go get github.com/assurrussa/gomessenger/observability@v0.1.0
 go install github.com/assurrussa/gomessenger/tools/gomessengerctl@v0.1.0
 ```
+
+These commands install the published `v0.1.0` surface. The rest of this README tracks the current checkout and may
+describe unreleased APIs that are not present in that tag. Use the versioned
+[Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.1.0) for the exact release API, or use the checkout
+workflow below when evaluating unreleased changes.
 
 Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.11.0`; the
 host selects and installs its matching database backend separately. To evaluate the current checkout instead:
@@ -383,8 +389,8 @@ a separate Inbox: migrations do not rename, copy, or otherwise transfer existing
 
 Provision source and DLQ capacity separately. `DevStream` keeps native source messages at the 1 MiB envelope bound;
 `DevDLQStream` reserves `DefaultMaxDLQMessageBytes` for the expanded JSON DLQ record. The NATS server/account
-`max_payload` must be at least the same value. `Consumer.Run` and `Readiness` reject a missing or undersized DLQ route
-before reporting ready.
+`max_payload` must be at least the same value. `Consumer.Run` rejects a missing or undersized DLQ route before starting;
+the low-frequency `Consumer.DeepHealth` probe detects later topology drift without making ordinary readiness expensive.
 
 ## Middleware, logging, and tracing
 
@@ -418,6 +424,12 @@ observers. Kafka `TransportConfig.Logger` reports adapter-owned startup/readines
 abort/fencing, topology failures or applied changes, and retry partition deferrals. Core logging contains
 infrastructure state only and never logs record keys, payloads, message bodies, or arbitrary headers.
 `WithClientLogger` is a separate explicit opt-in to franz-go's own client logs.
+
+Recovered handler panic values and stacks are dropped by default; ordinary errors satisfy the transport-neutral
+`HandlerPanicError` interface and can be classified with `errors.As` across independently versioned adapters.
+Configure `WithPanicReporter` (or the corresponding durable consumer field) only for a trusted diagnostic sink.
+Consumer observations and DLQ errors use the conservative `DefaultFailureSanitizer` unless the host explicitly supplies
+another sanitizer.
 
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.
@@ -455,9 +467,10 @@ if err := runtime.Shutdown(shutdownCtx); err != nil {
 return <-runErr
 ```
 
-`Runtime.Readiness` checks the runtime and every attached service. The selected Outbox backend runtime has its own
-host-supervised lifecycle; GoMessenger does not open connections or supervise it implicitly. Never call `Shutdown` from
-a handler executing on the same runtime.
+`Runtime.Readiness` is the lightweight admission/connectivity probe for the runtime and every attached service.
+`Runtime.DeepHealth` performs explicit topology diagnostics; `Runtime.Liveness` does not require readiness. The selected
+Outbox backend runtime has its own host-supervised lifecycle; GoMessenger does not open connections or supervise it
+implicitly. Never call `Shutdown` from a handler executing on the same runtime.
 
 ## Failure semantics
 

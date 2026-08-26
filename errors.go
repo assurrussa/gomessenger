@@ -19,6 +19,12 @@ var (
 	ErrRouteConflict = errors.New("messenger: route conflict")
 	// ErrRouteNotFound reports that a descriptor has no outbound route.
 	ErrRouteNotFound = errors.New("messenger: route not found")
+	// ErrUnsupportedCapability reports a requested semantic guarantee that a route cannot provide.
+	ErrUnsupportedCapability = errors.New("messenger: unsupported route capability")
+	// ErrMessageExpired reports a message whose expiration boundary has been reached.
+	ErrMessageExpired = errors.New("messenger: message expired")
+	// ErrMessageNotReady reports a message whose not-before boundary is still in the future.
+	ErrMessageNotReady = errors.New("messenger: message not ready")
 	// ErrServiceConflict reports a duplicate managed service ID.
 	ErrServiceConflict = errors.New("messenger: service conflict")
 	// ErrRuntimeNotRunning reports an operation that requires a running runtime.

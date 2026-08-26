@@ -26,11 +26,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.work
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.sum
+            adapters/*/go.sum
+            observability/go.sum
+            tools/gomessengerctl/go.sum
+            examples/*/go.sum
+            testdata/*/go.sum
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260819171926-ebcb4798430d
       - name: Resolve comparison commit
@@ -65,10 +72,15 @@ jobs:
             fi
           fi
       - name: Add comparison to job summary
+        if: always()
         run: |
           echo '## Benchmark comparison' >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          sed -n '1,240p' "$RUNNER_TEMP/benchstat.txt" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/benchstat.txt" ]; then
+            sed -n '1,240p' "$RUNNER_TEMP/benchstat.txt" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Benchmark execution did not reach comparison output.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw benchmark data
         if: always()
@@ -79,4 +91,5 @@ jobs:
             ${{ runner.temp }}/base.txt
             ${{ runner.temp }}/head.txt
             ${{ runner.temp }}/benchstat.txt
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 1

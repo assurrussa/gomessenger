@@ -22,6 +22,31 @@ type kafkaLogRecorder struct {
 	entries []kafkaLogEntry
 }
 
+type nilKafkaExtractPropagator struct{}
+
+func (nilKafkaExtractPropagator) Inject(context.Context, map[string]string) {}
+
+func (nilKafkaExtractPropagator) Extract(context.Context, map[string]string) context.Context {
+	return nil
+}
+
+type kafkaPanicRecorder struct {
+	handlerID string
+	value     any
+	stack     []byte
+}
+
+func (recorder *kafkaPanicRecorder) ReportPanic(
+	_ context.Context,
+	handlerID string,
+	recovered any,
+	stack []byte,
+) {
+	recorder.handlerID = handlerID
+	recorder.value = recovered
+	recorder.stack = stack
+}
+
 func (recorder *kafkaLogRecorder) Log(
 	_ context.Context,
 	level messenger.LogLevel,
@@ -81,11 +106,98 @@ func TestTransportLoggerRecordsSafeInfrastructureFailures(t *testing.T) {
 	assertSafeKafkaLogAttrs(t, entries)
 	assertKafkaLogAttr(t, entries[1], logAttrOperation, "publish_commit")
 	assertKafkaLogAttr(t, entries[1], logAttrAbortAttempted, true)
-	assertKafkaLogAttr(t, entries[1], logAttrAbortError, abortErr)
+	assertSafeKafkaLogErrorAttr(t, entries[1], logAttrAbortError, abortErr)
 	if entries[2].message != "Kafka topology apply failed" || entries[2].level != messenger.LogError {
 		t.Fatalf("topology log = %#v", entries[2])
 	}
 	assertKafkaLogAttr(t, entries[2], logAttrOperation, "topology_apply")
+}
+
+func TestDeliveryContextFallbackPreservesParentCancellation(t *testing.T) {
+	logger := &kafkaLogRecorder{}
+	parent, cancel := context.WithCancel(t.Context())
+	config := HandlerConfig{
+		ConsumerID: testConsumerID,
+		Logger:     logger,
+		Propagator: nilKafkaExtractPropagator{},
+	}
+	extracted := extractDeliveryContext(parent, config, map[string]string{"traceparent": "invalid"})
+	cancel()
+	select {
+	case <-extracted.Done():
+	case <-time.After(time.Second):
+		t.Fatal("fallback context detached from parent cancellation")
+	}
+	entries := logger.snapshot()
+	if len(entries) != 1 || entries[0].message != "context propagator returned nil" {
+		t.Fatalf("fallback logs = %#v", entries)
+	}
+}
+
+func TestMiddlewarePanicUsesConfiguredReporterAndSafeError(t *testing.T) {
+	reporter := &kafkaPanicRecorder{}
+	err := invokeMiddlewares(
+		t.Context(),
+		messenger.Metadata{},
+		testConsumerID,
+		func(context.Context) error { panic("secret Kafka panic") },
+		nil,
+		reporter,
+	)
+	if err == nil || !strings.Contains(err.Error(), "handler "+testConsumerID+" panicked") ||
+		strings.Contains(err.Error(), "secret Kafka panic") {
+		t.Fatalf("panic error = %v", err)
+	}
+	var panicErr interface {
+		error
+		HandlerPanicID() string
+	}
+	if !errors.As(err, &panicErr) || panicErr.HandlerPanicID() != testConsumerID {
+		t.Fatalf("panic classification = %#v, %v", panicErr, err)
+	}
+	if reporter.handlerID != testConsumerID || reporter.value != "secret Kafka panic" || len(reporter.stack) == 0 {
+		t.Fatalf("panic report = %q, %#v, %d bytes", reporter.handlerID, reporter.value, len(reporter.stack))
+	}
+}
+
+func TestHandlerCompletionUsesReplacementContextAfterMiddlewareReturnsNil(t *testing.T) {
+	replacement, cancelReplacement := context.WithCancel(t.Context())
+	config := HandlerConfig{Middlewares: []messenger.Middleware{
+		func(_ context.Context, _ messenger.Metadata, _ string, next messenger.HandlerFunc) error {
+			cancelReplacement()
+			_ = next(replacement)
+			return nil
+		},
+	}}
+	if err := applyObservabilityDefaults(&config); err != nil {
+		t.Fatalf("apply defaults: %v", err)
+	}
+	var calls int
+	err := invokeMiddlewares(t.Context(), messenger.Metadata{}, testConsumerID, func(ctx context.Context) error {
+		calls++
+		if ctx != replacement {
+			t.Fatalf("handler context = %v, want replacement", ctx)
+		}
+		return nil
+	}, config.Middlewares, nil)
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("replacement completion = %v, calls = %d", err, calls)
+	}
+}
+
+func TestObservabilityDefaultsRejectTypedNilPanicReporter(t *testing.T) {
+	var reporter *kafkaPanicRecorder
+	config := HandlerConfig{PanicReporter: reporter}
+	if err := applyObservabilityDefaults(&config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("typed-nil panic reporter = %v", err)
+	}
+	config = HandlerConfig{}
+	if err := applyObservabilityDefaults(&config); err != nil {
+		t.Fatalf("default observability: %v", err)
+	}
+	if got := sanitizeFailure(config.FailureSanitizer, errors.New("secret")); got != operationFailureText {
+		t.Fatalf("default sanitizer = %q", got)
+	}
 }
 
 func assertSafeKafkaLogAttrs(t *testing.T, entries []kafkaLogEntry) {
@@ -110,6 +222,21 @@ func assertKafkaLogAttr(t *testing.T, entry kafkaLogEntry, key string, want any)
 			}
 			return
 		}
+	}
+	t.Fatalf("log attribute %q is missing from %#v", key, entry)
+}
+
+func assertSafeKafkaLogErrorAttr(t *testing.T, entry kafkaLogEntry, key string, cause error) {
+	t.Helper()
+	for _, attr := range entry.attrs {
+		if attr.Key != key {
+			continue
+		}
+		err, ok := attr.Value.(error)
+		if !ok || err.Error() != operationFailureText || !errors.Is(err, cause) {
+			t.Fatalf("log attribute %q = %#v, want sanitized wrapper for %v", key, attr.Value, cause)
+		}
+		return
 	}
 	t.Fatalf("log attribute %q is missing from %#v", key, entry)
 }

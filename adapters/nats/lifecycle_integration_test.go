@@ -578,10 +578,16 @@ func TestConsumerDrainLeavesCancelledWorkForRedelivery(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
 	}
-	cancelFirst()
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first run: %v", err)
+	select {
+	case runErr := <-firstDone:
+		if runErr != nil {
+			t.Fatalf("first run: %v", runErr)
+		}
+	case <-time.After(time.Second):
+		cancelFirst()
+		t.Fatal("shutdown deadline did not force-cancel the consumer run context")
 	}
+	cancelFirst()
 
 	second, err := nats.NewCommandConsumer(
 		connection,

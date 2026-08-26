@@ -232,6 +232,8 @@ func TestBuilderAggregatesDeclarationErrorsAndObserverPanicsAreIsolated(t *testi
 		messenger.WithClock(nil),
 		messenger.WithLogger(nil),
 		messenger.WithObserver(nil),
+		messenger.WithPanicReporter(nil),
+		messenger.WithRuntimeShutdownTimeout(0),
 	)
 	invalid.HandleCommand(command, "", nil)
 	invalid.HandleCommand(command, "one", func(context.Context, messenger.Message[processPayload]) error { return nil })
@@ -264,7 +266,11 @@ func TestBuilderAggregatesDeclarationErrorsAndObserverPanicsAreIsolated(t *testi
 	}
 
 	observer := &recordingObserver{panic: true}
-	valid := messenger.NewBuilder(messenger.WithSource(testSource), messenger.WithObserver(observer))
+	valid := messenger.NewBuilder(
+		messenger.WithSource(testSource),
+		messenger.WithObserver(observer),
+		messenger.WithRuntimeShutdownTimeout(time.Second),
+	)
 	valid.HandleCommand(command, "handler", func(context.Context, messenger.Message[processPayload]) error { return nil })
 	valid.RouteCommand(command, messenger.NewLocalSyncRoute())
 	m, _, err := valid.Build()
@@ -279,7 +285,16 @@ func TestBuilderAggregatesDeclarationErrorsAndObserverPanicsAreIsolated(t *testi
 func TestLocalEventRecoversHandlerPanicAndContinuesSubscribers(t *testing.T) {
 	event := messenger.MustEvent(testEventName, 1, messenger.JSON[processPayload]())
 	var handled atomic.Int32
-	builder := messenger.NewBuilder(messenger.WithSource(testSource))
+	var report messenger.PanicReport
+	builder := messenger.NewBuilder(
+		messenger.WithSource(testSource),
+		messenger.WithPanicReporter(messenger.PanicReporterFunc(func(
+			_ context.Context,
+			received messenger.PanicReport,
+		) {
+			report = received
+		})),
+	)
 	builder.Subscribe(event, "panicking", func(context.Context, messenger.Message[processPayload]) error {
 		panic("boom")
 	})
@@ -293,8 +308,14 @@ func TestLocalEventRecoversHandlerPanicAndContinuesSubscribers(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 	_, err = instance.Publish(t.Context(), event, processPayload{})
-	if err == nil || !strings.Contains(err.Error(), "handler panicking panicked: boom") {
+	if err == nil || !strings.Contains(err.Error(), "handler panicking panicked") {
 		t.Fatalf("publish error = %v", err)
+	}
+	if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "runtime/debug") {
+		t.Fatalf("panic details escaped through error: %v", err)
+	}
+	if report.HandlerID != "panicking" || report.Value != "boom" || len(report.Stack) == 0 {
+		t.Fatalf("panic report = %#v", report)
 	}
 	if handled.Load() != 1 {
 		t.Fatalf("healthy subscriber calls = %d", handled.Load())

@@ -152,7 +152,10 @@ func (r *Route) publishEnvelope(
 		return messenger.Receipt{}, errors.Join(failure, abortErr)
 	}
 	return messenger.Receipt{
-		MessageID: metadata.ID, Route: r.name, State: messenger.ReceiptBrokerConfirmed, At: now,
+		MessageID: metadata.ID,
+		Route:     r.name,
+		State:     messenger.ReceiptBrokerConfirmed,
+		At:        r.clock().UTC(),
 	}, nil
 }
 

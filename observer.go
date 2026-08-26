@@ -17,6 +17,14 @@ const (
 	OperationQuery Operation = "query"
 	// OperationService covers managed service completion.
 	OperationService Operation = "service"
+	// OperationBrokerAck covers broker-confirmed acknowledgement of a consumed message.
+	OperationBrokerAck Operation = "broker_ack"
+	// OperationOffsetCommit covers transactional Kafka offset finalization.
+	OperationOffsetCommit Operation = "offset_commit"
+	// OperationRetryHandoff covers durable retry scheduling or broker hand-off.
+	OperationRetryHandoff Operation = "retry_handoff"
+	// OperationDLQHandoff covers durable terminal hand-off to a dead-letter destination.
+	OperationDLQHandoff Operation = "dlq_handoff"
 )
 
 // Observation contains bounded operational data. Observers decide which
@@ -78,23 +86,35 @@ func callObserver(ctx context.Context, logger Logger, observer Observer, observa
 			if !observation.MessageID.IsZero() {
 				attrs = append(attrs, LogAttr{Key: "message_id", Value: observation.MessageID.String()})
 			}
-			attrs = append(attrs, LogAttr{Key: "observer_panic", Value: recovered})
+			attrs = append(attrs, LogAttr{Key: "observer_panic", Value: true})
 			safeLog(ctx, logger, LogError, "messenger observer panicked", attrs...)
 		}
 	}()
 	observer.Observe(ctx, observation)
 }
 
-type loggingObserver struct{ logger Logger }
+type loggingObserver struct {
+	logger    Logger
+	sanitizer FailureSanitizer
+}
 
-// NewLoggingObserver reports observations through logger. Successful
+// NewLoggingObserver reports sanitized observations through logger. Successful
 // operations use Debug and failed operations use Error. A nil logger creates a
 // no-op observer.
 func NewLoggingObserver(logger Logger) Observer {
+	return NewSanitizedLoggingObserver(logger, DefaultFailureSanitizer())
+}
+
+// NewSanitizedLoggingObserver reports observations with an explicit failure
+// sanitizer. A nil sanitizer uses DefaultFailureSanitizer.
+func NewSanitizedLoggingObserver(logger Logger, sanitizer FailureSanitizer) Observer {
 	if nilInterface(logger) {
 		logger = noopLogger{}
 	}
-	return loggingObserver{logger: logger}
+	if nilInterface(sanitizer) {
+		sanitizer = DefaultFailureSanitizer()
+	}
+	return loggingObserver{logger: logger, sanitizer: sanitizer}
 }
 
 func (observer loggingObserver) Observe(ctx context.Context, observation Observation) {
@@ -104,7 +124,7 @@ func (observer loggingObserver) Observe(ctx context.Context, observation Observa
 	if observation.Err != nil {
 		level = LogError
 		message = "messenger operation failed"
-		attrs = append(attrs, LogAttr{Key: "error", Value: observation.Err})
+		attrs = append(attrs, LogAttr{Key: logAttrErrorKey, Value: SanitizeError(observer.sanitizer, observation.Err)})
 	}
 	safeLog(ctx, observer.logger, level, message, attrs...)
 }
@@ -128,7 +148,7 @@ func observationLogAttrs(observation Observation) []LogAttr {
 		{Key: "route", Value: observation.Route},
 		{Key: "handler_id", Value: observation.HandlerID},
 		{Key: "consumer_id", Value: observation.ConsumerID},
-		{Key: "service_id", Value: observation.ServiceID},
+		{Key: logAttrServiceIDKey, Value: observation.ServiceID},
 	} {
 		if value, ok := attr.Value.(string); ok && value != "" {
 			attrs = append(attrs, attr)
