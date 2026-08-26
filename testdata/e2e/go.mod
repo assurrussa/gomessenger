@@ -3,8 +3,8 @@ module example.com/gomessenger-e2e
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.2.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.2.0
+	github.com/assurrussa/gomessenger v0.2.1
+	github.com/assurrussa/gomessenger/adapters/inbox v0.2.1
 	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0

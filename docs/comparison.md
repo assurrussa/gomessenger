@@ -37,7 +37,7 @@ system problem.
 - work spans many durable steps, timers, human actions, or compensation and should be modeled as a workflow;
 - event sourcing, stream processing, saga coordination, or distributed request/reply is the primary product boundary.
 
-GoMessenger [`v0.2.0`](https://github.com/assurrussa/gomessenger/releases/tag/v0.2.0) is published and passed the clean
+GoMessenger [`v0.2.1`](https://github.com/assurrussa/gomessenger/releases/tag/v0.2.1) is published and passed the clean
 published-consumer probe; its real-service pilot is still pending. Evaluate the checkout with the
 [PostgreSQL + NATS durable demo](../examples/durable-postgres-nats), use the [contracts](contracts.md) to review exact
 guarantees, and use the [release process](release.md) to distinguish source gates, published-module proof, and the
