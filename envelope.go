@@ -82,8 +82,8 @@ func (e Envelope) Validate() error {
 	if _, err := e.payload(); err != nil {
 		return err
 	}
-	if !e.NotBefore.IsZero() && !e.ExpiresAt.IsZero() && e.ExpiresAt.Before(e.NotBefore) {
-		return fmt.Errorf("%w: expiresAt precedes notBefore", ErrInvalidMessage)
+	if !e.NotBefore.IsZero() && !e.ExpiresAt.IsZero() && !e.ExpiresAt.After(e.NotBefore) {
+		return fmt.Errorf("%w: expiresAt must follow notBefore", ErrInvalidMessage)
 	}
 	return validateHeaders(e.Headers)
 }
