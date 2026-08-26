@@ -1,0 +1,206 @@
+diff --git a/adapters/kafka/observability.go b/adapters/kafka/observability.go
+index e07c198..0da9cae 100644
+--- a/adapters/kafka/observability.go
++++ b/adapters/kafka/observability.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"maps"
++	"runtime/debug"
+ 	"sync/atomic"
+ 
+ 	messenger "github.com/assurrussa/gomessenger"
+@@ -35,6 +36,12 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
+ 	if nilValue(config.Propagator) {
+ 		config.Propagator = messenger.NoopContextPropagator()
+ 	}
++	if config.PanicReporter != nil && nilValue(config.PanicReporter) {
++		return fmt.Errorf("%w: nil panic reporter", ErrInvalidConfig)
++	}
++	if nilValue(config.FailureSanitizer) {
++		config.FailureSanitizer = messenger.DefaultFailureSanitizer()
++	}
+ 	for _, observer := range config.Observers {
+ 		if nilValue(observer) {
+ 			return fmt.Errorf("%w: nil observer", ErrInvalidConfig)
+@@ -57,14 +64,7 @@ func handlerCompletionMiddleware(
+ 	_ string,
+ 	next messenger.HandlerFunc,
+ ) error {
+-	err := next(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	if ctx == nil {
+-		return fmt.Errorf("%w: nil handler context", messenger.ErrInvalidMessage)
+-	}
+-	return ctx.Err()
++	return messenger.HandlerCompletionError(ctx, next(ctx))
+ }
+ 
+ func notifyObservers(ctx context.Context, config HandlerConfig, observation messenger.Observation) {
+@@ -149,16 +149,32 @@ type operationalError struct{ cause error }
+ func (operationalError) Error() string   { return "messenger/kafka: operation failed" }
+ func (e operationalError) Unwrap() error { return e.cause }
+ 
++func extractDeliveryContext(
++	parent context.Context,
++	config HandlerConfig,
++	headers map[string]string,
++) context.Context {
++	extracted := config.Propagator.Extract(parent, headers)
++	if extracted != nil {
++		return extracted
++	}
++	logInfrastructure(parent, config.Logger, messenger.LogError, "context propagator returned nil",
++		messenger.LogAttr{Key: logAttrConsumerID, Value: config.ConsumerID},
++	)
++	return parent
++}
++
+ func invokeMiddlewares(
+ 	ctx context.Context,
+ 	metadata messenger.Metadata,
+ 	handlerID string,
+ 	handler messenger.HandlerFunc,
+ 	middlewares []messenger.Middleware,
++	panicReporter messenger.PanicReporter,
+ ) (err error) {
+ 	defer func() {
+ 		if recovered := recover(); recovered != nil {
+-			err = fmt.Errorf("messenger/kafka: handler %s panicked", handlerID)
++			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
+ 		}
+ 	}()
+ 	if len(middlewares) == 0 {
+diff --git a/adapters/nats/observability.go b/adapters/nats/observability.go
+index 5c3b71a..f2be8d1 100644
+--- a/adapters/nats/observability.go
++++ b/adapters/nats/observability.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"maps"
+ 	"reflect"
++	"runtime/debug"
+ 	"sync/atomic"
+ 
+ 	messenger "github.com/assurrussa/gomessenger"
+@@ -24,6 +25,12 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
+ 	if nilValue(config.Propagator) {
+ 		config.Propagator = messenger.NoopContextPropagator()
+ 	}
++	if config.PanicReporter != nil && nilValue(config.PanicReporter) {
++		return fmt.Errorf("%w: nil panic reporter", ErrInvalidConfig)
++	}
++	if nilValue(config.FailureSanitizer) {
++		config.FailureSanitizer = messenger.DefaultFailureSanitizer()
++	}
+ 	for _, observer := range config.Observers {
+ 		if nilValue(observer) {
+ 			return fmt.Errorf("%w: nil observer", ErrInvalidConfig)
+@@ -46,14 +53,7 @@ func handlerCompletionMiddleware(
+ 	_ string,
+ 	next messenger.HandlerFunc,
+ ) error {
+-	err := next(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	if ctx == nil {
+-		return fmt.Errorf("%w: nil handler context", messenger.ErrInvalidMessage)
+-	}
+-	return ctx.Err()
++	return messenger.HandlerCompletionError(ctx, next(ctx))
+ }
+ 
+ func notifyObservers(ctx context.Context, config HandlerConfig, observation messenger.Observation) {
+@@ -87,16 +87,32 @@ func logInfrastructure(
+ 	logger.Log(ctx, level, message, attrs...)
+ }
+ 
++func extractDeliveryContext(
++	parent context.Context,
++	config HandlerConfig,
++	headers map[string]string,
++) context.Context {
++	extracted := config.Propagator.Extract(parent, headers)
++	if extracted != nil {
++		return extracted
++	}
++	logInfrastructure(parent, config.Logger, messenger.LogError, "context propagator returned nil",
++		messenger.LogAttr{Key: logAttrConsumerID, Value: config.ConsumerID},
++	)
++	return parent
++}
++
+ func invokeMiddlewares(
+ 	ctx context.Context,
+ 	metadata messenger.Metadata,
+ 	handlerID string,
+ 	handler messenger.HandlerFunc,
+ 	middlewares []messenger.Middleware,
++	panicReporter messenger.PanicReporter,
+ ) (err error) {
+ 	defer func() {
+ 		if recovered := recover(); recovered != nil {
+-			err = fmt.Errorf("messenger/nats: handler %s panicked", handlerID)
++			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
+ 		}
+ 	}()
+ 	if len(middlewares) == 0 {
+diff --git a/builder_messenger_validation_test.go b/builder_messenger_validation_test.go
+index e505766..98d33ce 100644
+--- a/builder_messenger_validation_test.go
++++ b/builder_messenger_validation_test.go
+@@ -293,9 +293,12 @@ func TestLocalEventRecoversHandlerPanicAndContinuesSubscribers(t *testing.T) {
+ 		t.Fatalf("build: %v", err)
+ 	}
+ 	_, err = instance.Publish(t.Context(), event, processPayload{})
+-	if err == nil || !strings.Contains(err.Error(), "handler panicking panicked: boom") {
++	if err == nil || !strings.Contains(err.Error(), "handler panicking panicked") {
+ 		t.Fatalf("publish error = %v", err)
+ 	}
++	if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "runtime/debug") {
++		t.Fatalf("panic details escaped through error: %v", err)
++	}
+ 	if handled.Load() != 1 {
+ 		t.Fatalf("healthy subscriber calls = %d", handled.Load())
+ 	}
+diff --git a/messenger.go b/messenger.go
+index ffc815c..66d0016 100644
+--- a/messenger.go
++++ b/messenger.go
+@@ -266,11 +266,10 @@ func normalizeReceipt(receipt *Receipt, metadata Metadata, route Route, clock fu
+ 	if receipt.Route != route.Name() || receipt.State == "" {
+ 		return fmt.Errorf("%w: invalid receipt from route %s", ErrInvalidMessage, route.Name())
+ 	}
+-	if receipt.At.IsZero() {
+-		receipt.At = clock().UTC()
+-	} else {
+-		receipt.At = receipt.At.UTC()
+-	}
++	// Messenger reports the normalized boundary using its configured clock.
++	// Routes that expose direct publishing surfaces still return their own
++	// post-confirmation timestamp when called without Messenger.
++	receipt.At = clock().UTC()
+ 	return nil
+ }
+ 
+diff --git a/query_test.go b/query_test.go
+index 008fa72..9d31f55 100644
+--- a/query_test.go
++++ b/query_test.go
+@@ -356,9 +356,12 @@ func TestQueryMiddlewareErrorsPanicsAndSyntheticResults(t *testing.T) {
+ 			panic("boom")
+ 		})
+ 		_, err := instance.Query(t.Context(), query, 1)
+-		if err == nil || !strings.Contains(err.Error(), "handler query.handler panicked: boom") {
++		if err == nil || !strings.Contains(err.Error(), "handler query.handler panicked") {
+ 			t.Fatalf("panic error = %v", err)
+ 		}
++		if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "runtime/debug") {
++			t.Fatalf("panic details escaped through error: %v", err)
++		}
+ 	})
+ 
+ 	t.Run("short circuit missing", func(t *testing.T) {
