@@ -1,6 +1,6 @@
 # ADR-0002: Pilot article publication audit in a real service
 
-- Status: accepted; target selected; implementation waits for published GoMessenger `v0.1.0`
+- Status: accepted; target selected; publication prerequisite satisfied; `site` implementation remains pending
 - Date: 2026-08-24
 
 ## Context
