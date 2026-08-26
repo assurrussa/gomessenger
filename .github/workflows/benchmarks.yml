@@ -32,9 +32,17 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.work
-          cache-dependency-path: go.sum
-      - name: Retain Go toolchain for hardening validation
-        run: tar -czf "$RUNNER_TEMP/go-toolchain.tgz" -C "$(go env GOROOT)" .
+          cache-dependency-path: |
+            go.sum
+            adapters/*/go.sum
+            observability/go.sum
+            tools/gomessengerctl/go.sum
+            examples/*/go.sum
+            testdata/*/go.sum
+      - name: Retain Go toolchain and module cache for hardening validation
+        run: |
+          tar -czf "$RUNNER_TEMP/go-toolchain.tgz" -C "$(go env GOROOT)" .
+          tar -czf "$RUNNER_TEMP/go-modcache.tgz" -C "$(go env GOPATH)" pkg/mod
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260819171926-ebcb4798430d
       - name: Resolve comparison commit
@@ -87,6 +95,7 @@ jobs:
           path: |
             ${{ runner.temp }}/source.tgz
             ${{ runner.temp }}/go-toolchain.tgz
+            ${{ runner.temp }}/go-modcache.tgz
             ${{ runner.temp }}/base.txt
             ${{ runner.temp }}/head.txt
             ${{ runner.temp }}/benchstat.txt
