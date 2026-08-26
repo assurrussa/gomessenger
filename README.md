@@ -12,9 +12,10 @@ Build commands, local queries, and events with explicit transaction, delivery, r
 
 Transactional Outbox/Inbox, NATS JetStream, Kafka, bounded retries, DLQ/replay, tracing, and managed lifecycle.
 
-> **Release status:** `v0.2.1` is published and passes the clean published-consumer gate. The real-service pilot remains
-> pending, so controlled repository gates are not a production-readiness claim. The current checkout may accumulate
-> follow-up changes beyond that tag.
+> **Release status:** `v0.2.1` is the current release line. Source validation, dependency-ordered tag publication, and
+> the clean published-consumer gate are separate release evidence. The real-service pilot remains pending, so
+> controlled repository gates are not a production-readiness claim. The current checkout may accumulate follow-up
+> changes beyond that release line.
 
 ## What it is
 
@@ -76,8 +77,8 @@ go get github.com/assurrussa/gomessenger/observability@v0.2.1
 go install github.com/assurrussa/gomessenger/tools/gomessengerctl@v0.2.1
 ```
 
-These commands install the published `v0.2.1` surface. The rest of this README tracks the current checkout and may
-describe unreleased APIs that are not present in that tag. Use the versioned
+These commands target the exact path-qualified `v0.2.1` tags. The rest of this README tracks the current checkout and
+may describe unreleased APIs that are not present in that release line. Use the versioned
 [Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.2.1) for the exact release API, or use the checkout
 workflow below when evaluating unreleased changes.
 
@@ -190,10 +191,11 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 | `.../observability` | Prometheus, OpenTelemetry spans, W3C Trace Context |
 | `.../tools/gomessengerctl` | manifest/topology validation, plan/apply, DLQ inspect/replay |
 
-The current `v0.2.1` release is published for every module above and passed the clean post-publication consumer probe.
-Outbox root and its PostgreSQL/SQLite backend tags at `v0.11.0` are the pinned durable-producer dependencies. During
-repository development `go.work` selects local GoMessenger modules; published consumers use matching path-qualified
-tags and no local `replace` directives. See the [release process](docs/release.md) for dependency order and verification.
+The module set uses synchronized path-qualified `v0.2.1` tags. Release completion requires every tag above plus the
+clean post-publication consumer probe; neither is inferred from source-only checks. Outbox root and its
+PostgreSQL/SQLite backend tags at `v0.11.0` are the pinned durable-producer dependencies. During repository development
+`go.work` selects local GoMessenger modules; published consumers use matching path-qualified tags and no local
+`replace` directives. See the [release process](docs/release.md) for dependency order and verification.
 
 ## Minimal local query example
 
