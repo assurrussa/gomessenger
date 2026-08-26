@@ -1,6 +1,6 @@
 # Implementation notes
 
-## 2026-08-26 — v0.2.1 lifecycle hardening (unreleased)
+## 2026-08-26 — v0.2.1 lifecycle hardening
 
 - Kept NATS readiness false until its pull iterator and worker pool exist, cleared it as soon as the pull loop stops,
   and tied it to the live run context so cancellation during startup cannot produce a transient healthy result.
