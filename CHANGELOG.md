@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-26
+
 ### Changed
 
 - the pull-request and release checklists now require an enabled Codex Code Review result for the current pull-request
