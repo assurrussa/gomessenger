@@ -12,8 +12,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +44,8 @@ type HandlerConfig struct {
 	Observers           []messenger.Observer
 	Middlewares         []messenger.Middleware
 	Propagator          messenger.ContextPropagator
+	PanicReporter       PanicReporter
+	FailureSanitizer    FailureSanitizer
 }
 
 type decodedMessage struct {
@@ -82,12 +82,13 @@ type Consumer struct {
 	decode      decoder
 	clock       func() time.Time
 
-	mu         sync.Mutex
-	state      consumerState
-	runStarted bool
-	iterator   jetstream.MessagesContext
-	done       chan struct{}
-	doneOnce   sync.Once
+	mu          sync.Mutex
+	state       consumerState
+	runStarted  bool
+	forceCancel context.CancelFunc
+	iterator    jetstream.MessagesContext
+	done        chan struct{}
+	doneOnce    sync.Once
 
 	// beforeShutdownTransition synchronizes the locked transition in package tests.
 	beforeShutdownTransition func()
@@ -274,6 +275,9 @@ func applyConsumerDefaults(config *HandlerConfig) {
 
 // Run ensures safe consumer topology and processes messages until drain/cancel.
 func (c *Consumer) Run(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil consumer context", ErrInvalidConfig)
+	}
 	c.mu.Lock()
 	if c.state == consumerRunning {
 		c.mu.Unlock()
@@ -295,12 +299,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 	c.runStarted = true
 	c.state = consumerRunning
+	runContext, cancel := context.WithCancel(ctx)
+	c.forceCancel = cancel
 	c.mu.Unlock()
-	if err := c.ensureDLQStream(ctx); err != nil {
+	defer cancel()
+	if err := c.ensureDLQStream(runContext); err != nil {
 		c.markClosed()
 		return err
 	}
-	consumer, err := c.ensureConsumer(ctx)
+	consumer, err := c.ensureConsumer(runContext)
 	if err != nil {
 		c.markClosed()
 		return err
@@ -330,16 +337,17 @@ func (c *Consumer) Run(ctx context.Context) error {
 		go func() {
 			defer workers.Done()
 			for message := range jobs {
-				c.processMessage(ctx, message)
+				c.processMessage(runContext, message)
 			}
 		}()
 	}
 	var runErr error
 pullLoop:
 	for {
-		message, err := iterator.Next(jetstream.NextContext(ctx))
+		message, err := iterator.Next(jetstream.NextContext(runContext))
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, jetstream.ErrMsgIteratorClosed) || ctx.Err() != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, jetstream.ErrMsgIteratorClosed) ||
+				runContext.Err() != nil {
 				break
 			}
 			if recoverablePullError(err) {
@@ -351,7 +359,7 @@ pullLoop:
 		}
 		select {
 		case jobs <- message:
-		case <-ctx.Done():
+		case <-runContext.Done():
 			break pullLoop
 		}
 	}
@@ -366,8 +374,12 @@ func recoverablePullError(err error) bool {
 	return errors.Is(err, jetstream.ErrNoHeartbeat)
 }
 
-// Readiness verifies the connection and exact durable consumer contract.
+// Readiness verifies that the consumer is running and its connection is live.
+// Expensive topology drift checks are exposed through DeepHealth.
 func (c *Consumer) Readiness(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil readiness context", ErrInvalidConfig)
+	}
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
@@ -377,12 +389,20 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 	if !c.connection.IsConnected() {
 		return errors.New("messenger/nats: connection is not connected")
 	}
+	return nil
+}
+
+// DeepHealth verifies the exact durable consumer and DLQ topology contract.
+func (c *Consumer) DeepHealth(ctx context.Context) error {
+	if err := c.Readiness(ctx); err != nil {
+		return err
+	}
 	if err := c.ensureDLQStream(ctx); err != nil {
 		return err
 	}
 	consumer, err := c.js.Consumer(ctx, c.config.Stream, c.config.ConsumerID)
 	if err != nil {
-		return fmt.Errorf("messenger/nats: consumer readiness: %w", err)
+		return fmt.Errorf("messenger/nats: consumer deep health: %w", err)
 	}
 	info, err := consumer.Info(ctx)
 	if err != nil {
@@ -408,7 +428,11 @@ func (c *Consumer) BeginDrain() {
 
 // Shutdown drains and waits for Run to return within ctx.
 func (c *Consumer) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil shutdown context", ErrInvalidConfig)
+	}
 	c.mu.Lock()
+	cancel := c.forceCancel
 	if !c.runStarted {
 		if c.beforeShutdownTransition != nil {
 			c.beforeShutdownTransition()
@@ -427,6 +451,9 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 	case <-c.done:
 		return nil
 	case <-ctx.Done():
+		if cancel != nil {
+			cancel()
+		}
 		return ctx.Err()
 	}
 }
@@ -537,17 +564,21 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 	}
 	if !decoded.metadata.NotBefore.IsZero() && decoded.metadata.NotBefore.After(now) {
 		delay := decoded.metadata.NotBefore.Sub(now)
-		if err := message.NakWithDelay(delay); err != nil {
+		handoffStarted := c.clock().UTC()
+		handoffErr := message.NakWithDelay(delay)
+		c.observeBoundary(runContext, operationRetryHandoff, decoded.metadata.ID, handoffStarted,
+			handoffErr)
+		if handoffErr != nil {
 			logInfrastructure(runContext, c.config.Logger, messenger.LogWarn, "delay scheduled JetStream message",
 				messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 				messenger.LogAttr{Key: logAttrMessageID, Value: decoded.metadata.ID.String()},
 				messenger.LogAttr{Key: "retry_delay", Value: delay},
-				messenger.LogAttr{Key: logAttrError, Value: err},
+				messenger.LogAttr{Key: logAttrError, Value: sanitizeError(c.config.FailureSanitizer, handoffErr)},
 			)
 		}
 		return
 	}
-	deliveryContext := c.config.Propagator.Extract(runContext, decoded.metadata.Headers)
+	deliveryContext := extractDeliveryContext(runContext, c.config, decoded.metadata.Headers)
 	deliveryContext = messenger.ContextWithMetadata(deliveryContext, decoded.metadata)
 	processContext, cancel := context.WithTimeout(deliveryContext, c.config.Timeout)
 	defer cancel()
@@ -573,23 +604,29 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 				c.config.ConsumerID,
 				decoded.handle,
 				c.config.Middlewares,
+				c.config.PanicReporter,
 			)
 		},
 	)
 	attempt := result.Attempt
 	if processErr == nil {
+		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, nil)
+		ackStarted := c.clock().UTC()
 		ackContext, ackCancel := context.WithTimeout(context.WithoutCancel(runContext), brokerAckTimeout)
 		ackErr := message.DoubleAck(ackContext)
 		ackCancel()
+		if errors.Is(ackErr, jetstream.ErrMsgAlreadyAckd) {
+			ackErr = nil
+		}
+		c.observeBoundary(processContext, operationBrokerAck, decoded.metadata.ID, ackStarted, ackErr)
 		if ackErr != nil {
 			logInfrastructure(runContext, c.config.Logger, messenger.LogWarn, "acknowledge JetStream message",
 				messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 				messenger.LogAttr{Key: logAttrMessageID, Value: decoded.metadata.ID.String()},
 				messenger.LogAttr{Key: logAttrAttempt, Value: attempt},
-				messenger.LogAttr{Key: logAttrError, Value: ackErr},
+				messenger.LogAttr{Key: logAttrError, Value: sanitizeError(c.config.FailureSanitizer, ackErr)},
 			)
 		}
-		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, nil)
 		return
 	}
 	if runContext.Err() != nil {
@@ -619,13 +656,16 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 	if !ok {
 		delay = c.retryDelay(attempt)
 	}
-	if err := message.NakWithDelay(delay); err != nil {
+	handoffStarted := c.clock().UTC()
+	handoffErr := message.NakWithDelay(delay)
+	c.observeBoundary(processContext, operationRetryHandoff, decoded.metadata.ID, handoffStarted, handoffErr)
+	if handoffErr != nil {
 		logInfrastructure(runContext, c.config.Logger, messenger.LogWarn, "retry JetStream message",
 			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 			messenger.LogAttr{Key: logAttrMessageID, Value: decoded.metadata.ID.String()},
 			messenger.LogAttr{Key: logAttrAttempt, Value: attempt},
 			messenger.LogAttr{Key: "retry_delay", Value: delay},
-			messenger.LogAttr{Key: logAttrError, Value: err},
+			messenger.LogAttr{Key: logAttrError, Value: sanitizeError(c.config.FailureSanitizer, handoffErr)},
 		)
 	}
 	c.observeHandle(processContext, decoded, attempt, result, delay, startedAt, processErr)
@@ -681,7 +721,26 @@ func (c *Consumer) observeHandle(
 		RetryDelay:    retryDelay,
 		StartedAt:     startedAt,
 		Duration:      c.clock().UTC().Sub(startedAt),
-		Err:           err,
+		Err:           sanitizeError(c.config.FailureSanitizer, err),
+	})
+}
+
+func (c *Consumer) observeBoundary(
+	ctx context.Context,
+	operation messenger.Operation,
+	messageID messenger.MessageID,
+	startedAt time.Time,
+	err error,
+) {
+	if len(c.config.Observers) == 0 {
+		return
+	}
+	notifyObservers(ctx, c.config, messenger.Observation{
+		Operation: operation, MessageID: messageID, Kind: c.descriptor.Kind,
+		Name: c.descriptor.Name, SchemaVersion: c.descriptor.SchemaVersion,
+		ConsumerID: c.config.ConsumerID, HandlerID: c.config.ConsumerID,
+		StartedAt: startedAt, Duration: c.clock().UTC().Sub(startedAt),
+		Err: sanitizeError(c.config.FailureSanitizer, err),
 	})
 }
 
@@ -821,6 +880,7 @@ func (c *Consumer) deadLetterAndAcknowledge(
 	failureKind string,
 	failure error,
 ) bool {
+	handoffStarted := c.clock().UTC()
 	headers, err := copyReplayHeaders(message.Headers())
 	if err != nil {
 		logInfrastructure(ctx, c.config.Logger, messenger.LogError, "capture DLQ message headers",
@@ -829,12 +889,9 @@ func (c *Consumer) deadLetterAndAcknowledge(
 		)
 		return false
 	}
-	failureText := "unspecified failure"
-	if failure != nil {
-		failureText = truncate(failure.Error(), 1024)
-		if failureText == "" {
-			failureText = "unspecified failure"
-		}
+	failureText := boundedFailureText(c.config.FailureSanitizer, failure, 1024)
+	if failureText == "" {
+		failureText = "unspecified failure"
 	}
 	record := DLQRecord{
 		SpecVersion: "1.0", ConsumerID: c.config.ConsumerID, Subject: message.Subject(),
@@ -906,9 +963,11 @@ func (c *Consumer) deadLetterAndAcknowledge(
 			messenger.LogAttr{Key: logAttrError, Value: publishErr},
 		)
 		if !c.waitForHandoffRetry(ctx, handoffAttempt) {
+			c.observeBoundary(ctx, operationDLQHandoff, decoded.metadata.ID, handoffStarted, ctx.Err())
 			return false
 		}
 	}
+	c.observeBoundary(ctx, operationDLQHandoff, decoded.metadata.ID, handoffStarted, nil)
 	return c.acknowledgeDeadLetteredMessage(ctx, message, decoded.metadata.ID, attempt)
 }
 
@@ -918,11 +977,13 @@ func (c *Consumer) acknowledgeDeadLetteredMessage(
 	messageID messenger.MessageID,
 	attempt uint64,
 ) bool {
+	startedAt := c.clock().UTC()
 	for handoffAttempt := uint64(1); ; handoffAttempt++ {
 		ackContext, cancel := context.WithTimeout(ctx, brokerAckTimeout)
 		ackErr := message.DoubleAck(ackContext)
 		cancel()
-		if ackErr == nil {
+		if ackErr == nil || errors.Is(ackErr, jetstream.ErrMsgAlreadyAckd) {
+			c.observeBoundary(ctx, operationBrokerAck, messageID, startedAt, nil)
 			return true
 		}
 		logInfrastructure(ctx, c.config.Logger, messenger.LogWarn, "confirm dead-lettered JetStream acknowledgement",
@@ -931,10 +992,8 @@ func (c *Consumer) acknowledgeDeadLetteredMessage(
 			messenger.LogAttr{Key: logAttrAttempt, Value: attempt},
 			messenger.LogAttr{Key: logAttrError, Value: ackErr},
 		)
-		if errors.Is(ackErr, jetstream.ErrMsgAlreadyAckd) {
-			return false
-		}
 		if !c.waitForHandoffRetry(ctx, handoffAttempt) {
+			c.observeBoundary(ctx, operationBrokerAck, messageID, startedAt, ackErr)
 			return false
 		}
 	}
@@ -978,19 +1037,8 @@ func (c *Consumer) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
 }
 
-func callHandler[T any](ctx context.Context, handler messenger.Handler[T], message messenger.Message[T]) (err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("messenger/nats: handler panic: %v\n%s", recovered, debug.Stack())
-		}
-	}()
+func callHandler[T any](ctx context.Context, handler messenger.Handler[T], message messenger.Message[T]) error {
 	return handler(ctx, message)
 }
 
-func truncate(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit]
-}
+var _ messenger.Service = (*Consumer)(nil)

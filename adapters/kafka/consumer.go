@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -34,6 +33,8 @@ type HandlerConfig struct {
 	Observers           []messenger.Observer
 	Middlewares         []messenger.Middleware
 	Propagator          messenger.ContextPropagator
+	PanicReporter       PanicReporter
+	FailureSanitizer    FailureSanitizer
 }
 
 type decodedMessage struct {
@@ -319,8 +320,12 @@ func (c *Consumer) Run(ctx context.Context) error {
 	return runErr
 }
 
-// Readiness verifies transactional workers, broker connectivity, and declared topic presence.
+// Readiness verifies transactional workers and broker connectivity.
+// Expensive topology checks are exposed through DeepHealth.
 func (c *Consumer) Readiness(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil readiness context", ErrInvalidConfig)
+	}
 	c.mu.Lock()
 	state := c.state
 	workersReady := c.workersReady
@@ -338,6 +343,14 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 	if err := c.transport.client.Ping(ctx); err != nil {
 		return fmt.Errorf("messenger/kafka: consumer readiness: %w", err)
 	}
+	return nil
+}
+
+// DeepHealth verifies the full declared Kafka topic contract.
+func (c *Consumer) DeepHealth(ctx context.Context) error {
+	if err := c.Readiness(ctx); err != nil {
+		return err
+	}
 	return c.ensureTopics(ctx)
 }
 
@@ -353,6 +366,9 @@ func (c *Consumer) BeginDrain() {
 
 // Shutdown drains and waits for Run, force-cancelling only when ctx expires.
 func (c *Consumer) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil shutdown context", ErrInvalidConfig)
+	}
 	c.mu.Lock()
 	started := c.runStarted
 	cancel := c.forceCancel
@@ -757,9 +773,9 @@ func (c *Consumer) processPreparedRecord(
 	}
 	if !decoded.metadata.NotBefore.IsZero() && decoded.metadata.NotBefore.After(now) {
 		return c.retryRecord(ctx, session, record, decoded.canonical, control, control.attempt,
-			decoded.metadata.NotBefore.Sub(now))
+			decoded.metadata.NotBefore.Sub(now), decoded.metadata.ID)
 	}
-	deliveryContext := c.config.Propagator.Extract(ctx, decoded.metadata.Headers)
+	deliveryContext := extractDeliveryContext(ctx, c.config, decoded.metadata.Headers)
 	deliveryContext = messenger.ContextWithMetadata(deliveryContext, decoded.metadata)
 	processContext, cancelProcess := context.WithTimeout(deliveryContext, c.config.Timeout)
 	defer cancelProcess()
@@ -785,20 +801,21 @@ func (c *Consumer) processPreparedRecord(
 				handlerContext = inbox.ContextWithSQLTx(processContext, tx)
 			}
 			return invokeMiddlewares(handlerContext, decoded.metadata, c.config.ConsumerID,
-				decoded.handle, c.config.Middlewares)
+				decoded.handle, c.config.Middlewares, c.config.PanicReporter)
 		},
 	)
 	attempt := result.Attempt
 	if processErr == nil {
+		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, nil)
+		commitStarted := c.clock().UTC()
 		committed, commitErr := c.commitRecord(ctx, session, nil)
-		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, commitErr)
-		if commitErr != nil {
-			return commitErr
+		finalizationErr := commitErr
+		if finalizationErr == nil && !committed {
+			finalizationErr = errTransactionNotCommitted
 		}
-		if !committed {
-			return errTransactionNotCommitted
-		}
-		return nil
+		c.observeBoundary(processContext, operationOffsetCommit, decoded.metadata.ID, commitStarted,
+			finalizationErr)
+		return finalizationErr
 	}
 	if ctx.Err() != nil {
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
@@ -825,7 +842,8 @@ func (c *Consumer) processPreparedRecord(
 	if !ok {
 		delay = retryDelay(c.config.BaseRetry, c.config.MaxRetry, attempt)
 	}
-	retryErr := c.retryRecord(ctx, session, record, decoded.canonical, control, attempt, delay)
+	retryErr := c.retryRecord(ctx, session, record, decoded.canonical, control, attempt, delay,
+		decoded.metadata.ID)
 	c.observeHandle(processContext, decoded, attempt, result, delay, startedAt, processErr)
 	return retryErr
 }
@@ -838,6 +856,7 @@ func (c *Consumer) retryRecord(
 	control controlMetadata,
 	attempt uint64,
 	delay time.Duration,
+	messageID messenger.MessageID,
 ) error {
 	if delay <= 0 {
 		return fmt.Errorf("%w: non-positive durable retry delay", messenger.ErrInvalidMessage)
@@ -849,14 +868,13 @@ func (c *Consumer) retryRecord(
 		Topic: c.retryTopics[tier], Key: append([]byte(nil), record.Key...), Value: append([]byte(nil), canonical...),
 		Headers: controlHeaders(control), Timestamp: record.Timestamp,
 	}
+	startedAt := c.clock().UTC()
 	committed, err := c.commitRecord(ctx, session, retry)
-	if err != nil {
-		return err
+	if err == nil && !committed {
+		err = errTransactionNotCommitted
 	}
-	if !committed {
-		return errTransactionNotCommitted
-	}
-	return nil
+	c.observeBoundary(ctx, operationRetryHandoff, messageID, startedAt, err)
+	return err
 }
 
 func (c *Consumer) deadLetterRecord(
@@ -869,22 +887,23 @@ func (c *Consumer) deadLetterRecord(
 	attempt uint64,
 	messageID string,
 ) error {
-	dlq := makeDLQRecord(c.config.ConsumerID, record, control, messageID, attempt, failureKind, failure, c.clock())
+	safeFailure := sanitizeError(c.config.FailureSanitizer, failure)
+	dlq := makeDLQRecord(c.config.ConsumerID, record, control, messageID, attempt, failureKind, safeFailure, c.clock())
 	data, err := encodeDLQRecord(dlq)
 	if err != nil {
 		return err
 	}
 	digest := sha256.Sum256(data)
+	startedAt := c.clock().UTC()
 	committed, err := c.commitRecord(ctx, session, &kgo.Record{
 		Topic: c.dlqTopic, Key: digest[:], Value: data, Timestamp: dlq.FailedAt,
 	})
-	if err != nil {
-		return err
+	if err == nil && !committed {
+		err = errTransactionNotCommitted
 	}
-	if !committed {
-		return errTransactionNotCommitted
-	}
-	return nil
+	parsedID, _ := messenger.ParseMessageID(messageID)
+	c.observeBoundary(ctx, operationDLQHandoff, parsedID, startedAt, err)
+	return err
 }
 
 func (c *Consumer) commitRecord(
@@ -994,7 +1013,27 @@ func (c *Consumer) observeHandle(
 		Kind: decoded.metadata.Kind, Name: decoded.metadata.Name, SchemaVersion: decoded.metadata.SchemaVersion,
 		HandlerID: c.config.ConsumerID, ConsumerID: c.config.ConsumerID, Attempt: attempt,
 		Duplicate: result.Duplicate, RetryDelay: retry, StartedAt: startedAt,
-		Duration: c.clock().UTC().Sub(startedAt), Err: err,
+		Duration: c.clock().UTC().Sub(startedAt),
+		Err:      sanitizeError(c.config.FailureSanitizer, err),
+	})
+}
+
+func (c *Consumer) observeBoundary(
+	ctx context.Context,
+	operation messenger.Operation,
+	messageID messenger.MessageID,
+	startedAt time.Time,
+	err error,
+) {
+	if len(c.config.Observers) == 0 {
+		return
+	}
+	notifyObservers(ctx, c.config, messenger.Observation{
+		Operation: operation, MessageID: messageID, Kind: c.descriptor.Kind,
+		Name: c.descriptor.Name, SchemaVersion: c.descriptor.SchemaVersion,
+		ConsumerID: c.config.ConsumerID, HandlerID: c.config.ConsumerID,
+		StartedAt: startedAt, Duration: c.clock().UTC().Sub(startedAt),
+		Err: sanitizeError(c.config.FailureSanitizer, err),
 	})
 }
 
@@ -1052,12 +1091,7 @@ func (c *Consumer) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
 }
 
-func callHandler[T any](ctx context.Context, handler messenger.Handler[T], message messenger.Message[T]) (err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("messenger/kafka: handler panic: %v\n%s", recovered, debug.Stack())
-		}
-	}()
+func callHandler[T any](ctx context.Context, handler messenger.Handler[T], message messenger.Message[T]) error {
 	return handler(ctx, message)
 }
 

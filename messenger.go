@@ -12,24 +12,26 @@ import (
 )
 
 type commandBinding struct {
-	descriptor descriptorRegistration
-	handlerID  string
-	handler    func(any) (funcContextHandler, error)
-	route      Route
-	observer   Observer
-	clock      func() time.Time
-	middleware []Middleware
+	descriptor    descriptorRegistration
+	handlerID     string
+	handler       func(any) (funcContextHandler, error)
+	route         Route
+	observer      Observer
+	clock         func() time.Time
+	middleware    []Middleware
+	panicReporter PanicReporter
 }
 
 type queryBinding struct {
-	descriptor descriptorRegistration
-	resultType reflect.Type
-	handlerID  string
-	handler    func(any) (funcContextQueryHandler, error)
-	route      LocalQueryRoute
-	observer   Observer
-	clock      func() time.Time
-	middleware []Middleware
+	descriptor    descriptorRegistration
+	resultType    reflect.Type
+	handlerID     string
+	handler       func(any) (funcContextQueryHandler, error)
+	route         LocalQueryRoute
+	observer      Observer
+	clock         func() time.Time
+	middleware    []Middleware
+	panicReporter PanicReporter
 }
 
 type boundEventSubscriber struct {
@@ -38,12 +40,13 @@ type boundEventSubscriber struct {
 }
 
 type eventBinding struct {
-	descriptor  descriptorRegistration
-	subscribers []boundEventSubscriber
-	route       Route
-	observer    Observer
-	clock       func() time.Time
-	middleware  []Middleware
+	descriptor    descriptorRegistration
+	subscribers   []boundEventSubscriber
+	route         Route
+	observer      Observer
+	clock         func() time.Time
+	middleware    []Middleware
+	panicReporter PanicReporter
 }
 
 // Messenger sends commands, executes local queries, and publishes events
@@ -262,6 +265,9 @@ func normalizeReceipt(receipt *Receipt, metadata Metadata, route Route, clock fu
 	if receipt.Route != route.Name() || receipt.State == "" {
 		return fmt.Errorf("%w: invalid receipt from route %s", ErrInvalidMessage, route.Name())
 	}
+	// Messenger reports the normalized boundary using its configured clock.
+	// Routes that expose direct publishing surfaces still return their own
+	// post-confirmation timestamp when called without Messenger.
 	receipt.At = clock().UTC()
 	return nil
 }
@@ -344,8 +350,8 @@ func validateMetadata(metadata Metadata) error {
 		return fmt.Errorf("%w: incomplete metadata", ErrInvalidMessage)
 	}
 	if !metadata.NotBefore.IsZero() && !metadata.ExpiresAt.IsZero() &&
-		metadata.ExpiresAt.Before(metadata.NotBefore) {
-		return fmt.Errorf("%w: expiresAt precedes notBefore", ErrInvalidMessage)
+		!metadata.ExpiresAt.After(metadata.NotBefore) {
+		return fmt.Errorf("%w: expiresAt must follow notBefore", ErrInvalidMessage)
 	}
 	return validateHeaders(metadata.Headers)
 }
@@ -355,15 +361,17 @@ func makeCommandBinding(
 	observer Observer,
 	clock func() time.Time,
 	middleware []Middleware,
+	panicReporter PanicReporter,
 ) commandBinding {
 	return commandBinding{
-		descriptor: registration.descriptor,
-		handlerID:  registration.handlerID,
-		handler:    registration.handler,
-		route:      registration.route,
-		observer:   observer,
-		clock:      clock,
-		middleware: append([]Middleware(nil), middleware...),
+		descriptor:    registration.descriptor,
+		handlerID:     registration.handlerID,
+		handler:       registration.handler,
+		route:         registration.route,
+		observer:      observer,
+		clock:         clock,
+		middleware:    append([]Middleware(nil), middleware...),
+		panicReporter: panicReporter,
 	}
 }
 
@@ -372,16 +380,18 @@ func makeQueryBinding(
 	observer Observer,
 	clock func() time.Time,
 	middleware []Middleware,
+	panicReporter PanicReporter,
 ) queryBinding {
 	return queryBinding{
-		descriptor: registration.descriptor,
-		resultType: registration.resultType,
-		handlerID:  registration.handlerID,
-		handler:    registration.handler,
-		route:      registration.route,
-		observer:   observer,
-		clock:      clock,
-		middleware: append([]Middleware(nil), middleware...),
+		descriptor:    registration.descriptor,
+		resultType:    registration.resultType,
+		handlerID:     registration.handlerID,
+		handler:       registration.handler,
+		route:         registration.route,
+		observer:      observer,
+		clock:         clock,
+		middleware:    append([]Middleware(nil), middleware...),
+		panicReporter: panicReporter,
 	}
 }
 
@@ -399,7 +409,7 @@ func (b queryBinding) call(metadata Metadata, payload any) localQueryCall {
 				var handlerErr error
 				result, handlerErr = handler(current)
 				return handlerErr
-			}, b.middleware)
+			}, b.middleware, b.panicReporter)
 			if err == nil && !result.present {
 				err = ErrQueryResultMissing
 			}
@@ -458,7 +468,7 @@ func (b commandBinding) delivery(metadata Metadata, payload any) Delivery {
 				return err
 			}
 			started := b.clock().UTC()
-			err = invokeMiddleware(ctx, metadata, b.handlerID, handler, b.middleware)
+			err = invokeMiddleware(ctx, metadata, b.handlerID, handler, b.middleware, b.panicReporter)
 			if b.observer != nil {
 				observe(ctx, b.observer, Observation{
 					Operation:     OperationHandle,
@@ -482,18 +492,20 @@ func makeEventBinding(
 	observer Observer,
 	clock func() time.Time,
 	middleware []Middleware,
+	panicReporter PanicReporter,
 ) eventBinding {
 	subscribers := make([]boundEventSubscriber, len(registration.subscribers))
 	for index, subscriber := range registration.subscribers {
 		subscribers[index] = boundEventSubscriber(subscriber)
 	}
 	return eventBinding{
-		descriptor:  registration.descriptor,
-		subscribers: subscribers,
-		route:       registration.route,
-		observer:    observer,
-		clock:       clock,
-		middleware:  append([]Middleware(nil), middleware...),
+		descriptor:    registration.descriptor,
+		subscribers:   subscribers,
+		route:         registration.route,
+		observer:      observer,
+		clock:         clock,
+		middleware:    append([]Middleware(nil), middleware...),
+		panicReporter: panicReporter,
 	}
 }
 
@@ -513,7 +525,7 @@ func (b eventBinding) delivery(metadata Metadata, payload any) Delivery {
 					continue
 				}
 				started := b.clock().UTC()
-				err = invokeMiddleware(ctx, metadata, subscriber.id, handler, b.middleware)
+				err = invokeMiddleware(ctx, metadata, subscriber.id, handler, b.middleware, b.panicReporter)
 				if b.observer != nil {
 					observe(ctx, b.observer, Observation{
 						Operation:     OperationHandle,
@@ -542,10 +554,11 @@ func invokeMiddleware(
 	handlerID string,
 	handler HandlerFunc,
 	middlewares []Middleware,
+	panicReporter PanicReporter,
 ) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("messenger: handler %s panicked: %v\n%s", handlerID, recovered, debug.Stack())
+			err = ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
 		}
 	}()
 	if len(middlewares) == 0 {

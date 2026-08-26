@@ -25,6 +25,11 @@ type LogAttr struct {
 	Value any
 }
 
+const (
+	logAttrErrorKey     = "error"
+	logAttrServiceIDKey = "service_id"
+)
+
 // Logger is the minimal structured logging contract used by GoMessenger.
 // Implementations must not retain ctx and should return quickly.
 type Logger interface {

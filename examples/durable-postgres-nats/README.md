@@ -50,8 +50,8 @@ not drop or truncate data. Do not point this example at a shared database withou
 
 ## Scope
 
-The example module uses local `replace` directives because GoMessenger has no published SemVer tags yet. It proves the
-current checkout and is compiled by `make check`; it does not prove published-module resolution. Single-node NATS,
-development stream defaults, one consumer worker, and a short run do not establish production capacity, failover, or
-operational readiness. The separate [release process](../../docs/release.md) and
+The example module uses local `replace` directives because it deliberately proves the current checkout, which may be
+ahead of the published `v0.1.0` modules. It is compiled by `make check`; it does not prove published-module resolution.
+Single-node NATS, development stream defaults, one consumer worker, and a short run do not establish production
+capacity, failover, or operational readiness. The separate [release process](../../docs/release.md) and
 [real-service pilot](../../docs/decisions/0002-real-project-pilot.md) remain required.

@@ -356,8 +356,11 @@ func TestQueryMiddlewareErrorsPanicsAndSyntheticResults(t *testing.T) {
 			panic("boom")
 		})
 		_, err := instance.Query(t.Context(), query, 1)
-		if err == nil || !strings.Contains(err.Error(), "handler query.handler panicked: boom") {
+		if err == nil || !strings.Contains(err.Error(), "handler query.handler panicked") {
 			t.Fatalf("panic error = %v", err)
+		}
+		if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "runtime/debug") {
+			t.Fatalf("panic details escaped through error: %v", err)
 		}
 	})
 

@@ -187,7 +187,7 @@ func TestDeadLetterAcknowledgementWaitsForBrokerConfirmation(t *testing.T) {
 		ConsumerID: testDLQConsumerID,
 		BaseRetry:  time.Nanosecond,
 		MaxRetry:   time.Nanosecond,
-	}}
+	}, clock: time.Now}
 	if !consumer.acknowledgeDeadLetteredMessage(t.Context(), message, messenger.MessageID{}, 1) {
 		t.Fatal("dead-letter acknowledgement was not confirmed")
 	}
@@ -199,6 +199,15 @@ func TestDeadLetterAcknowledgementWaitsForBrokerConfirmation(t *testing.T) {
 	}
 	if !message.sawDeadline {
 		t.Fatal("DoubleAck did not receive a bounded context")
+	}
+	alreadyAcknowledged := &scriptedJetStreamMessage{doubleAckErrors: []error{jetstream.ErrMsgAlreadyAckd}}
+	if !consumer.acknowledgeDeadLetteredMessage(
+		t.Context(), alreadyAcknowledged, messenger.MessageID{}, 1,
+	) {
+		t.Fatal("already-acknowledged message was treated as a failed DLQ hand-off")
+	}
+	if alreadyAcknowledged.doubleAckCalls != 1 {
+		t.Fatalf("already-acknowledged DoubleAck calls = %d, want 1", alreadyAcknowledged.doubleAckCalls)
 	}
 }
 

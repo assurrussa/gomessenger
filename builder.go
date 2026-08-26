@@ -74,6 +74,30 @@ func WithContextPropagator(propagator ContextPropagator) Option {
 	}
 }
 
+// WithPanicReporter enables explicit handling of sensitive recovered-panic
+// values and stacks. Without it, only a sanitized HandlerPanicError is emitted.
+func WithPanicReporter(reporter PanicReporter) Option {
+	return func(builder *Builder) {
+		if nilInterface(reporter) {
+			builder.addError(fmt.Errorf("%w: nil panic reporter", ErrInvalidMessage))
+			return
+		}
+		builder.panicReporter = reporter
+	}
+}
+
+// WithRuntimeShutdownTimeout sets the internal bound used when Run owns service
+// shutdown after cancellation or an unexpected service return.
+func WithRuntimeShutdownTimeout(timeout time.Duration) Option {
+	return func(builder *Builder) {
+		if timeout <= 0 {
+			builder.addError(fmt.Errorf("%w: runtime shutdown timeout must be positive", ErrInvalidMessage))
+			return
+		}
+		builder.runtimeShutdownTimeout = timeout
+	}
+}
+
 type descriptorRegistration struct {
 	info        DescriptorInfo
 	payloadType reflect.Type
@@ -119,13 +143,15 @@ type namedService struct {
 // Builder declares immutable descriptors, handlers, routes, and managed services.
 // It is not safe for concurrent mutation.
 type Builder struct {
-	source      string
-	idGenerator IDGenerator
-	clock       func() time.Time
-	logger      Logger
-	observers   []Observer
-	propagator  ContextPropagator
-	middlewares []Middleware
+	source                 string
+	idGenerator            IDGenerator
+	clock                  func() time.Time
+	logger                 Logger
+	observers              []Observer
+	propagator             ContextPropagator
+	panicReporter          PanicReporter
+	runtimeShutdownTimeout time.Duration
+	middlewares            []Middleware
 
 	commands map[descriptorKey]*commandRegistration
 	events   map[descriptorKey]*eventRegistration
@@ -137,14 +163,15 @@ type Builder struct {
 // NewBuilder constructs an empty messenger builder.
 func NewBuilder(options ...Option) *Builder {
 	builder := &Builder{
-		idGenerator: UUIDv7Generator(),
-		clock:       time.Now,
-		logger:      noopLogger{},
-		propagator:  noopContextPropagator{},
-		commands:    make(map[descriptorKey]*commandRegistration),
-		events:      make(map[descriptorKey]*eventRegistration),
-		queries:     make(map[descriptorKey]*queryRegistration),
-		services:    make(map[string]namedService),
+		idGenerator:            UUIDv7Generator(),
+		clock:                  time.Now,
+		logger:                 noopLogger{},
+		propagator:             noopContextPropagator{},
+		runtimeShutdownTimeout: defaultRuntimeShutdownTimeout,
+		commands:               make(map[descriptorKey]*commandRegistration),
+		events:                 make(map[descriptorKey]*eventRegistration),
+		queries:                make(map[descriptorKey]*queryRegistration),
+		services:               make(map[string]namedService),
 	}
 	for _, option := range options {
 		if option == nil {
@@ -389,15 +416,15 @@ func (b *Builder) Build() (*Messenger, *Runtime, error) {
 	observer := newObserverSet(b.logger, b.observers)
 	commands := make(map[descriptorKey]commandBinding, len(b.commands))
 	for key, registration := range b.commands {
-		commands[key] = makeCommandBinding(registration, observer, b.clock, b.middlewares)
+		commands[key] = makeCommandBinding(registration, observer, b.clock, b.middlewares, b.panicReporter)
 	}
 	events := make(map[descriptorKey]eventBinding, len(b.events))
 	for key, registration := range b.events {
-		events[key] = makeEventBinding(registration, observer, b.clock, b.middlewares)
+		events[key] = makeEventBinding(registration, observer, b.clock, b.middlewares, b.panicReporter)
 	}
 	queries := make(map[descriptorKey]queryBinding, len(b.queries))
 	for key, registration := range b.queries {
-		queries[key] = makeQueryBinding(registration, observer, b.clock, b.middlewares)
+		queries[key] = makeQueryBinding(registration, observer, b.clock, b.middlewares, b.panicReporter)
 	}
 	services := make([]namedService, 0, len(b.services))
 	for _, service := range b.services {
@@ -415,7 +442,13 @@ func (b *Builder) Build() (*Messenger, *Runtime, error) {
 		queries:     queries,
 	}
 	messenger.manifest = buildManifest(b.source, commands, events, queries, services)
-	return messenger, newRuntime(services, b.logger, observer), nil
+	return messenger, newRuntime(
+		services,
+		b.logger,
+		observer,
+		b.panicReporter,
+		b.runtimeShutdownTimeout,
+	), nil
 }
 
 func (b *Builder) ensureCommand[T any](descriptor Command[T]) *commandRegistration {

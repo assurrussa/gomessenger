@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- transport-neutral panic reporting and failure sanitizing with a structural `HandlerPanicError` contract that remains
+  classifiable across independently versioned adapters.
+
+### Fixed
+
+- NATS and Kafka durable handlers now validate completion against the exact context supplied through middleware, even
+  when an outer middleware swallows the handler's cancellation error.
+
 ## [0.1.0] - 2026-08-26
 
 ### Added

@@ -15,15 +15,17 @@ import (
 const testRuntimeServiceID = "worker"
 
 type controlledService struct {
-	started      chan struct{}
-	finish       chan struct{}
-	drainCalled  chan struct{}
-	shutdownErr  error
-	runErr       error
-	cancelled    atomic.Bool
-	readyErr     error
-	drainOnce    sync.Once
-	shutdownCall atomic.Int32
+	started       chan struct{}
+	finish        chan struct{}
+	drainCalled   chan struct{}
+	shutdownErr   error
+	runErr        error
+	cancelled     atomic.Bool
+	readyErr      error
+	livenessErr   error
+	deepHealthErr error
+	drainOnce     sync.Once
+	shutdownCall  atomic.Int32
 }
 
 type blockingShutdownService struct {
@@ -93,6 +95,10 @@ func (s *controlledService) Run(ctx context.Context) error {
 }
 
 func (s *controlledService) Readiness(context.Context) error { return s.readyErr }
+
+func (s *controlledService) Liveness(context.Context) error { return s.livenessErr }
+
+func (s *controlledService) DeepHealth(context.Context) error { return s.deepHealthErr }
 
 func (s *controlledService) BeginDrain() {
 	s.drainOnce.Do(func() { close(s.drainCalled) })
@@ -228,6 +234,67 @@ func TestRuntimeReportsUnexpectedServiceStopAndReadinessErrors(t *testing.T) {
 	}
 	if err := runtime.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
 		t.Fatalf("closed readiness = %v", err)
+	}
+}
+
+func TestRuntimeSeparatesReadinessLivenessAndDeepHealth(t *testing.T) {
+	service := newControlledService()
+	service.readyErr = errors.New("not accepting work")
+	service.livenessErr = errors.New("worker loop stopped")
+	service.deepHealthErr = errors.New("topology drift")
+	runtime := runtimeWithServices(t, map[string]messenger.Service{testRuntimeServiceID: service})
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(t.Context()) }()
+	<-service.started
+
+	if err := runtime.Readiness(t.Context()); !errors.Is(err, service.readyErr) {
+		t.Fatalf("readiness = %v", err)
+	}
+	if err := runtime.Liveness(t.Context()); !errors.Is(err, service.livenessErr) {
+		t.Fatalf("liveness = %v", err)
+	}
+	if err := runtime.DeepHealth(t.Context()); !errors.Is(err, service.deepHealthErr) {
+		t.Fatalf("deep health = %v", err)
+	}
+
+	runtime.BeginDrain()
+	close(service.finish)
+	if err := <-runDone; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+type panickingRunService struct{}
+
+func (panickingRunService) Run(context.Context) error { panic("sensitive service panic") }
+
+func (panickingRunService) Readiness(context.Context) error { return nil }
+
+func (panickingRunService) BeginDrain() {}
+
+func (panickingRunService) Shutdown(context.Context) error { return nil }
+
+func TestRuntimeReportsServicePanicsWithoutExposingDetails(t *testing.T) {
+	var report messenger.PanicReport
+	runtime := runtimeWithServices(
+		t,
+		map[string]messenger.Service{testRuntimeServiceID: panickingRunService{}},
+		messenger.WithPanicReporter(messenger.PanicReporterFunc(func(
+			_ context.Context,
+			received messenger.PanicReport,
+		) {
+			report = received
+		})),
+	)
+	err := runtime.Run(t.Context())
+	var panicErr messenger.HandlerPanicError
+	if !errors.As(err, &panicErr) || panicErr.HandlerPanicID() != "service."+testRuntimeServiceID ||
+		strings.Contains(err.Error(), "sensitive service panic") {
+		t.Fatalf("runtime panic error = %#v, %v", panicErr, err)
+	}
+	if report.HandlerID != "service."+testRuntimeServiceID ||
+		report.Value != "sensitive service panic" || len(report.Stack) == 0 {
+		t.Fatalf("runtime panic report = %#v", report)
 	}
 }
 

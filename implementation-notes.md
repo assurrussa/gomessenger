@@ -1,5 +1,30 @@
 # Implementation notes
 
+## 2026-08-26 — upgrade-logic-base review fixes
+
+- Replaced the branch-specific `.hardening` patch staging with the actual NATS/Kafka source and regression tests. The
+  benchmark workflow is read-only, does not persist checkout credentials or push back to pull-request branches, and
+  uploads only benchmark results instead of source, toolchain, and module-cache snapshots.
+- Kept recovered panic values and stacks out of ordinary errors, observations, logs, and DLQ records. Trusted hosts may
+  opt in through `PanicReporter`; adapter failure text defaults to a panic-isolated conservative sanitizer that retains
+  `errors.Is`/`errors.As` through its error wrapper.
+- Preserved parent cancellation when a custom context propagator returns nil, rejected typed-nil panic reporters, and
+  made NATS standalone shutdown force-cancel its owned run context once the shutdown deadline expires.
+- Durable middleware completion now rechecks the exact context passed to the handler after the full middleware chain,
+  so a replacement-context deadline cannot be swallowed into an Inbox commit. `HandlerPanicError` is a structural safe
+  interface implemented by independently versioned adapters, and the root sanitizer classifies it without adapter
+  source depending on an unreleased root symbol.
+- Clarified that install commands and the Go Reference badge describe published `v0.1.0`, while the remainder of the
+  README and the checkout-only PostgreSQL/NATS demo may describe unreleased follow-up changes.
+- Split handler execution observations from broker ACK, Kafka offset commit, retry hand-off, and DLQ hand-off. NATS now
+  accepts `ErrMsgAlreadyAckd` as confirmed finalization, while both adapters expose expensive topology validation through
+  `DeepHealth` and keep ordinary readiness lightweight.
+- Restored `WithClock` as the source of normalized Messenger receipt timestamps and propagated lifecycle contexts through
+  runtime drain reporting instead of detaching them with `context.Background()`.
+- The completed batch passed `make check`: isolated `GOWORK=off` build/vet/lint, unit, race, checkptr, 90.8% root
+  coverage, the clean consumer probe, and the durable embedded-JetStream E2E. The opt-in Docker Kafka compatibility gate
+  was not rerun as part of this review fix.
+
 ## 2026-08-26 — v0.1.0 multi-module release
 
 - Published immutable `v0.1.0` tags in dependency order for the root, Inbox, Outbox, observability, NATS, Kafka, and

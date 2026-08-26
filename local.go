@@ -77,6 +77,9 @@ func (r *LocalSyncRoute) Deliver(ctx context.Context, delivery Delivery) (Receip
 		return Receipt{}, fmt.Errorf("%w: local sync delivery", ErrInvalidMessage)
 	}
 	metadata := delivery.Metadata()
+	if err := validateImmediateTiming(metadata, time.Now()); err != nil {
+		return Receipt{}, err
+	}
 	if metadata.Kind == KindEvent && delivery.HandlerCount() == 0 {
 		return Receipt{MessageID: metadata.ID, Route: r.Name(), State: ReceiptNoop, At: time.Now().UTC()}, nil
 	}
@@ -168,11 +171,14 @@ func (r *LocalAsyncRoute) Deliver(ctx context.Context, delivery Delivery) (Recei
 	if !running {
 		return Receipt{}, ErrRuntimeNotRunning
 	}
+	metadata := delivery.Metadata()
+	if err := validateImmediateTiming(metadata, time.Now()); err != nil {
+		return Receipt{}, err
+	}
 	if _, err := r.runtime.Submit(ctx, localCall{delivery: delivery},
 		gobusasync.WithExecutionContext(context.WithoutCancel(ctx))); err != nil {
 		return Receipt{}, fmt.Errorf("messenger: async admission: %w", err)
 	}
-	metadata := delivery.Metadata()
 	return Receipt{MessageID: metadata.ID, Route: r.Name(), State: ReceiptAccepted, At: time.Now().UTC()}, nil
 }
 

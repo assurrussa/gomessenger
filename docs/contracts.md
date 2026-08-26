@@ -60,8 +60,9 @@ contains the received metadata. A child message created from that context inheri
 One-way callers may supply an ID, correlation ID, causation ID, timestamps, and headers with `Outgoing`. Reusing a
 message ID is safe only when the complete canonical envelope is byte-for-byte equivalent. Local queries expose no
 equivalent override surface.
-`WithClock` controls message time independently of `WithIDGenerator`; deterministic generators implement
-`New() (MessageID, error)`. Baggage propagation is not part of the current contract.
+`WithClock` controls message and normalized receipt boundary timestamps independently of `WithIDGenerator`;
+deterministic generators implement `New() (MessageID, error)`. Baggage propagation is not part of the current
+contract.
 
 ## Canonical envelope v1
 
@@ -160,6 +161,9 @@ logical `Time` remains inside the canonical envelope.
 - `RetryAfter(err, delay)` requests a durable delay and must not be implemented only as an in-memory sleep.
 - an unclassified error is retryable and is bounded by adapter attempt limits.
 - a panic is recovered at a delivery boundary and treated as a failed attempt; the process runtime stays supervised.
+  Ordinary errors, observations, logs, and DLQ records receive only the transport-neutral `HandlerPanicError` interface;
+  it remains classifiable with `errors.As` across independently versioned adapters. Recovered values and stacks are
+  available solely through an explicitly configured `PanicReporter`.
 
 For JetStream, `AckWait` is independent of handler `Timeout`. It is at least 100 ms and may be shorter than the handler
 deadline because an active delivery sends progress acknowledgements every `AckWait / 3`. Pull-iterator heartbeats are a
@@ -256,7 +260,10 @@ and errors. Record keys, payloads, message bodies, and headers are excluded. `Wi
 franz-go's internal client logger and is not part of this transport-neutral safety contract.
 
 Observations may contain message, consumer and service identity, route, handler, duration, attempt, duplicate state,
-and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler. Message
+and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler;
+`OperationBrokerAck`, `OperationOffsetCommit`, `OperationRetryHandoff`, and `OperationDLQHandoff` expose the distinct
+durable finalization boundary. Adapter handler failures are sanitized before observation or DLQ serialization while
+preserving `errors.Is`/`errors.As`; hosts may explicitly replace the conservative `DefaultFailureSanitizer`. Message
 IDs, attempts, and other high-cardinality values may be trace/log attributes but are never Prometheus metric labels.
 Core infrastructure logs and observations never include record keys, payloads, query results, message bodies, or
 arbitrary headers.
@@ -267,12 +274,15 @@ Managed services implement `Run`, `Readiness`, `BeginDrain`, and `Shutdown`.
 
 1. `Run` starts all registered services and cancels peers if one terminates unexpectedly. It emits a service observation
    and does not restart the failed service.
-2. `Readiness` succeeds only when every service can accept work and its adapter-specific required resources are safe.
-   Kafka consumers check broker connectivity, topic presence, equal partition counts, and unlimited retry retention;
-   the complete managed Kafka policy is verified separately with `PlanTopology`.
-3. `BeginDrain` closes admission without cancelling already accepted work, including when it races with service
+2. `Readiness` is a lightweight admission probe. Kafka consumers require all transactional workers plus a broker ping;
+   NATS consumers require a running pull loop and connected client. It does not rescan topology on every probe.
+3. `DeepHealth` is the explicit low-frequency diagnostic for exact adapter topology: Kafka topic presence, equal
+   partition counts, and unlimited retry retention; NATS durable-consumer and DLQ-stream drift. `Liveness` checks the
+   runtime state and optional service liveness without requiring readiness or topology access. The complete managed
+   Kafka policy is still verified separately with `PlanTopology`.
+4. `BeginDrain` closes admission without cancelling already accepted work, including when it races with service
    startup; a service drained before `Run` does not begin pulling.
-4. `Shutdown` waits for accepted work. If its context expires, the runtime force-cancels service contexts and returns
+5. `Shutdown` waits for accepted work. If its context expires, the runtime force-cancels service contexts and returns
    the context error. Service shutdown calls run concurrently; joined errors retain deterministic service-ID order.
 
 `Shutdown` before `Run` closes services synchronously; it does not wait for a run loop that was never started.

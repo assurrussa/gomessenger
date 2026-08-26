@@ -137,13 +137,7 @@ func newDescriptor[T any](
 	}, nil
 }
 
-func codecIsNil[T any](codec Codec[T]) bool {
-	if codec == nil {
-		return true
-	}
-	value := reflect.ValueOf(codec)
-	return value.Kind() == reflect.Pointer && value.IsNil()
-}
+func codecIsNil[T any](codec Codec[T]) bool { return nilInterface(codec) }
 
 type descriptorKey struct {
 	kind          Kind
