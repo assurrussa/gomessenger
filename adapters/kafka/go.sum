@@ -1,9 +1,9 @@
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
-github.com/assurrussa/gomessenger v0.1.0 h1:mRDpVwUvp9Z4PMzyDv1vu3SDrKzPA+r6ySLEteDI+mw=
-github.com/assurrussa/gomessenger v0.1.0/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
-github.com/assurrussa/gomessenger/adapters/inbox v0.1.0 h1:1w9nK9Xf20QHgKBr4jbGYmFWl5mTEv9YBmExB5wuAUE=
-github.com/assurrussa/gomessenger/adapters/inbox v0.1.0/go.mod h1:dpI7ppg6foBKLYwFLB1SNUW1yXxRWy2yH8c7XnrGJYA=
+github.com/assurrussa/gomessenger v0.2.0 h1:MbXzMfumxGNn2w1NVR4tvd0qfvtHcClFMwEtOaTt794=
+github.com/assurrussa/gomessenger v0.2.0/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
+github.com/assurrussa/gomessenger/adapters/inbox v0.2.0 h1:WumA3FrVq/rEBLQ9rRMULeew0BlweUE2LCepgRA59no=
+github.com/assurrussa/gomessenger/adapters/inbox v0.2.0/go.mod h1:KpeCYEhIchoXJDxitomzEKwJyK+7b/1R2q1JLl4dDLk=
 github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
 github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/pierrec/lz4/v4 v4.1.26 h1:GrpZw1gZttORinvzBdXPUXATeqlJjqUG/D87TKMnhjY=

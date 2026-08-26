@@ -1,5 +1,17 @@
 # Implementation notes
 
+## 2026-08-26 — v0.2.0 release preparation
+
+- Selected `v0.2.0` rather than a patch release because the compatible hardening batch adds public `PanicReporter`,
+  `FailureSanitizer`, `Runtime.Liveness`, `Runtime.DeepHealth`, and shutdown-timeout contracts in addition to fixing
+  durable middleware completion.
+- Extended the clean published-consumer probe to compile the new root and independently versioned NATS/Kafka failure
+  contracts without local replacements.
+- The pre-release `make prepare` left the source graph unchanged; `make check` passed with 90.8% root coverage and
+  `make bench-all` passed. The local Kafka container could not create `/tmp/kafka-logs` because the Docker internal
+  filesystem was full, before broker readiness or Go test execution; the exact release PR must therefore supply the
+  PostgreSQL 18 and Kafka 4.1.2/4.3.1 evidence.
+
 ## 2026-08-26 — upgrade-logic-base review fixes
 
 - Replaced the branch-specific `.hardening` patch staging with the actual NATS/Kafka source and regression tests. The

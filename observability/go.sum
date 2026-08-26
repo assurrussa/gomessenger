@@ -1,7 +1,7 @@
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
-github.com/assurrussa/gomessenger v0.1.0 h1:mRDpVwUvp9Z4PMzyDv1vu3SDrKzPA+r6ySLEteDI+mw=
-github.com/assurrussa/gomessenger v0.1.0/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
+github.com/assurrussa/gomessenger v0.2.0 h1:MbXzMfumxGNn2w1NVR4tvd0qfvtHcClFMwEtOaTt794=
+github.com/assurrussa/gomessenger v0.2.0/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

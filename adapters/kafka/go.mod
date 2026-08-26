@@ -3,8 +3,8 @@ module github.com/assurrussa/gomessenger/adapters/kafka
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.1.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.1.0
+	github.com/assurrussa/gomessenger v0.2.0
+	github.com/assurrussa/gomessenger/adapters/inbox v0.2.0
 	github.com/twmb/franz-go v1.21.6
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 )
