@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"runtime/debug"
 	"sync/atomic"
 
 	messenger "github.com/assurrussa/gomessenger"
@@ -58,7 +57,14 @@ func handlerCompletionMiddleware(
 	_ string,
 	next messenger.HandlerFunc,
 ) error {
-	return messenger.HandlerCompletionError(ctx, next(ctx))
+	err := next(ctx)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: nil handler context", messenger.ErrInvalidMessage)
+	}
+	return ctx.Err()
 }
 
 func notifyObservers(ctx context.Context, config HandlerConfig, observation messenger.Observation) {
@@ -112,7 +118,7 @@ func (t *Transport) logFailure(
 ) {
 	attrs = append(attrs,
 		messenger.LogAttr{Key: logAttrOperation, Value: operation},
-		messenger.LogAttr{Key: logAttrError, Value: messenger.SanitizeError(messenger.DefaultFailureSanitizer(), err)},
+		messenger.LogAttr{Key: logAttrError, Value: safeOperationalError(err)},
 	)
 	t.logInfrastructure(ctx, level, message, attrs...)
 }
@@ -126,13 +132,22 @@ func (t *Transport) logTransactionFailure(
 ) {
 	attrs = append(attrs, messenger.LogAttr{Key: logAttrAbortAttempted, Value: true})
 	if abortErr != nil {
-		attrs = append(attrs, messenger.LogAttr{
-			Key:   logAttrAbortError,
-			Value: messenger.SanitizeError(messenger.DefaultFailureSanitizer(), abortErr),
-		})
+		attrs = append(attrs, messenger.LogAttr{Key: logAttrAbortError, Value: safeOperationalError(abortErr)})
 	}
 	t.logFailure(ctx, messenger.LogError, "Kafka transaction failed", operation, err, attrs...)
 }
+
+func safeOperationalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return operationalError{cause: err}
+}
+
+type operationalError struct{ cause error }
+
+func (operationalError) Error() string { return "messenger/kafka: operation failed" }
+func (e operationalError) Unwrap() error { return e.cause }
 
 func invokeMiddlewares(
 	ctx context.Context,
@@ -140,15 +155,10 @@ func invokeMiddlewares(
 	handlerID string,
 	handler messenger.HandlerFunc,
 	middlewares []messenger.Middleware,
-	panicReporters ...messenger.PanicReporter,
 ) (err error) {
-	var panicReporter messenger.PanicReporter
-	if len(panicReporters) > 0 && !nilValue(panicReporters[0]) {
-		panicReporter = panicReporters[0]
-	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
+			err = fmt.Errorf("messenger/kafka: handler %s panicked", handlerID)
 		}
 	}()
 	if len(middlewares) == 0 {
