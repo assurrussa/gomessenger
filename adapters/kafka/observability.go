@@ -36,12 +36,6 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
 	if nilValue(config.Propagator) {
 		config.Propagator = messenger.NoopContextPropagator()
 	}
-	if nilValue(config.PanicReporter) {
-		config.PanicReporter = nil
-	}
-	if nilValue(config.FailureSanitizer) {
-		config.FailureSanitizer = messenger.DefaultFailureSanitizer()
-	}
 	for _, observer := range config.Observers {
 		if nilValue(observer) {
 			return fmt.Errorf("%w: nil observer", ErrInvalidConfig)
@@ -52,7 +46,19 @@ func applyObservabilityDefaults(config *HandlerConfig) error {
 			return fmt.Errorf("%w: nil middleware", ErrInvalidConfig)
 		}
 	}
+	// This outer middleware converts a late nil return into ctx.Err before the
+	// Inbox callback can commit business writes and its completion marker.
+	config.Middlewares = append([]messenger.Middleware{handlerCompletionMiddleware}, config.Middlewares...)
 	return nil
+}
+
+func handlerCompletionMiddleware(
+	ctx context.Context,
+	_ messenger.Metadata,
+	_ string,
+	next messenger.HandlerFunc,
+) error {
+	return messenger.HandlerCompletionError(ctx, next(ctx))
 }
 
 func notifyObservers(ctx context.Context, config HandlerConfig, observation messenger.Observation) {
@@ -134,8 +140,12 @@ func invokeMiddlewares(
 	handlerID string,
 	handler messenger.HandlerFunc,
 	middlewares []messenger.Middleware,
-	panicReporter messenger.PanicReporter,
+	panicReporters ...messenger.PanicReporter,
 ) (err error) {
+	var panicReporter messenger.PanicReporter
+	if len(panicReporters) > 0 && !nilValue(panicReporters[0]) {
+		panicReporter = panicReporters[0]
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = messenger.ReportHandlerPanic(ctx, panicReporter, handlerID, recovered, debug.Stack())
