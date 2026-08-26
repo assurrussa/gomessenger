@@ -26,6 +26,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Retain source snapshot for hardening validation
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/source.tgz" .
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -65,10 +67,15 @@ jobs:
             fi
           fi
       - name: Add comparison to job summary
+        if: always()
         run: |
           echo '## Benchmark comparison' >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          sed -n '1,240p' "$RUNNER_TEMP/benchstat.txt" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/benchstat.txt" ]; then
+            sed -n '1,240p' "$RUNNER_TEMP/benchstat.txt" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Benchmark execution did not reach comparison output.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw benchmark data
         if: always()
@@ -76,7 +83,9 @@ jobs:
         with:
           name: benchmark-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/source.tgz
             ${{ runner.temp }}/base.txt
             ${{ runner.temp }}/head.txt
             ${{ runner.temp }}/benchstat.txt
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 1
