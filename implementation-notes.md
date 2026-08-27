@@ -12,10 +12,40 @@
   producer registers `message_id -> run/stage` inside its transaction before commit and removes the mapping on failure.
 - Added a PostgreSQL-only `ProcessAttempt` runner with one transactional handler insert, prebuilt identities and
   fingerprints, default C1/C4 `20,000`-operation cases, three repetitions, exact integrity checks, and statement/WAL/I/O
-  deltas. A live PostgreSQL 17 smoke completed 100 measured C1 operations and exposed the expected nine fresh-success
-  statements at 100 calls each; this smoke is implementation validation, not the pending comparable baseline matrix.
+  deltas.
 - Both isolated runners now write `resources.jsonl` with container CPU, RAM, and cumulative Block I/O alongside ignored
   reports and raw artifacts. Hosted CI remains unchanged and does not execute performance workloads.
+- Recorded the comparable baseline at commit `175d83a6ad5504b1d6ed4584f28b42f25db75979` (`gitDirty=false`) on a
+  MacBook Pro `Mac17,9`, Apple M5 Pro (15 cores), 24 GB RAM, macOS 26.5.1 arm64. The Linux arm64 containers saw 12 CPUs
+  and a 3.824 GiB memory limit; the toolchain was Go 1.27.0, NATS 2.12.3, k6 2.2.0, PostgreSQL 17.9 for the site and
+  Inbox-only profiles, and PostgreSQL 18.6 for the existing quick profile. JetStream used file storage. Every recorded
+  run passed exact integrity reconciliation with no lost or duplicate business effect.
+
+  | Profile | Target | Passed/reached | Median effective | Median Inbox p50/p95/p99 | Median business p95 | Median drain | Median peak app RSS |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | PostgreSQL-only | C1 | 3/3 | 1,722.11 ops/s | 0.554/0.696/1.216 ms | — | — | 19.50 MiB¹ |
+  | PostgreSQL-only | C4 | 3/3 | 5,194.48 ops/s | 0.723/1.078/1.595 ms | — | — | 19.50 MiB¹ |
+  | PostgreSQL 17 site-shaped O1/C1 | 250 msg/s | 3/3 | 249.892 msg/s | 0.682/1.456/2.439 ms | 103.116 ms | 0.019 s | 32.04 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 325 msg/s | 3/3 | 324.925 msg/s | 0.641/1.316/1.997 ms | 106.160 ms | 0.032 s | 32.04 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 350 msg/s | 2/3 | 349.650 msg/s | 0.690/1.295/2.268 ms | 511.827 ms | 0.031 s | 32.04 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 400 msg/s | 1/2² | — | — | — | — | 32.04 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 500 msg/s | 0/1² | — | — | — | — | 32.04 MiB |
+  | PostgreSQL 18 quick O4/C4 | 50 msg/s | 3/3 | 49.933 msg/s | 1.914/3.774/4.670 ms | 99.053 ms | 0.004 s | 36.70 MiB |
+  | PostgreSQL 18 quick O4/C4 | 100 msg/s | 3/3 | 99.800 msg/s | 1.748/3.653/4.536 ms | 98.579 ms | 0.006 s | 36.70 MiB |
+  | PostgreSQL 18 quick O4/C4 | 250 msg/s | 3/3 | 249.533 msg/s | 1.665/3.576/4.222 ms | 96.236 ms | 0.010 s | 36.70 MiB |
+  | PostgreSQL 18 quick O4/C4 | 500 msg/s | 2/3 | 499.400 msg/s | 1.311/2.248/3.794 ms | 85.961 ms | 0.021 s | 36.70 MiB |
+
+  ¹ The PostgreSQL-only runner samples one process across all six C1/C4 cases, so its single peak applies to both rows.
+  ² The controller stops a repetition at its first unsustainable stage. PostgreSQL 17 therefore reached 400 twice and
+  500 once; incomplete targets deliberately have no cross-run median.
+- The repeatable site-shaped floor is `capacity >= 325 msg/s`; 350 msg/s is the measured boundary, not a capacity claim:
+  it passed two repetitions and failed one because k6 dropped six iterations during a checkpoint-shaped stall. The
+  PostgreSQL 18 quick profile similarly passed 500 msg/s twice and failed once with 339 dropped iterations, so its
+  repeatable claim remains `capacity >= 250 msg/s` despite a 499.400 msg/s median at the highest tested target.
+- PostgreSQL-only statement telemetry observed exactly 20,000 calls for each adapter-owned fresh-success statement per
+  repetition: identity insert, missing-attempt select, attempt insert, savepoint, successful savepoint release, and
+  completion update. Together with `BEGIN`, the one-row handler insert, and `COMMIT`, this confirms the expected nine
+  sequential database interactions that the adapter-only follow-up will compare against.
 
 ## 2026-08-27 — reproducible NATS capacity experiment
 
