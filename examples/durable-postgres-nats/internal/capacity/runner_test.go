@@ -57,3 +57,18 @@ func TestPostgresSnapshotStartsAtLoadBoundary(t *testing.T) {
 		t.Fatal("PostgreSQL boundary snapshot did not complete")
 	}
 }
+
+func TestDrainTimingStartsAtLoadBoundary(t *testing.T) {
+	t.Parallel()
+
+	loadEndedAt := time.Unix(100, 0).UTC()
+	duration, completed := drainTiming(loadEndedAt, loadEndedAt.Add(750*time.Millisecond), time.Second)
+	if duration != 750*time.Millisecond || !completed {
+		t.Fatalf("drain timing = %s, completed = %t", duration, completed)
+	}
+
+	duration, completed = drainTiming(loadEndedAt, loadEndedAt.Add(1100*time.Millisecond), time.Second)
+	if duration != 1100*time.Millisecond || completed {
+		t.Fatalf("late drain timing = %s, completed = %t", duration, completed)
+	}
+}

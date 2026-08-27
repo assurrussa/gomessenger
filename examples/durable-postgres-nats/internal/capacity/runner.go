@@ -322,7 +322,7 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		samples[index].ElapsedSeconds = samples[index].ObservedAt.Sub(loadStartedAt).Seconds()
 	}
 	drain, err := drainStage(
-		ctx, e.config, e.probe, e.artifacts, labels, loadStartedAt, &samples,
+		ctx, e.config, e.probe, e.artifacts, labels, loadStartedAt, loadEndedAt, &samples,
 	)
 	if err != nil {
 		return StageReport{}, err
@@ -498,10 +498,10 @@ func drainStage(
 	artifacts *artifacts,
 	labels demo.BenchmarkLabels,
 	loadStartedAt time.Time,
+	loadEndedAt time.Time,
 	samples *[]Sample,
 ) (drainResult, error) {
-	drainStartedAt := time.Now()
-	performanceDeadline := drainStartedAt.Add(config.DrainTimeout)
+	performanceDeadline := loadEndedAt.Add(config.DrainTimeout)
 	reconciliationGrace := max(config.DrainTimeout, time.Minute)
 	hardDeadline := performanceDeadline.Add(reconciliationGrace)
 	ticker := time.NewTicker(250 * time.Millisecond)
@@ -523,15 +523,17 @@ func drainStage(
 			lastWrittenAt = time.Now()
 		}
 		if systemQuiescent(sample) {
-			duration := time.Since(drainStartedAt)
-			completedWithinLimit := !time.Now().After(performanceDeadline)
+			duration, completedWithinLimit := drainTiming(
+				loadEndedAt, sample.ObservedAt, config.DrainTimeout,
+			)
 			return drainResult{
 				final: sample, duration: duration,
 				completedWithinLimit: completedWithinLimit, fullyDrained: true,
 			}, nil
 		}
 		if time.Now().After(hardDeadline) {
-			return drainResult{final: sample, duration: time.Since(drainStartedAt)}, nil
+			duration, _ := drainTiming(loadEndedAt, sample.ObservedAt, config.DrainTimeout)
+			return drainResult{final: sample, duration: duration}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -539,6 +541,14 @@ func drainStage(
 		case <-ticker.C:
 		}
 	}
+}
+
+func drainTiming(loadEndedAt, observedAt time.Time, timeout time.Duration) (time.Duration, bool) {
+	duration := observedAt.Sub(loadEndedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	return duration, duration <= timeout
 }
 
 func systemQuiescent(sample Sample) bool {
