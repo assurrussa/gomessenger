@@ -4,10 +4,10 @@ set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-compose_file="${repo_root}/examples/durable-postgres-nats/compose.capacity.yaml"
-project_name="gomessenger-capacity-nats"
+compose_file="${repo_root}/examples/durable-postgres-nats/compose.inbox-capacity.yaml"
+project_name="gomessenger-capacity-inbox-postgres"
 
-run_id="${CAPACITY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+run_id="${CAPACITY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-inbox-$$}"
 results_dir="${repo_root}/tmp/capacity/${run_id}"
 mkdir -p "${results_dir}"
 
@@ -31,7 +31,7 @@ resource_sampler_pid=$!
 
 set +e
 docker compose -p "${project_name}" -f "${compose_file}" \
-  up --build --abort-on-container-exit --exit-code-from capacity-runner 2>&1 \
+  up --build --abort-on-container-exit --exit-code-from inbox-capacity 2>&1 \
   | tee "${results_dir}/compose.log"
 run_status=${PIPESTATUS[0]}
 
@@ -46,8 +46,8 @@ if [[ "${KEEP_CAPACITY_STACK:-0}" != "1" ]]; then
     run_status=${cleanup_status}
   fi
 else
-  printf 'Capacity stack preserved for diagnostics: project=%s\n' "${project_name}"
+  printf 'PostgreSQL Inbox capacity stack preserved: project=%s\n' "${project_name}"
 fi
 
-printf 'Capacity artifacts: %s\n' "${results_dir}"
+printf 'PostgreSQL Inbox capacity artifacts: %s\n' "${results_dir}"
 exit "${run_status}"

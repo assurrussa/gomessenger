@@ -1,6 +1,20 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - compute_query_id=on
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.track_utility=on
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
     environment:
       POSTGRES_DB: gomessenger
       POSTGRES_USER: gomessenger
@@ -26,7 +40,7 @@ services:
       dockerfile: examples/durable-postgres-nats/Dockerfile.capacity
       target: capacity-api
     environment:
-      POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable
+      POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable&application_name=gomessenger-capacity-api
       NATS_URL: nats://nats:4222
       HTTP_ADDR: :8080
       OUTBOX_WORKERS: ${OUTBOX_WORKERS:-4}
@@ -60,8 +74,10 @@ services:
       CAPACITY_SAMPLE_INTERVAL: ${CAPACITY_SAMPLE_INTERVAL:-}
       CAPACITY_READY_TIMEOUT: ${CAPACITY_READY_TIMEOUT:-}
       CAPACITY_E2E_P95_SLO: ${CAPACITY_E2E_P95_SLO:-}
+      CAPACITY_PAYLOAD_PROFILE: ${CAPACITY_PAYLOAD_PROFILE:-}
       OUTBOX_WORKERS: ${OUTBOX_WORKERS:-4}
       NATS_CONSUMER_CONCURRENCY: ${NATS_CONSUMER_CONCURRENCY:-4}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-32}
       CAPACITY_HOST_OS: ${CAPACITY_HOST_OS:-unknown}
       CAPACITY_HOST_ARCH: ${CAPACITY_HOST_ARCH:-unknown}
       CAPACITY_HOST_CPUS: ${CAPACITY_HOST_CPUS:-unknown}

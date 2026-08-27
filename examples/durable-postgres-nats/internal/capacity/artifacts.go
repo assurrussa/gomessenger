@@ -132,12 +132,12 @@ func renderMarkdown(report RunReport) string {
 	builder.WriteString("## Measured stages\n\n")
 	builder.WriteString(
 		"| Rate | Sustainable | Offered | HTTP 202 total | DB accepted | Staged | JetStream | Committed |" +
-			" Effective msg/s | Effective MiB/s | Business p95 | Drain |\n",
+			" Effective msg/s | Effective MiB/s | Business p95 | Inbox p95 | ACK p95 | Drain |\n",
 	)
-	builder.WriteString("|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	builder.WriteString("|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, stage := range report.Stages {
 		_, _ = fmt.Fprintf(&builder,
-			"| %d | %t | %d | %d | %d | %d | %d | %d | %.2f | %.3f | %.2f ms | %.2f s |\n",
+			"| %d | %t | %d | %d | %d | %d | %d | %d | %.2f | %.3f | %.2f ms | %.2f ms | %.2f ms | %.2f s |\n",
 			stage.TargetRate,
 			stage.Sustainable,
 			stage.LoadWindow.Offered,
@@ -149,6 +149,8 @@ func renderMarkdown(report RunReport) string {
 			stage.EffectiveMessagesPerSec,
 			stage.EffectiveMiBPerSec,
 			stage.Latency.P95Millis,
+			stage.InboxHandle.P95Millis,
+			stage.BrokerAck.P95Millis,
 			stage.DrainSeconds,
 		)
 	}
@@ -171,6 +173,14 @@ func renderMarkdown(report RunReport) string {
 		if !stage.Integrity.Passed {
 			builder.WriteString("\nIntegrity failure for `" + stage.StageID + "`: " + strings.Join(stage.Integrity.Reasons, "; ") + ".\n")
 		}
+		builder.WriteString("\nPostgreSQL load-window statements for `" + stage.StageID + "`:\n\n")
+		builder.WriteString("| Class | Calls | Total time | WAL bytes | Query |\n")
+		builder.WriteString("|---|---:|---:|---:|---|\n")
+		for _, statement := range stage.PostgreSQL.LoadDelta.Statements {
+			_, _ = fmt.Fprintf(&builder, "| %s | %d | %.2f ms | %.0f | `%s` |\n",
+				statement.Classification, statement.Calls, statement.TotalExecTimeMillis,
+				statement.WALBytes, strings.ReplaceAll(statement.Query, "|", "\\|"))
+		}
 	}
 	builder.WriteString("\n## Metric boundary\n\n")
 	builder.WriteString("- `effective msg/s = committed projection delta during the offered window / offered-window seconds`\n")
@@ -191,7 +201,9 @@ func renderMarkdown(report RunReport) string {
 			"- PostgreSQL: `%s`\n"+
 			"- NATS: `%s`\n"+
 			"- k6: `%s`\n"+
-			"- Topology: file-backed JetStream, Outbox workers `%d`, consumer concurrency `%d`\n",
+			"- Topology: file-backed JetStream, Outbox workers `%d`, consumer concurrency `%d`, business DB max-open `%d`\n"+
+			"- PostgreSQL telemetry: compute_query_id `%s`, statement track `%s`, utility track `%s`,"+
+			" I/O timing `%s`, WAL I/O timing `%s`\n",
 		report.Environment.GitCommit,
 		report.Environment.GitDirty,
 		report.Environment.HostOS,
@@ -206,6 +218,12 @@ func renderMarkdown(report RunReport) string {
 		report.Environment.K6Version,
 		report.Environment.OutboxWorkers,
 		report.Environment.ConsumerConcurrency,
+		report.Environment.DBMaxOpenConns,
+		report.Environment.PostgreSQLSettings["compute_query_id"],
+		report.Environment.PostgreSQLSettings["pg_stat_statements.track"],
+		report.Environment.PostgreSQLSettings["pg_stat_statements.track_utility"],
+		report.Environment.PostgreSQLSettings["track_io_timing"],
+		report.Environment.PostgreSQLSettings["track_wal_io_timing"],
 	)
 	return builder.String()
 }

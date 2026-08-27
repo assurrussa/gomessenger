@@ -10,6 +10,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags="-s -w" -o /out/capacity-runner ./cmd/capacity
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags="-s -w" -o /out/inbox-capacity ./cmd/inbox-capacity
 
 FROM scratch AS capacity-api
 
@@ -25,3 +28,10 @@ COPY --from=build /out/capacity-runner /capacity-runner
 COPY examples/durable-postgres-nats/load/capacity.js /scripts/capacity.js
 
 ENTRYPOINT ["/capacity-runner"]
+
+FROM scratch AS inbox-capacity
+
+USER 65532:65532
+COPY --from=build /out/inbox-capacity /inbox-capacity
+
+ENTRYPOINT ["/inbox-capacity"]

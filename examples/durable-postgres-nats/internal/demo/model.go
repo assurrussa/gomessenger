@@ -32,6 +32,12 @@ const (
 	ScenarioRetry   = "retry"
 	ScenarioDLQ     = "dlq"
 
+	// CapacityPayloadSmall is the site-shaped one-item deterministic payload.
+	CapacityPayloadSmall = "small"
+	// CapacityPayloadMixed is the existing 80/15/5 capacity payload mix.
+	CapacityPayloadMixed = "mixed"
+	orderCurrencyUSD     = "USD"
+
 	maxOrderIDBytes    = 160
 	maxCustomerIDBytes = 128
 	maxSKUBytes        = 64
@@ -154,7 +160,26 @@ func CapacityRequest(sequence uint64, orderID string) CreateOrderRequest {
 	}
 	return CreateOrderRequest{
 		OrderID: orderID, CustomerID: fmt.Sprintf("customer-%04d", sequence%10_000),
-		Currency: "USD", Items: items, Note: strings.Repeat("n", noteBytes),
+		Currency: orderCurrencyUSD, Items: items, Note: strings.Repeat("n", noteBytes),
+	}
+}
+
+// CapacityRequestForProfile returns a deterministic order for a named load profile.
+func CapacityRequestForProfile(profile string, sequence uint64, orderID string) (CreateOrderRequest, error) {
+	switch profile {
+	case CapacityPayloadSmall:
+		return CreateOrderRequest{
+			OrderID: orderID, CustomerID: fmt.Sprintf("customer-%04d", sequence%10_000), Currency: orderCurrencyUSD,
+			Items: []LineItem{{
+				SKU: fmt.Sprintf("SKU-%03d-00", sequence%1_000), Quantity: 1,
+				UnitPrice: 100 + int64(sequence%5_000),
+			}},
+			Note: strings.Repeat("n", 64),
+		}, nil
+	case CapacityPayloadMixed:
+		return CapacityRequest(sequence, orderID), nil
+	default:
+		return CreateOrderRequest{}, fmt.Errorf("unsupported capacity payload profile %q", profile)
 	}
 }
 

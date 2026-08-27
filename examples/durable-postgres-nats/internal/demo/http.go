@@ -23,7 +23,7 @@ type capacityHTTPService interface {
 		offeredAt time.Time,
 	) (messenger.Receipt, error)
 	Readiness(ctx context.Context) error
-	Stats(ctx context.Context) (AppStats, error)
+	Stats(ctx context.Context, labels BenchmarkLabels) (AppStats, error)
 }
 
 type capacityHTTPHandler struct {
@@ -162,7 +162,16 @@ func (h *capacityHTTPHandler) health(writer http.ResponseWriter, request *http.R
 func (h *capacityHTTPHandler) stats(writer http.ResponseWriter, request *http.Request) {
 	probeCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 	defer cancel()
-	stats, err := h.service.Stats(probeCtx)
+	labels := BenchmarkLabels{
+		RunID: request.URL.Query().Get("runId"), StageID: request.URL.Query().Get("stageId"),
+	}
+	if labels != (BenchmarkLabels{}) {
+		if err := labels.Validate(); err != nil {
+			writeJSONError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	stats, err := h.service.Stats(probeCtx, labels)
 	if err != nil {
 		writeJSONError(writer, http.StatusServiceUnavailable, err.Error())
 		return

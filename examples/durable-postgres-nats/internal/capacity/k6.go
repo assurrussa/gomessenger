@@ -58,6 +58,7 @@ func startK6(
 		"CAPACITY_PREALLOCATED_VUS="+strconv.Itoa(preallocatedVUs),
 		"CAPACITY_MAX_VUS="+strconv.Itoa(maximumVUs),
 		"CAPACITY_K6_SUMMARY="+summaryPath,
+		"CAPACITY_PAYLOAD_PROFILE="+config.PayloadProfile,
 	)
 	writer := io.MultiWriter(os.Stdout, logFile)
 	command.Stdout = writer

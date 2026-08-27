@@ -155,7 +155,7 @@ func runScenarios(
 
 func correctnessOrder(orderID string, amount int64, scenario string) OrderCreated {
 	return OrderCreated{
-		OrderID: orderID, CustomerID: "correctness-customer", Currency: "USD",
+		OrderID: orderID, CustomerID: "correctness-customer", Currency: orderCurrencyUSD,
 		Items:  []LineItem{{SKU: "CORRECTNESS", Quantity: 1, UnitPrice: amount}},
 		Amount: amount, Scenario: scenario,
 	}

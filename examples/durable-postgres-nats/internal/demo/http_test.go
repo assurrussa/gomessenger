@@ -38,7 +38,7 @@ func (s *httpServiceStub) StageOrder(
 	return s.receipt, s.stageErr
 }
 func (s *httpServiceStub) Readiness(context.Context) error { return s.readyErr }
-func (s *httpServiceStub) Stats(context.Context) (AppStats, error) {
+func (s *httpServiceStub) Stats(context.Context, BenchmarkLabels) (AppStats, error) {
 	return AppStats{Ready: s.readyErr == nil}, nil
 }
 

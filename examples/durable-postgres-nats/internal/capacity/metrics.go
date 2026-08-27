@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
 const (
@@ -29,6 +31,7 @@ type stageReportInput struct {
 	latency        LatencyStats
 	envelopes      EnvelopeStats
 	integrity      IntegrityResult
+	postgres       pgtelemetry.Timeline
 }
 
 func buildStageReport(input stageReportInput) StageReport {
@@ -68,7 +71,10 @@ func buildStageReport(input stageReportInput) StageReport {
 		AcceptedMessagesPerSec:  ratePerSecond(loadCounts.BusinessAccepted, loadSeconds),
 		BacklogSlopePerSec:      backlogSlope(input.samples, loadSeconds),
 		Latency:                 input.latency,
+		InboxHandle:             input.final.Application.Consumer.InboxHandle,
+		BrokerAck:               input.final.Application.Consumer.BrokerAck,
 		Envelopes:               input.envelopes,
+		PostgreSQL:              input.postgres,
 		K6:                      input.k6,
 		Integrity:               input.integrity,
 		InboxDuplicates: nonNegativeDelta(
@@ -174,6 +180,12 @@ func sustainabilityReasons(config Config, report StageReport) []string {
 	}
 	if report.DLQMessages != 0 {
 		reasons = append(reasons, fmt.Sprintf("DLQ received %d messages", report.DLQMessages))
+	}
+	if report.InboxHandle.Errors != 0 || report.BrokerAck.Errors != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"consumer observations contain errors (handle=%d broker_ack=%d)",
+			report.InboxHandle.Errors, report.BrokerAck.Errors,
+		))
 	}
 	return reasons
 }

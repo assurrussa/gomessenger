@@ -11,7 +11,13 @@ const duration = requiredEnv('CAPACITY_DURATION');
 const preAllocatedVUs = positiveInteger('CAPACITY_PREALLOCATED_VUS');
 const maxVUs = positiveInteger('CAPACITY_MAX_VUS');
 const summaryPath = requiredEnv('CAPACITY_K6_SUMMARY');
+const payloadProfile = requiredEnv('CAPACITY_PAYLOAD_PROFILE');
 
+if (payloadProfile !== 'small' && payloadProfile !== 'mixed') {
+  throw new Error(`unsupported CAPACITY_PAYLOAD_PROFILE ${payloadProfile}`);
+}
+
+const siteNote = 'n'.repeat(64);
 const smallNote = 'n'.repeat(256);
 const mediumNote = 'n'.repeat(4 * 1024);
 const largeNote = 'n'.repeat(64 * 1024);
@@ -73,6 +79,19 @@ export function handleSummary(data) {
 }
 
 function orderFor(sequence) {
+	if (payloadProfile === 'small') {
+		return {
+			orderId: `${runID}-${stageID}-${sequence}`,
+			customerId: `customer-${String(sequence % 10000).padStart(4, '0')}`,
+			currency: 'USD',
+			items: [{
+				sku: `SKU-${String(sequence % 1000).padStart(3, '0')}-00`,
+				quantity: 1,
+				unitPrice: 100 + (sequence % 5000),
+			}],
+			note: siteNote,
+		};
+	}
   const bucket = sequence % 100;
   let itemCount = 1;
   let note = smallNote;

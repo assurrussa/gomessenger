@@ -64,15 +64,16 @@ func CapacityConfig(logger *slog.Logger) Config {
 
 // Application owns the database, Outbox relay, NATS connection, and durable consumer.
 type Application struct {
-	log        *slog.Logger
-	db         *sql.DB
-	connection *natsio.Conn
-	outbox     *outboxruntime.Runtime
-	consumer   *natsadapter.Consumer
-	bus        *messenger.Messenger
-	event      messenger.Event[OrderCreated]
-	attempts   *attemptTracker
-	duplicates *atomic.Int64
+	log          *slog.Logger
+	db           *sql.DB
+	connection   *natsio.Conn
+	outbox       *outboxruntime.Runtime
+	consumer     *natsadapter.Consumer
+	bus          *messenger.Messenger
+	event        messenger.Event[OrderCreated]
+	attempts     *attemptTracker
+	duplicates   *atomic.Int64
+	observations *benchmarkObservationRecorder
 
 	outboxRunner   *runner
 	consumerRunner *runner
@@ -122,7 +123,7 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 		return nil, fmt.Errorf("apply demo topology: %w", err)
 	}
 
-	outboxRuntime, consumer, bus, event, attempts, duplicates, err := buildMessaging(
+	outboxRuntime, consumer, bus, event, attempts, duplicates, observations, err := buildMessaging(
 		ctx, config, db, connection,
 	)
 	if err != nil {
@@ -134,6 +135,7 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 	application.event = event
 	application.attempts = attempts
 	application.duplicates = duplicates
+	application.observations = observations
 
 	// Open's context bounds startup only. Once ready, the host owns the runtime
 	// until Close, even if it releases or cancels that startup context.
@@ -180,6 +182,7 @@ func (a *Application) StageOrder(
 	}
 
 	var receipt messenger.Receipt
+	registeredObservation := false
 	err = a.outbox.Transactor().RunInTx(ctx, func(txCtx context.Context) error {
 		tx := outboxstorage.GetTx(txCtx)
 		if tx == nil {
@@ -201,6 +204,10 @@ func (a *Application) StageOrder(
 		if publishErr != nil {
 			return publishErr
 		}
+		if labels != (BenchmarkLabels{}) {
+			a.observations.register(receipt.MessageID.String(), labels)
+			registeredObservation = true
+		}
 		tag, err := tx.Exec(txCtx, `UPDATE demo.orders
 			SET message_id = $2, accepted_at = clock_timestamp() WHERE id = $1`,
 			payload.OrderID, receipt.MessageID.String())
@@ -213,6 +220,9 @@ func (a *Application) StageOrder(
 		return nil
 	})
 	if err != nil {
+		if registeredObservation {
+			a.observations.unregister(receipt.MessageID.String())
+		}
 		return messenger.Receipt{}, fmt.Errorf("commit business order and Outbox event: %w", err)
 	}
 	if receipt.State != messenger.ReceiptStaged || receipt.MessageID.IsZero() {
@@ -352,6 +362,7 @@ func buildMessaging(
 	messenger.Event[OrderCreated],
 	*attemptTracker,
 	*atomic.Int64,
+	*benchmarkObservationRecorder,
 	error,
 ) {
 	outboxRuntime, err := outboxruntime.Open(ctx, outboxruntime.Config{
@@ -359,7 +370,7 @@ func buildMessaging(
 		IdleTime: 100 * time.Millisecond, ReserveFor: 5 * time.Second, Logger: outboxlogger.Discard(),
 	})
 	if err != nil {
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("open PostgreSQL outbox runtime: %w", err)
 	}
 	closeOutbox := func() { _ = outboxRuntime.Close() }
@@ -369,7 +380,7 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("create NATS route: %w", err)
 	}
 	publisher, err := newMeasurementPublisher(brokerRoute, func(
@@ -398,7 +409,7 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, err
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, err
 	}
 	relay, err := outboxadapter.NewRelayJob(publisher, outboxadapter.RelayJobConfig{
 		ExecutionTimeout: 5 * time.Second,
@@ -406,12 +417,12 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("create Outbox relay: %w", err)
 	}
 	if err := outboxRuntime.Service().RegisterJob(relay); err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("register Outbox relay: %w", err)
 	}
 	producer, err := outboxadapter.NewProducer(outboxRuntime.Service(), outboxadapter.ProducerConfig{
@@ -419,13 +430,13 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("create Outbox producer: %w", err)
 	}
 	measuredProducer, err := newMeasurementRoute(producer)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, err
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, err
 	}
 
 	event := messenger.MustEvent("orders.created", 1, messenger.JSON[OrderCreated]())
@@ -434,7 +445,7 @@ func buildMessaging(
 	bus, _, err := builder.Build()
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("build producer messenger: %w", err)
 	}
 
@@ -442,18 +453,19 @@ func buildMessaging(
 		inboxpgsql.WithSchema(Namespace), inboxpgsql.WithTablePrefix("gm_"))
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("create PostgreSQL inbox: %w", err)
 	}
 	observed := &observingInbox{delegate: durableInbox}
 	store, err := inbox.New(observed)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("observe PostgreSQL inbox: %w", err)
 	}
 	attempts := newAttemptTracker()
 	application := &handlerApplication{log: config.Logger, attempts: attempts}
+	observations := newBenchmarkObservationRecorder()
 	consumer, err := natsadapter.NewEventConsumer(
 		connection,
 		store,
@@ -466,14 +478,15 @@ func buildMessaging(
 			BaseRetry: 250 * time.Millisecond, MaxRetry: 500 * time.Millisecond,
 			AckWait: 2 * time.Second, DLQSubject: DLQSubject, Replicas: 1,
 			MemoryStorage: !config.FileStorage, Logger: messenger.AdaptSlog(config.Logger),
+			Observers: []messenger.Observer{observations},
 		},
 	)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
 			fmt.Errorf("create durable consumer: %w", err)
 	}
-	return outboxRuntime, consumer, bus, event, attempts, &observed.duplicates, nil
+	return outboxRuntime, consumer, bus, event, attempts, &observed.duplicates, observations, nil
 }
 
 type handlerApplication struct {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"example.com/gomessenger-durable-postgres-nats/internal/demo"
+	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
 // IntegrityError reports a completed stage whose accepted messages could not
@@ -81,7 +82,7 @@ func Run(ctx context.Context, config Config, log *slog.Logger) (report RunReport
 			SampleIntervalSeconds: config.SampleInterval.Seconds(),
 			E2EP95SLOMillis:       float64(config.E2EP95SLO.Milliseconds()),
 			MinimumRate:           config.MinimumRate,
-			PayloadProfile:        "deterministic 80% small / 15% medium / 5% large orders",
+			PayloadProfile:        config.PayloadProfile,
 		},
 		IntegrityPassed: true,
 		Stages:          make([]StageReport, 0, len(config.Rates)),
@@ -89,6 +90,7 @@ func Run(ctx context.Context, config Config, log *slog.Logger) (report RunReport
 			HostOS: config.HostOS, HostArch: config.HostArch, HostCPUs: config.HostCPUs,
 			GitCommit: config.GitCommit, GitDirty: config.GitDirty,
 			OutboxWorkers: config.OutboxWorkers, ConsumerConcurrency: config.ConsumerConcurrency,
+			DBMaxOpenConns:   config.DBMaxOpenConns,
 			JetStreamStorage: "file",
 		},
 	}
@@ -200,10 +202,15 @@ func (e *execution) runMeasuredStages(ctx context.Context, report *RunReport) (i
 	return 0, nil
 }
 
+//nolint:gocognit // This is the single bounded orchestration state machine for load, snapshots, and drain.
 func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, error) {
 	labels := demo.BenchmarkLabels{RunID: e.config.RunID, StageID: spec.id}
 	if err := waitQuiescent(ctx, e.config, e.probe, labels); err != nil {
 		return StageReport{}, fmt.Errorf("prepare stage %s: %w", spec.id, err)
+	}
+	postgresBefore, err := e.probe.postgresSnapshot(ctx)
+	if err != nil {
+		return StageReport{}, err
 	}
 	initial, err := e.probe.snapshot(ctx, labels, "load", 0)
 	if err != nil {
@@ -228,6 +235,7 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 	var loadEndedAt time.Time
 	var commandErr error
 	var k6Result K6Result
+	var postgresLoadEnd pgtelemetry.Snapshot
 	for loadEnd.ObservedAt.IsZero() {
 		select {
 		case <-ctx.Done():
@@ -241,6 +249,10 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 				)
 			}
 			if k6Result, err = process.finish(commandErr); err != nil {
+				return StageReport{}, err
+			}
+			postgresLoadEnd, err = e.probe.postgresSnapshot(ctx)
+			if err != nil {
 				return StageReport{}, err
 			}
 			loadEnd, loadStartedAt, err = takeLoadEndSample(
@@ -271,6 +283,15 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 	if err != nil {
 		return StageReport{}, err
 	}
+	observedApplication, err := e.probe.applicationStats(ctx, labels)
+	if err != nil {
+		return StageReport{}, err
+	}
+	drain.final.Application.Consumer = observedApplication.Consumer
+	postgresAfterDrain, err := e.probe.postgresSnapshot(ctx)
+	if err != nil {
+		return StageReport{}, err
+	}
 	latency, err := e.probe.latencyStats(ctx, labels)
 	if err != nil {
 		return StageReport{}, err
@@ -297,6 +318,7 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		drainDuration: drain.duration, drainCompleted: drain.completedWithinLimit,
 		initial: initial, loadEnd: loadEnd, final: drain.final, samples: samples,
 		k6: k6Result, latency: latency, envelopes: envelopes, integrity: integrity,
+		postgres: pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postgresAfterDrain),
 	})
 	return report, nil
 }

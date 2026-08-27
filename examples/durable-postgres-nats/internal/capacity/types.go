@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"example.com/gomessenger-durable-postgres-nats/internal/demo"
+	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
 const reportSpecVersion = "1.0"
@@ -29,14 +30,15 @@ type BrokerSnapshot struct {
 
 // Sample is one point in the load or drain timeline.
 type Sample struct {
-	ObservedAt     time.Time        `json:"observedAt"`
-	RunID          string           `json:"runId"`
-	StageID        string           `json:"stageId"`
-	Phase          string           `json:"phase"`
-	ElapsedSeconds float64          `json:"elapsedSeconds"`
-	Business       BusinessSnapshot `json:"business"`
-	Broker         BrokerSnapshot   `json:"broker"`
-	Application    demo.AppStats    `json:"application"`
+	ObservedAt      time.Time               `json:"observedAt"`
+	RunID           string                  `json:"runId"`
+	StageID         string                  `json:"stageId"`
+	Phase           string                  `json:"phase"`
+	ElapsedSeconds  float64                 `json:"elapsedSeconds"`
+	Business        BusinessSnapshot        `json:"business"`
+	Broker          BrokerSnapshot          `json:"broker"`
+	Application     demo.AppStats           `json:"application"`
+	PostgreSQLWaits []pgtelemetry.WaitEvent `json:"postgresqlWaits,omitempty"`
 }
 
 // K6Result is the normalized subset of one k6 summary used by classification.
@@ -97,51 +99,56 @@ type IntegrityResult struct {
 
 // StageReport is the durable result for one warm-up or measured rate.
 type StageReport struct {
-	StageID                 string          `json:"stageId"`
-	Warmup                  bool            `json:"warmup"`
-	TargetRate              int             `json:"targetRate"`
-	LoadStartedAt           time.Time       `json:"loadStartedAt"`
-	LoadEndedAt             time.Time       `json:"loadEndedAt"`
-	LoadWindowSeconds       float64         `json:"loadWindowSeconds"`
-	DrainSeconds            float64         `json:"drainSeconds"`
-	DrainCompleted          bool            `json:"drainCompleted"`
-	LoadWindow              StageCounts     `json:"loadWindow"`
-	AfterDrain              StageCounts     `json:"afterDrain"`
-	EffectiveMessagesPerSec float64         `json:"effectiveMessagesPerSecond"`
-	EffectiveMiBPerSec      float64         `json:"effectiveMiBPerSecond"`
-	AcceptedMessagesPerSec  float64         `json:"acceptedMessagesPerSecond"`
-	BacklogSlopePerSec      float64         `json:"backlogSlopePerSecond"`
-	MaxBusinessBacklog      int64           `json:"maxBusinessBacklog"`
-	MaxOutboxBacklog        int64           `json:"maxOutboxBacklog"`
-	MaxConsumerPending      uint64          `json:"maxConsumerPending"`
-	MaxBrokerRedelivered    int             `json:"maxBrokerRedelivered"`
-	InboxDuplicates         int64           `json:"inboxDuplicates"`
-	DLQMessages             int64           `json:"dlqMessages"`
-	Latency                 LatencyStats    `json:"latency"`
-	Envelopes               EnvelopeStats   `json:"envelopes"`
-	K6                      K6Result        `json:"k6"`
-	Sustainable             bool            `json:"sustainable"`
-	UnsustainableReasons    []string        `json:"unsustainableReasons,omitempty"`
-	Integrity               IntegrityResult `json:"integrity"`
+	StageID                 string               `json:"stageId"`
+	Warmup                  bool                 `json:"warmup"`
+	TargetRate              int                  `json:"targetRate"`
+	LoadStartedAt           time.Time            `json:"loadStartedAt"`
+	LoadEndedAt             time.Time            `json:"loadEndedAt"`
+	LoadWindowSeconds       float64              `json:"loadWindowSeconds"`
+	DrainSeconds            float64              `json:"drainSeconds"`
+	DrainCompleted          bool                 `json:"drainCompleted"`
+	LoadWindow              StageCounts          `json:"loadWindow"`
+	AfterDrain              StageCounts          `json:"afterDrain"`
+	EffectiveMessagesPerSec float64              `json:"effectiveMessagesPerSecond"`
+	EffectiveMiBPerSec      float64              `json:"effectiveMiBPerSecond"`
+	AcceptedMessagesPerSec  float64              `json:"acceptedMessagesPerSecond"`
+	BacklogSlopePerSec      float64              `json:"backlogSlopePerSecond"`
+	MaxBusinessBacklog      int64                `json:"maxBusinessBacklog"`
+	MaxOutboxBacklog        int64                `json:"maxOutboxBacklog"`
+	MaxConsumerPending      uint64               `json:"maxConsumerPending"`
+	MaxBrokerRedelivered    int                  `json:"maxBrokerRedelivered"`
+	InboxDuplicates         int64                `json:"inboxDuplicates"`
+	DLQMessages             int64                `json:"dlqMessages"`
+	Latency                 LatencyStats         `json:"latency"`
+	InboxHandle             demo.OperationStats  `json:"inboxHandle"`
+	BrokerAck               demo.OperationStats  `json:"brokerAck"`
+	Envelopes               EnvelopeStats        `json:"envelopes"`
+	PostgreSQL              pgtelemetry.Timeline `json:"postgresql"`
+	K6                      K6Result             `json:"k6"`
+	Sustainable             bool                 `json:"sustainable"`
+	UnsustainableReasons    []string             `json:"unsustainableReasons,omitempty"`
+	Integrity               IntegrityResult      `json:"integrity"`
 }
 
 // Environment records the exact checkout and local execution context.
 type Environment struct {
-	GoVersion           string `json:"goVersion"`
-	ContainerOS         string `json:"containerOs"`
-	ContainerArch       string `json:"containerArch"`
-	ContainerCPUs       int    `json:"containerLogicalCpus"`
-	HostOS              string `json:"hostOs"`
-	HostArch            string `json:"hostArch"`
-	HostCPUs            string `json:"hostLogicalCpus"`
-	GitCommit           string `json:"gitCommit"`
-	GitDirty            string `json:"gitDirty"`
-	PostgreSQLVersion   string `json:"postgresqlVersion"`
-	NATSServerVersion   string `json:"natsServerVersion"`
-	K6Version           string `json:"k6Version"`
-	OutboxWorkers       int    `json:"outboxWorkers"`
-	ConsumerConcurrency int    `json:"consumerConcurrency"`
-	JetStreamStorage    string `json:"jetStreamStorage"`
+	GoVersion           string            `json:"goVersion"`
+	ContainerOS         string            `json:"containerOs"`
+	ContainerArch       string            `json:"containerArch"`
+	ContainerCPUs       int               `json:"containerLogicalCpus"`
+	HostOS              string            `json:"hostOs"`
+	HostArch            string            `json:"hostArch"`
+	HostCPUs            string            `json:"hostLogicalCpus"`
+	GitCommit           string            `json:"gitCommit"`
+	GitDirty            string            `json:"gitDirty"`
+	PostgreSQLVersion   string            `json:"postgresqlVersion"`
+	NATSServerVersion   string            `json:"natsServerVersion"`
+	K6Version           string            `json:"k6Version"`
+	OutboxWorkers       int               `json:"outboxWorkers"`
+	ConsumerConcurrency int               `json:"consumerConcurrency"`
+	DBMaxOpenConns      int               `json:"dbMaxOpenConnections"`
+	JetStreamStorage    string            `json:"jetStreamStorage"`
+	PostgreSQLSettings  map[string]string `json:"postgresqlSettings"`
 }
 
 // ReportConfig is the stable, serializable experiment configuration.

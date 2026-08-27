@@ -1,5 +1,22 @@
 # Implementation notes
 
+## 2026-08-27 — PostgreSQL Inbox measurement baseline
+
+- Added a named PostgreSQL 17 site-shaped capacity profile while preserving the existing PostgreSQL 18 quick/full
+  defaults. The new profile fixes Outbox/consumer concurrency at `1/1`, the business pool at `10`, uses a small
+  deterministic payload by default, and keeps the existing 80/15/5 mix as an explicit override.
+- Enabled capacity-only `pg_stat_statements`, query IDs, utility tracking, I/O timing, and WAL I/O timing. Each full-path
+  stage records before/load-end/post-drain statement, database, WAL, and version-tolerant `pg_stat_io` snapshots plus
+  sampled relevant waits. Controller SQL is marked and excluded from Inbox classification.
+- Attached the existing NATS `OperationHandle` and `OperationBrokerAck` observations without adding consumer SQL. The
+  producer registers `message_id -> run/stage` inside its transaction before commit and removes the mapping on failure.
+- Added a PostgreSQL-only `ProcessAttempt` runner with one transactional handler insert, prebuilt identities and
+  fingerprints, default C1/C4 `20,000`-operation cases, three repetitions, exact integrity checks, and statement/WAL/I/O
+  deltas. A live PostgreSQL 17 smoke completed 100 measured C1 operations and exposed the expected nine fresh-success
+  statements at 100 calls each; this smoke is implementation validation, not the pending comparable baseline matrix.
+- Both isolated runners now write `resources.jsonl` with container CPU, RAM, and cumulative Block I/O alongside ignored
+  reports and raw artifacts. Hosted CI remains unchanged and does not execute performance workloads.
+
 ## 2026-08-27 — reproducible NATS capacity experiment
 
 - Extended `examples/durable-postgres-nats` into a shared application runtime with the original deterministic

@@ -38,6 +38,27 @@ func TestCapacityRequestMixIsDeterministicAndBounded(t *testing.T) {
 	}
 }
 
+func TestCapacityRequestProfiles(t *testing.T) {
+	t.Parallel()
+	small, err := CapacityRequestForProfile(CapacityPayloadSmall, 42, "order-42")
+	if err != nil {
+		t.Fatalf("small profile error = %v", err)
+	}
+	if len(small.Items) != 1 || len(small.Note) != 64 {
+		t.Fatalf("small profile = %#v", small)
+	}
+	mixed, err := CapacityRequestForProfile(CapacityPayloadMixed, 95, "order-95")
+	if err != nil {
+		t.Fatalf("mixed profile error = %v", err)
+	}
+	if len(mixed.Items) != 50 || len(mixed.Note) != 64<<10 {
+		t.Fatalf("mixed profile = items %d note %d", len(mixed.Items), len(mixed.Note))
+	}
+	if _, err := CapacityRequestForProfile("unknown", 1, "order"); err == nil {
+		t.Fatal("unknown payload profile unexpectedly succeeded")
+	}
+}
+
 func TestNewOrderRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 	valid := CapacityRequest(1, "order-1")

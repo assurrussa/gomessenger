@@ -36,19 +36,36 @@ type OutboxStats struct {
 	OldestAgeSeconds float64 `json:"oldestAgeSeconds"`
 }
 
+// OperationStats reports one observed consumer boundary without message labels.
+type OperationStats struct {
+	Count     int64   `json:"count"`
+	Errors    int64   `json:"errors"`
+	P50Millis float64 `json:"p50Millis"`
+	P95Millis float64 `json:"p95Millis"`
+	P99Millis float64 `json:"p99Millis"`
+}
+
+// ConsumerObservationStats separates Inbox transaction time from broker ACK time.
+type ConsumerObservationStats struct {
+	InboxHandle OperationStats `json:"inboxHandle"`
+	BrokerAck   OperationStats `json:"brokerAck"`
+	Duplicates  int64          `json:"duplicates"`
+}
+
 // AppStats is returned by the capacity-only diagnostic endpoint.
 type AppStats struct {
-	ObservedAt      time.Time    `json:"observedAt"`
-	Ready           bool         `json:"ready"`
-	ReadinessError  string       `json:"readinessError,omitempty"`
-	Outbox          OutboxStats  `json:"outbox"`
-	BusinessDB      SQLPoolStats `json:"businessDb"`
-	OutboxDB        PGXPoolStats `json:"outboxDb"`
-	InboxDuplicates int64        `json:"inboxDuplicates"`
+	ObservedAt      time.Time                `json:"observedAt"`
+	Ready           bool                     `json:"ready"`
+	ReadinessError  string                   `json:"readinessError,omitempty"`
+	Outbox          OutboxStats              `json:"outbox"`
+	BusinessDB      SQLPoolStats             `json:"businessDb"`
+	OutboxDB        PGXPoolStats             `json:"outboxDb"`
+	InboxDuplicates int64                    `json:"inboxDuplicates"`
+	Consumer        ConsumerObservationStats `json:"consumer"`
 }
 
 // Stats reads a point-in-time application and pool snapshot.
-func (a *Application) Stats(ctx context.Context) (AppStats, error) {
+func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppStats, error) {
 	if a == nil || a.db == nil || a.outbox == nil {
 		return AppStats{}, errors.New("demo application is not initialized")
 	}
@@ -87,6 +104,7 @@ func (a *Application) Stats(ctx context.Context) (AppStats, error) {
 			AcquireDurationNanos: outboxPool.AcquireDuration().Nanoseconds(),
 		},
 		InboxDuplicates: a.duplicates.Load(),
+		Consumer:        a.observations.stats(labels),
 	}
 	if oldest.Valid && oldest.Float64 > 0 {
 		result.Outbox.OldestAgeSeconds = oldest.Float64

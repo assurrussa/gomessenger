@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -19,20 +20,27 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"example.com/gomessenger-durable-postgres-nats/internal/demo"
+	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
 type probe struct {
-	db       *sql.DB
-	nats     *natsio.Conn
-	stream   jetstream.Stream
-	dlq      jetstream.Stream
-	consumer jetstream.Consumer
-	appURL   string
-	http     *http.Client
+	db               *sql.DB
+	nats             *natsio.Conn
+	stream           jetstream.Stream
+	dlq              jetstream.Stream
+	consumer         jetstream.Consumer
+	appURL           string
+	http             *http.Client
+	postgres         *pgtelemetry.Snapshotter
+	postgresSettings map[string]string
 }
 
 func openProbe(ctx context.Context, config Config) (*probe, error) {
-	db, err := waitProbePostgres(ctx, config.PostgresDSN)
+	probeDSN, err := pgtelemetry.ProbeDSN(config.PostgresDSN)
+	if err != nil {
+		return nil, err
+	}
+	db, err := waitProbePostgres(ctx, probeDSN)
 	if err != nil {
 		return nil, err
 	}
@@ -44,6 +52,16 @@ func openProbe(ctx context.Context, config Config) (*probe, error) {
 	result := &probe{
 		db: db, nats: connection, appURL: config.AppURL,
 		http: &http.Client{Timeout: 3 * time.Second},
+	}
+	result.postgres, err = pgtelemetry.New(db)
+	if err != nil {
+		_ = result.close()
+		return nil, err
+	}
+	result.postgresSettings, err = result.postgres.Ensure(ctx)
+	if err != nil {
+		_ = result.close()
+		return nil, err
 	}
 	return result, nil
 }
@@ -139,10 +157,14 @@ func (p *probe) snapshot(
 	if err != nil {
 		return Sample{}, err
 	}
+	waits, err := p.postgres.Waits(ctx)
+	if err != nil {
+		return Sample{}, err
+	}
 	return Sample{
 		ObservedAt: time.Now().UTC(), RunID: labels.RunID, StageID: labels.StageID,
 		Phase: phase, ElapsedSeconds: elapsed.Seconds(),
-		Business: business, Broker: broker, Application: application,
+		Business: business, Broker: broker, Application: application, PostgreSQLWaits: waits,
 	}, nil
 }
 
@@ -151,7 +173,7 @@ func (p *probe) businessSnapshot(
 	labels demo.BenchmarkLabels,
 ) (BusinessSnapshot, error) {
 	var result BusinessSnapshot
-	err := p.db.QueryRowContext(ctx, `SELECT
+	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
 		(SELECT COUNT(*) FROM demo.orders WHERE run_id = $1 AND stage_id = $2),
 		(SELECT COUNT(*) FROM demo.envelope_measurements WHERE run_id = $1 AND stage_id = $2),
 		(SELECT COUNT(*) FROM demo.envelope_measurements
@@ -178,7 +200,7 @@ func (p *probe) loadWindowBusinessSnapshot(
 	duration time.Duration,
 ) (BusinessSnapshot, time.Time, error) {
 	var offeredAt sql.NullTime
-	if err := p.db.QueryRowContext(ctx, `SELECT MIN(offered_at)
+	if err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT MIN(offered_at)
 		FROM demo.orders WHERE run_id = $1 AND stage_id = $2`,
 		labels.RunID, labels.StageID,
 	).Scan(&offeredAt); err != nil {
@@ -190,7 +212,7 @@ func (p *probe) loadWindowBusinessSnapshot(
 	startedAt := offeredAt.Time.UTC()
 	endedAt := startedAt.Add(duration)
 	var result BusinessSnapshot
-	err := p.db.QueryRowContext(ctx, `SELECT
+	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
 		(SELECT COUNT(*) FROM demo.orders
 			WHERE run_id = $1 AND stage_id = $2 AND accepted_at < $3),
 		(SELECT COUNT(*) FROM demo.envelope_measurements
@@ -236,8 +258,18 @@ func (p *probe) brokerSnapshot(ctx context.Context) (BrokerSnapshot, error) {
 	}, nil
 }
 
-func (p *probe) applicationStats(ctx context.Context) (demo.AppStats, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.appURL+"/benchmark/stats", nil)
+func (p *probe) applicationStats(ctx context.Context, labels ...demo.BenchmarkLabels) (demo.AppStats, error) {
+	endpoint, err := url.Parse(p.appURL + "/benchmark/stats")
+	if err != nil {
+		return demo.AppStats{}, fmt.Errorf("parse application stats URL: %w", err)
+	}
+	if len(labels) != 0 && labels[0] != (demo.BenchmarkLabels{}) {
+		query := endpoint.Query()
+		query.Set("runId", labels[0].RunID)
+		query.Set("stageId", labels[0].StageID)
+		endpoint.RawQuery = query.Encode()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return demo.AppStats{}, fmt.Errorf("build application stats request: %w", err)
 	}
@@ -263,7 +295,7 @@ func (p *probe) latencyStats(
 	labels demo.BenchmarkLabels,
 ) (LatencyStats, error) {
 	var p50, p95, p99 sql.NullFloat64
-	err := p.db.QueryRowContext(ctx, `SELECT
+	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
 		percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (projection.handled_at - business.offered_at))),
 		percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (projection.handled_at - business.offered_at))),
 		percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (projection.handled_at - business.offered_at)))
@@ -288,7 +320,7 @@ func (p *probe) envelopeStats(
 ) (EnvelopeStats, error) {
 	var result EnvelopeStats
 	var p50, p95 sql.NullFloat64
-	err := p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(envelope_bytes), 0),
+	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT COUNT(*), COALESCE(SUM(envelope_bytes), 0),
 		percentile_cont(0.50) WITHIN GROUP (ORDER BY envelope_bytes),
 		percentile_cont(0.95) WITHIN GROUP (ORDER BY envelope_bytes),
 		COALESCE(MAX(envelope_bytes), 0)
@@ -312,7 +344,7 @@ func (p *probe) integrity(
 	labels demo.BenchmarkLabels,
 ) (IntegrityResult, error) {
 	var result IntegrityResult
-	err := p.db.QueryRowContext(ctx, `SELECT
+	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
 		(SELECT COUNT(*) FROM demo.orders WHERE run_id = $1 AND stage_id = $2),
 		(SELECT COUNT(DISTINCT message_id) FROM demo.orders WHERE run_id = $1 AND stage_id = $2),
 		(SELECT COUNT(*) FROM demo.envelope_measurements WHERE run_id = $1 AND stage_id = $2),
@@ -349,7 +381,7 @@ func (p *probe) integrity(
 
 func (p *probe) environment(ctx context.Context, config Config) (Environment, error) {
 	var postgresVersion string
-	if err := p.db.QueryRowContext(ctx, `SHOW server_version`).Scan(&postgresVersion); err != nil {
+	if err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SHOW server_version`).Scan(&postgresVersion); err != nil {
 		return Environment{}, fmt.Errorf("read PostgreSQL version: %w", err)
 	}
 	k6Version := "unknown"
@@ -366,8 +398,17 @@ func (p *probe) environment(ctx context.Context, config Config) (Environment, er
 		HostCPUs: config.HostCPUs, GitCommit: config.GitCommit, GitDirty: config.GitDirty,
 		PostgreSQLVersion: postgresVersion, NATSServerVersion: p.nats.ConnectedServerVersion(),
 		K6Version: k6Version, OutboxWorkers: config.OutboxWorkers,
-		ConsumerConcurrency: config.ConsumerConcurrency, JetStreamStorage: "file",
+		ConsumerConcurrency: config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
+		JetStreamStorage: "file", PostgreSQLSettings: p.postgresSettings,
 	}, nil
+}
+
+func (p *probe) postgresSnapshot(ctx context.Context) (pgtelemetry.Snapshot, error) {
+	snapshot, err := p.postgres.Snapshot(ctx)
+	if err != nil {
+		return pgtelemetry.Snapshot{}, fmt.Errorf("capture PostgreSQL telemetry: %w", err)
+	}
+	return snapshot, nil
 }
 
 func secondsToMillis(value sql.NullFloat64) float64 {

@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - compute_query_id=on
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.track_utility=on
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+    environment:
+      POSTGRES_DB: gomessenger
+      POSTGRES_USER: gomessenger
+      POSTGRES_PASSWORD: gomessenger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gomessenger -d gomessenger"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - inbox-capacity-postgres-data:/var/lib/postgresql
+
+  inbox-capacity:
+    build:
+      context: ../..
+      dockerfile: examples/durable-postgres-nats/Dockerfile.capacity
+      target: inbox-capacity
+    environment:
+      POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable
+      CAPACITY_RESULTS_DIR: /results
+      CAPACITY_RUN_ID: ${CAPACITY_RUN_ID:-}
+      CAPACITY_READY_TIMEOUT: ${CAPACITY_READY_TIMEOUT:-}
+      INBOX_CAPACITY_WARMUP: ${INBOX_CAPACITY_WARMUP:-}
+      INBOX_CAPACITY_OPERATIONS: ${INBOX_CAPACITY_OPERATIONS:-}
+      INBOX_CAPACITY_CONCURRENCIES: ${INBOX_CAPACITY_CONCURRENCIES:-}
+      INBOX_CAPACITY_REPETITIONS: ${INBOX_CAPACITY_REPETITIONS:-}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-10}
+      CAPACITY_HOST_OS: ${CAPACITY_HOST_OS:-unknown}
+      CAPACITY_HOST_ARCH: ${CAPACITY_HOST_ARCH:-unknown}
+      CAPACITY_HOST_CPUS: ${CAPACITY_HOST_CPUS:-unknown}
+      CAPACITY_GIT_COMMIT: ${CAPACITY_GIT_COMMIT:-unknown}
+      CAPACITY_GIT_DIRTY: ${CAPACITY_GIT_DIRTY:-unknown}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../tmp/capacity:/results
+    init: true
+
+volumes:
+  inbox-capacity-postgres-data:
