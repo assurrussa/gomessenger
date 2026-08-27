@@ -140,7 +140,8 @@ make capacity-inbox-postgres
 ```
 
 The default command retains the four-Outbox/four-consumer PostgreSQL 18 profile. The site-shaped command uses
-PostgreSQL 17 with one Outbox worker, one consumer, and a ten-connection business pool; the PostgreSQL-only command
+PostgreSQL 17 with one Outbox worker, one consumer, isolated Outbox producer/relay pools fixed at `9 + 1`, and a
+separate ten-connection Inbox/measurement pool; the PostgreSQL-only command
 isolates the real Inbox `ProcessAttempt` transaction without Outbox or NATS. They report unique committed business
 effects, canonical envelope bytes, Inbox/ACK latency, and PostgreSQL statement/WAL/I/O telemetry. See the
 [example capacity contract](examples/durable-postgres-nats#capacity-experiment). Results describe only the recorded

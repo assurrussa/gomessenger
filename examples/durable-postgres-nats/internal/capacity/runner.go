@@ -54,6 +54,13 @@ type postgresBoundaryResult struct {
 	err      error
 }
 
+type postDrainResult struct {
+	postgres  pgtelemetry.Snapshot
+	latency   LatencyStats
+	envelopes EnvelopeStats
+	integrity IntegrityResult
+}
+
 func (e *MinimumRateError) Error() string {
 	return fmt.Sprintf("maximum sustainable rate %d msg/s is below required %d msg/s", e.Actual, e.Minimum)
 }
@@ -95,8 +102,11 @@ func Run(ctx context.Context, config Config, log *slog.Logger) (report RunReport
 			HostOS: config.HostOS, HostArch: config.HostArch, HostCPUs: config.HostCPUs,
 			GitCommit: config.GitCommit, GitDirty: config.GitDirty,
 			OutboxWorkers: config.OutboxWorkers, ConsumerConcurrency: config.ConsumerConcurrency,
-			DBMaxOpenConns:   config.DBMaxOpenConns,
-			JetStreamStorage: "file",
+			OutboxProducerMaxConns:    config.OutboxProducerMaxConns,
+			OutboxRelayMaxConns:       config.OutboxRelayMaxConns,
+			OutboxPGXConnectionBudget: config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
+			DBMaxOpenConns:            config.DBMaxOpenConns,
+			JetStreamStorage:          "file",
 		},
 	}
 
@@ -327,29 +337,9 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 	if err != nil {
 		return StageReport{}, err
 	}
-	observedApplication, err := e.probe.applicationStats(ctx, labels)
+	postDrain, err := e.reconcileAfterDrain(ctx, labels, spec.duration, loadStartedAt, &loadEnd, &drain)
 	if err != nil {
 		return StageReport{}, err
-	}
-	drain.final.Application.Consumer = observedApplication.Consumer
-	postgresAfterDrain, err := e.probe.postgresSnapshot(ctx)
-	if err != nil {
-		return StageReport{}, err
-	}
-	latency, err := e.probe.latencyStats(ctx, labels)
-	if err != nil {
-		return StageReport{}, err
-	}
-	envelopes, err := e.probe.envelopeStats(ctx, labels)
-	if err != nil {
-		return StageReport{}, err
-	}
-	integrity, err := e.probe.integrity(ctx, labels)
-	if err != nil {
-		return StageReport{}, err
-	}
-	if !drain.fullyDrained {
-		integrity.Reasons = append(integrity.Reasons, "pipeline did not reach a quiescent state for final reconciliation")
 	}
 	reportConfig := e.config
 	reportConfig.StageDuration = spec.duration
@@ -361,10 +351,80 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		loadStartedAt: loadStartedAt, loadEndedAt: loadEndedAt,
 		drainDuration: drain.duration, drainCompleted: drain.completedWithinLimit,
 		initial: initial, loadEnd: loadEnd, final: drain.final, samples: samples,
-		k6: k6Result, latency: latency, envelopes: envelopes, integrity: integrity,
-		postgres: pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postgresAfterDrain),
+		k6: k6Result, latency: postDrain.latency, envelopes: postDrain.envelopes, integrity: postDrain.integrity,
+		postgres: pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postDrain.postgres),
 	})
 	return report, nil
+}
+
+func (e *execution) reconcileAfterDrain(
+	ctx context.Context,
+	labels demo.BenchmarkLabels,
+	duration time.Duration,
+	loadStartedAt time.Time,
+	loadEnd *Sample,
+	drain *drainResult,
+) (postDrainResult, error) {
+	recorderFlushErr := e.probe.flushPublications(ctx)
+	loadWindowBusiness, reconstructedStart, err := e.probe.loadWindowBusinessSnapshot(ctx, labels, duration)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	if !reconstructedStart.Equal(loadStartedAt) {
+		return postDrainResult{}, fmt.Errorf(
+			"load-window start changed during post-drain reconstruction: before=%s after=%s",
+			loadStartedAt.Format(time.RFC3339Nano),
+			reconstructedStart.Format(time.RFC3339Nano),
+		)
+	}
+	loadEnd.Business = loadWindowBusiness
+	finalBusiness, err := e.probe.businessSnapshot(ctx, labels)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	drain.final.Business = finalBusiness
+	observedApplication, err := e.probe.applicationStats(ctx, labels)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	drain.final.Application.Consumer = observedApplication.Consumer
+	postgresAfterDrain, err := e.probe.postgresSnapshot(ctx)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	latency, err := e.probe.latencyStats(ctx, labels)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	envelopes, err := e.probe.envelopeStats(ctx, labels)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	integrity, err := e.probe.integrity(ctx, labels)
+	if err != nil {
+		return postDrainResult{}, err
+	}
+	if !drain.fullyDrained {
+		integrity.Reasons = append(integrity.Reasons, "pipeline did not reach a quiescent state for final reconciliation")
+	}
+	if recorderFlushErr != nil {
+		integrity.Reasons = append(integrity.Reasons, recorderFlushErr.Error())
+	}
+	if observedApplication.Publications.Error != "" {
+		integrity.Reasons = append(
+			integrity.Reasons,
+			"publication recorder is unhealthy: "+observedApplication.Publications.Error,
+		)
+	}
+	if observedApplication.Publications.Pending != 0 {
+		integrity.Reasons = append(integrity.Reasons, fmt.Sprintf(
+			"publication recorder retained %d unflushed confirmations",
+			observedApplication.Publications.Pending,
+		))
+	}
+	return postDrainResult{
+		postgres: postgresAfterDrain, latency: latency, envelopes: envelopes, integrity: integrity,
+	}, nil
 }
 
 func startPostgresBoundarySnapshot(

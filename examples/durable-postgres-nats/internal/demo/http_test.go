@@ -23,6 +23,8 @@ type httpServiceStub struct {
 	labels      BenchmarkLabels
 	payload     OrderCreated
 	offeredAt   time.Time
+	flushErr    error
+	flushCalled bool
 }
 
 func (s *httpServiceStub) StageOrder(
@@ -40,6 +42,11 @@ func (s *httpServiceStub) StageOrder(
 func (s *httpServiceStub) Readiness(context.Context) error { return s.readyErr }
 func (s *httpServiceStub) Stats(context.Context, BenchmarkLabels) (AppStats, error) {
 	return AppStats{Ready: s.readyErr == nil}, nil
+}
+
+func (s *httpServiceStub) FlushPublications(context.Context) error {
+	s.flushCalled = true
+	return s.flushErr
 }
 
 func TestHTTPCreateOrderReturnsAcceptedReceipt(t *testing.T) {
@@ -158,5 +165,35 @@ func TestHTTPCreateOrderDoesNotReturnAcceptedOnStageFailure(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPFlushPublicationsReportsRecorderResult(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: "success", status: http.StatusOK},
+		{name: "failure", err: errors.New("recorder failed"), status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			service := &httpServiceStub{flushErr: test.err}
+			handler, err := NewHTTPHandler(service, slog.New(slog.DiscardHandler))
+			if err != nil {
+				t.Fatalf("NewHTTPHandler() error = %v", err)
+			}
+			request := httptest.NewRequestWithContext(
+				t.Context(), http.MethodPost, "/benchmark/publications/flush", nil,
+			)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status || !service.flushCalled {
+				t.Fatalf("status=%d flushCalled=%v body=%s", response.Code, service.flushCalled, response.Body.String())
+			}
+		})
 	}
 }

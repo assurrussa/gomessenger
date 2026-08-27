@@ -49,9 +49,24 @@ func TestPostgresInboxIntegration(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("create business fixture: %v", err)
 	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE IF NOT EXISTS gomessenger_inbox_test_commit_parent (
+		name TEXT PRIMARY KEY
+	)`); err != nil {
+		t.Fatalf("create commit-failure parent fixture: %v", err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE IF NOT EXISTS gomessenger_inbox_test_commit_effect (
+		name TEXT PRIMARY KEY,
+		parent_name TEXT NOT NULL REFERENCES gomessenger_inbox_test_commit_parent(name)
+			DEFERRABLE INITIALLY DEFERRED
+	)`); err != nil {
+		t.Fatalf("create commit-failure business fixture: %v", err)
+	}
 
 	t.Run("commit duplicate conflict and prune", func(t *testing.T) { testPostgresCommitAndPrune(t, database) })
 	t.Run("handler rollback can retry", func(t *testing.T) { testPostgresRollbackRetry(t, database) })
+	t.Run("attempt commit duplicate and conflict", func(t *testing.T) {
+		testPostgresAttemptCommitAndConflict(t, database)
+	})
 	t.Run("handler attempts survive restart", func(t *testing.T) { testPostgresDurableAttempts(t, database) })
 	t.Run("permanent outcome survives restart", func(t *testing.T) { testPostgresPermanentOutcome(t, database) })
 	t.Run("attempt generation starts fresh bounded cycle", func(t *testing.T) {
@@ -62,6 +77,18 @@ func TestPostgresInboxIntegration(t *testing.T) {
 	})
 	t.Run("concurrent rollback lets waiter commit", func(t *testing.T) {
 		testPostgresConcurrentRollback(t, database)
+	})
+	t.Run("concurrent identical attempt runs one handler", func(t *testing.T) {
+		testPostgresAttemptConcurrentCommit(t, database)
+	})
+	t.Run("concurrent failed attempt lets waiter commit", func(t *testing.T) {
+		testPostgresAttemptConcurrentRollback(t, database)
+	})
+	t.Run("attempt cancellation rolls back handler write", func(t *testing.T) {
+		testPostgresAttemptCancellation(t, database)
+	})
+	t.Run("attempt finalization failures roll back handler write", func(t *testing.T) {
+		testPostgresAttemptFinalizationFailures(t, database)
 	})
 	t.Run("custom schema and prefix", func(t *testing.T) {
 		testPostgresCustomNamespace(t, database)
@@ -144,15 +171,55 @@ func testPostgresCustomNamespace(t *testing.T, database *sql.DB) {
 	}
 
 	attemptKey := postgresKey(t, "custom-namespace-attempt")
-	attemptKey.AttemptGeneration = "gm-custom-replay"
 	if result, processErr := store.ProcessAttempt(
 		t.Context(), attemptKey, postgresFingerprint("custom-namespace-attempt"), 2,
 		func(context.Context) error { return nil },
 	); processErr != nil || result.Attempt != 1 {
+		t.Fatalf("custom attempt = %#v, %v", result, processErr)
+	}
+	generationKey := postgresKey(t, "custom-namespace-attempt-generation")
+	generationKey.AttemptGeneration = "gm-custom-replay"
+	if result, processErr := store.ProcessAttempt(
+		t.Context(), generationKey, postgresFingerprint("custom-namespace-attempt-generation"), 2,
+		func(context.Context) error { return nil },
+	); processErr != nil || result.Attempt != 1 {
 		t.Fatalf("custom attempt generation = %#v, %v", result, processErr)
 	}
-	if pruned, pruneErr := store.Prune(t.Context(), time.Now().Add(time.Minute), 10); pruneErr != nil || pruned != 2 {
+	if pruned, pruneErr := store.Prune(t.Context(), time.Now().Add(time.Minute), 10); pruneErr != nil || pruned != 3 {
 		t.Fatalf("custom prune = %d, %v", pruned, pruneErr)
+	}
+}
+
+func testPostgresAttemptCommitAndConflict(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "attempt-commit")
+	fingerprint := postgresFingerprint("attempt-commit")
+	var calls atomic.Int32
+	handler := func(ctx context.Context) error {
+		calls.Add(1)
+		return incrementPostgresBusiness(ctx, "attempt-commit")
+	}
+	result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, handler)
+	if err != nil || result.Duplicate || result.Attempt != 1 {
+		t.Fatalf("fresh attempt = %#v, %v", result, err)
+	}
+	result, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, handler)
+	if err != nil || !result.Duplicate || result.Attempt != 1 || calls.Load() != 1 {
+		t.Fatalf("duplicate attempt = %#v, calls=%d, error=%v", result, calls.Load(), err)
+	}
+	_, err = store.ProcessAttempt(
+		t.Context(), key, postgresFingerprint("attempt-conflict"), 3,
+		func(context.Context) error {
+			t.Fatal("handler ran for a fingerprint conflict")
+			return nil
+		},
+	)
+	if !errors.Is(err, inbox.ErrFingerprintConflict) || calls.Load() != 1 ||
+		postgresBusinessValue(t, database, "attempt-commit") != 1 {
+		t.Fatalf("attempt conflict calls=%d value=%d error=%v", calls.Load(),
+			postgresBusinessValue(t, database, "attempt-commit"), err)
 	}
 }
 
@@ -424,6 +491,215 @@ func testPostgresConcurrentRollback(t *testing.T, database *sql.DB) {
 	}
 }
 
+type postgresAttemptOutcome struct {
+	result inbox.Result
+	err    error
+}
+
+func testPostgresAttemptConcurrentCommit(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "attempt-concurrent-commit")
+	fingerprint := postgresFingerprint("attempt-concurrent-commit")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	outcomes := make(chan postgresAttemptOutcome, 2)
+	go func() {
+		result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			calls.Add(1)
+			close(started)
+			<-release
+			return incrementPostgresBusiness(ctx, "attempt-concurrent-commit")
+		})
+		outcomes <- postgresAttemptOutcome{result: result, err: err}
+	}()
+	<-started
+	go func() {
+		result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			calls.Add(1)
+			return incrementPostgresBusiness(ctx, "attempt-concurrent-commit")
+		})
+		outcomes <- postgresAttemptOutcome{result: result, err: err}
+	}()
+	close(release)
+	duplicates := 0
+	for range 2 {
+		outcome := <-outcomes
+		if outcome.err != nil || outcome.result.Attempt != 1 {
+			t.Fatalf("concurrent attempt outcome = %#v, %v", outcome.result, outcome.err)
+		}
+		if outcome.result.Duplicate {
+			duplicates++
+		}
+	}
+	if duplicates != 1 || calls.Load() != 1 ||
+		postgresBusinessValue(t, database, "attempt-concurrent-commit") != 1 {
+		t.Fatalf("duplicates=%d calls=%d value=%d", duplicates, calls.Load(),
+			postgresBusinessValue(t, database, "attempt-concurrent-commit"))
+	}
+}
+
+func testPostgresAttemptConcurrentRollback(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "attempt-concurrent-rollback")
+	fingerprint := postgresFingerprint("attempt-concurrent-rollback")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	wantErr := errors.New("first attempt rollback")
+	outcomes := make(chan postgresAttemptOutcome, 2)
+	go func() {
+		result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			if writeErr := incrementPostgresBusiness(ctx, "attempt-concurrent-rollback"); writeErr != nil {
+				return writeErr
+			}
+			close(started)
+			<-release
+			return wantErr
+		})
+		outcomes <- postgresAttemptOutcome{result: result, err: err}
+	}()
+	<-started
+	go func() {
+		result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			return incrementPostgresBusiness(ctx, "attempt-concurrent-rollback")
+		})
+		outcomes <- postgresAttemptOutcome{result: result, err: err}
+	}()
+	close(release)
+	failed := false
+	succeeded := false
+	for range 2 {
+		outcome := <-outcomes
+		switch {
+		case errors.Is(outcome.err, wantErr):
+			failed = outcome.result.Attempt == 1 && !outcome.result.Duplicate
+		case outcome.err == nil:
+			succeeded = outcome.result.Attempt == 2 && !outcome.result.Duplicate
+		default:
+			t.Fatalf("unexpected concurrent attempt error: %v", outcome.err)
+		}
+	}
+	if !failed || !succeeded || postgresBusinessValue(t, database, "attempt-concurrent-rollback") != 1 {
+		t.Fatalf("failed=%t succeeded=%t value=%d", failed, succeeded,
+			postgresBusinessValue(t, database, "attempt-concurrent-rollback"))
+	}
+}
+
+func testPostgresAttemptCancellation(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "attempt-cancellation")
+	fingerprint := postgresFingerprint("attempt-cancellation")
+	ctx, cancel := context.WithCancel(t.Context())
+	result, err := store.ProcessAttempt(ctx, key, fingerprint, 3, func(handlerCtx context.Context) error {
+		if writeErr := incrementPostgresBusiness(handlerCtx, "attempt-cancellation"); writeErr != nil {
+			return writeErr
+		}
+		cancel()
+		return nil
+	})
+	if err == nil || result.Attempt != 0 || postgresBusinessValue(t, database, "attempt-cancellation") != 0 {
+		t.Fatalf("cancelled attempt = %#v, value=%d, error=%v", result,
+			postgresBusinessValue(t, database, "attempt-cancellation"), err)
+	}
+	assertPostgresAttemptStateAbsent(t, database, key)
+	result, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(handlerCtx context.Context) error {
+		return incrementPostgresBusiness(handlerCtx, "attempt-cancellation")
+	})
+	if err != nil || result.Attempt != 1 || result.Duplicate ||
+		postgresBusinessValue(t, database, "attempt-cancellation") != 1 {
+		t.Fatalf("retry after cancellation = %#v, value=%d, error=%v", result,
+			postgresBusinessValue(t, database, "attempt-cancellation"), err)
+	}
+}
+
+func testPostgresAttemptFinalizationFailures(t *testing.T, database *sql.DB) {
+	t.Helper()
+	t.Run("mark complete", func(t *testing.T) {
+		resetPostgresFixtures(t, database)
+		if _, err := database.ExecContext(t.Context(), `CREATE OR REPLACE FUNCTION
+			gomessenger_inbox_test_reject_mark() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'forced Inbox mark failure';
+				RETURN NEW;
+			END
+			$$`); err != nil {
+			t.Fatalf("create mark-failure function: %v", err)
+		}
+		if _, err := database.ExecContext(t.Context(), `CREATE TRIGGER gomessenger_inbox_test_reject_mark
+			BEFORE UPDATE OF completed_at ON gomessenger_inbox
+			FOR EACH ROW WHEN (NEW.consumer_id = 'postgres-attempt-mark-failure')
+			EXECUTE FUNCTION gomessenger_inbox_test_reject_mark()`); err != nil {
+			t.Fatalf("create mark-failure trigger: %v", err)
+		}
+		t.Cleanup(func() {
+			if _, err := database.ExecContext(context.Background(),
+				`DROP TRIGGER IF EXISTS gomessenger_inbox_test_reject_mark ON gomessenger_inbox`); err != nil {
+				t.Errorf("drop mark-failure trigger: %v", err)
+			}
+			if _, err := database.ExecContext(context.Background(),
+				`DROP FUNCTION IF EXISTS gomessenger_inbox_test_reject_mark()`); err != nil {
+				t.Errorf("drop mark-failure function: %v", err)
+			}
+		})
+
+		key := postgresKey(t, "attempt-mark-failure")
+		result, err := newPostgresStore(t, database).ProcessAttempt(
+			t.Context(), key, postgresFingerprint("attempt-mark-failure"), 3,
+			func(ctx context.Context) error { return incrementPostgresBusiness(ctx, "attempt-mark-failure") },
+		)
+		if err == nil || result.Attempt != 0 || postgresBusinessValue(t, database, "attempt-mark-failure") != 0 {
+			t.Fatalf("mark failure = %#v, value=%d, error=%v", result,
+				postgresBusinessValue(t, database, "attempt-mark-failure"), err)
+		}
+		assertPostgresAttemptStateAbsent(t, database, key)
+	})
+
+	t.Run("commit", func(t *testing.T) {
+		resetPostgresFixtures(t, database)
+		store := newPostgresStore(t, database)
+		key := postgresKey(t, "attempt-commit-failure")
+		fingerprint := postgresFingerprint("attempt-commit-failure")
+		result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			tx, ok := inbox.SQLTxFromContext(ctx)
+			if !ok {
+				return errors.New("missing PostgreSQL inbox transaction")
+			}
+			_, execErr := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_test_commit_effect(name, parent_name)
+				VALUES ($1, $2)`, "attempt-commit-failure", "missing-parent")
+			return execErr
+		})
+		if err == nil || result.Attempt != 0 || postgresCommitEffectCount(t, database) != 0 {
+			t.Fatalf("commit failure = %#v, effects=%d, error=%v", result,
+				postgresCommitEffectCount(t, database), err)
+		}
+		assertPostgresAttemptStateAbsent(t, database, key)
+
+		if _, err := database.ExecContext(t.Context(),
+			`INSERT INTO gomessenger_inbox_test_commit_parent(name) VALUES ($1)`, "missing-parent"); err != nil {
+			t.Fatalf("insert commit-failure parent: %v", err)
+		}
+		result, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+			tx, ok := inbox.SQLTxFromContext(ctx)
+			if !ok {
+				return errors.New("missing PostgreSQL inbox transaction")
+			}
+			_, execErr := tx.ExecContext(ctx, `INSERT INTO gomessenger_inbox_test_commit_effect(name, parent_name)
+				VALUES ($1, $2)`, "attempt-commit-failure", "missing-parent")
+			return execErr
+		})
+		if err != nil || result.Attempt != 1 || result.Duplicate || postgresCommitEffectCount(t, database) != 1 {
+			t.Fatalf("retry after commit failure = %#v, effects=%d, error=%v", result,
+				postgresCommitEffectCount(t, database), err)
+		}
+	})
+}
+
 func newPostgresStore(t *testing.T, database *sql.DB) *inbox.Store {
 	t.Helper()
 	store, err := pgsql.New(database)
@@ -437,7 +713,10 @@ func resetPostgresFixtures(t *testing.T, database *sql.DB) {
 	t.Helper()
 	if _, err := database.ExecContext(t.Context(), `TRUNCATE gomessenger_inbox_attempt_generations,
 		gomessenger_inbox_attempts,
-		gomessenger_inbox, gomessenger_inbox_test_business`); err != nil {
+		gomessenger_inbox,
+		gomessenger_inbox_test_commit_effect,
+		gomessenger_inbox_test_commit_parent,
+		gomessenger_inbox_test_business`); err != nil {
 		t.Fatalf("reset PostgreSQL fixtures: %v", err)
 	}
 }
@@ -478,6 +757,35 @@ func postgresBusinessValue(t *testing.T, database *sql.DB, name string) int64 {
 		t.Fatalf("read PostgreSQL business value: %v", err)
 	}
 	return value
+}
+
+func postgresCommitEffectCount(t *testing.T, database *sql.DB) int64 {
+	t.Helper()
+	var count int64
+	if err := database.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM gomessenger_inbox_test_commit_effect`).Scan(&count); err != nil {
+		t.Fatalf("count PostgreSQL commit effects: %v", err)
+	}
+	return count
+}
+
+func assertPostgresAttemptStateAbsent(t *testing.T, database *sql.DB, key inbox.Key) {
+	t.Helper()
+	var identities int64
+	var attempts int64
+	if err := database.QueryRowContext(t.Context(), `SELECT
+		(SELECT COUNT(*) FROM gomessenger_inbox
+			WHERE consumer_id = $1 AND source = $2 AND message_id = $3),
+		(SELECT COUNT(*) FROM gomessenger_inbox_attempts
+			WHERE consumer_id = $1 AND source = $2 AND message_id = $3) +
+		(SELECT COUNT(*) FROM gomessenger_inbox_attempt_generations
+			WHERE consumer_id = $1 AND source = $2 AND message_id = $3)`,
+		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&identities, &attempts); err != nil {
+		t.Fatalf("inspect PostgreSQL attempt state: %v", err)
+	}
+	if identities != 0 || attempts != 0 {
+		t.Fatalf("PostgreSQL attempt state remained: identities=%d attempts=%d", identities, attempts)
+	}
 }
 
 func assertConcurrentResults(

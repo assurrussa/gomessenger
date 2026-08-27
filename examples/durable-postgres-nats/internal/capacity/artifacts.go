@@ -201,7 +201,9 @@ func renderMarkdown(report RunReport) string {
 			"- PostgreSQL: `%s`\n"+
 			"- NATS: `%s`\n"+
 			"- k6: `%s`\n"+
-			"- Topology: file-backed JetStream, Outbox workers `%d`, consumer concurrency `%d`, business DB max-open `%d`\n"+
+			"- Topology: file-backed JetStream, Outbox workers `%d`, "+
+			"producer/relay pgx `%d + %d = %d`, consumer concurrency `%d`, "+
+			"business DB max-open `%d`\n"+
 			"- PostgreSQL telemetry: compute_query_id `%s`, statement track `%s`, utility track `%s`,"+
 			" I/O timing `%s`, WAL I/O timing `%s`\n",
 		report.Environment.GitCommit,
@@ -217,6 +219,9 @@ func renderMarkdown(report RunReport) string {
 		report.Environment.NATSServerVersion,
 		report.Environment.K6Version,
 		report.Environment.OutboxWorkers,
+		report.Environment.OutboxProducerMaxConns,
+		report.Environment.OutboxRelayMaxConns,
+		report.Environment.OutboxPGXConnectionBudget,
 		report.Environment.ConsumerConcurrency,
 		report.Environment.DBMaxOpenConns,
 		report.Environment.PostgreSQLSettings["compute_query_id"],

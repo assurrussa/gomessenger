@@ -510,6 +510,63 @@ func TestStore_CustomTablePrefixCoversLifecycle(t *testing.T) {
 	assertSQLiteRowCount(t, db, "site_inbox_attempt_generations", 0)
 }
 
+func TestStore_ProcessAttemptSavepointRollbackAndCommit(t *testing.T) {
+	db := openDatabase(t)
+	store, err := inboxsqlite.New(db)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	key := inbox.Key{
+		ConsumerID: testConsumerID,
+		Source:     testSource,
+		MessageID:  mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000099"),
+	}
+	fingerprint := inbox.FingerprintEnvelope([]byte("savepoint-rollback-test"))
+
+	failErr := errors.New("handler failed")
+	res, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+		tx, ok := inbox.SQLTxFromContext(ctx)
+		if !ok {
+			return errors.New("missing tx")
+		}
+		if _, execErr := tx.ExecContext(ctx,
+			`INSERT INTO business_effects (message_id) VALUES (?)`, key.MessageID.String()); execErr != nil {
+			return execErr
+		}
+		return failErr
+	})
+	if !errors.Is(err, failErr) || res.Attempt != 1 {
+		t.Fatalf("attempt 1 failed unexpectedly: res=%#v, err=%v", res, err)
+	}
+	if effectCount(t, db) != 0 {
+		t.Fatalf("expected 0 business effects after savepoint rollback, got %d", effectCount(t, db))
+	}
+
+	res, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(ctx context.Context) error {
+		tx, ok := inbox.SQLTxFromContext(ctx)
+		if !ok {
+			return errors.New("missing tx")
+		}
+		_, execErr := tx.ExecContext(ctx,
+			`INSERT INTO business_effects (message_id) VALUES (?)`, key.MessageID.String())
+		return execErr
+	})
+	if err != nil || res.Attempt != 2 || res.Duplicate {
+		t.Fatalf("attempt 2 failed: res=%#v, err=%v", res, err)
+	}
+	if effectCount(t, db) != 1 {
+		t.Fatalf("expected 1 business effect after attempt 2 commit, got %d", effectCount(t, db))
+	}
+
+	res, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
+		t.Fatal("handler should not run for duplicate")
+		return nil
+	})
+	if err != nil || !res.Duplicate || res.Attempt != 2 {
+		t.Fatalf("duplicate check failed: res=%#v, err=%v", res, err)
+	}
+}
+
 func assertSQLiteNamespace(t *testing.T, db *sql.DB) {
 	t.Helper()
 	const objectTypeTable = "table"

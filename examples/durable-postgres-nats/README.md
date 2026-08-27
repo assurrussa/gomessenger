@@ -81,18 +81,27 @@ make capacity-inbox-postgres-down
 The quick profile uses a 15-second warm-up and 30-second stages at `50,100,250,500 msg/s`, with a 30-second drain
 limit. The full profile uses a 30-second warm-up and two-minute stages at `50,100,250,500,1000,2000 msg/s`, with a
 60-second drain limit. Both start with four Outbox workers and consumer concurrency four; override them with
-`OUTBOX_WORKERS` and `NATS_CONSUMER_CONCURRENCY`.
+`OUTBOX_WORKERS` and `NATS_CONSUMER_CONCURRENCY`. Outbox staging and relay use separate pgx pools, controlled by
+`OUTBOX_PRODUCER_MAX_CONNS` and `OUTBOX_RELAY_MAX_CONNS`.
 
-`make capacity-nats-site` is a separate PostgreSQL 17 profile with one Outbox worker, one NATS consumer, a ten-
-connection business pool, a 30-second warm-up, and two-minute stages at `250,325,350,400,500 msg/s`; each stage has a
-30-second drain limit. Its default payload is one small deterministic order. Set `CAPACITY_PAYLOAD_PROFILE=mixed` to
-use the existing 80/15/5 mix. `POSTGRES_IMAGE` may select a PostgreSQL 17 or 18 image without changing the repository's
-PostgreSQL 18 default for quick/full runs.
+`make capacity-nats-site` is a separate PostgreSQL 17 profile with one Outbox worker, one NATS consumer, a producer/relay
+pgx budget fixed at `9 + 1 = 10`, a separate ten-connection `database/sql` Inbox/measurement pool, a 30-second warm-up,
+and two-minute stages at `250,325,350,400,500 msg/s`; each stage has a 30-second drain limit. The site profile rejects
+producer/relay overrides whose sum is not ten. Its default payload is one small deterministic order. Set
+`CAPACITY_PAYLOAD_PROFILE=mixed` to use the existing 80/15/5 mix. `POSTGRES_IMAGE` may select a PostgreSQL 17 or 18
+image without changing the repository's PostgreSQL 18 default for quick/full runs.
 
 k6 generates a deterministic 80/15/5 mix of small, medium, and large orders. The producer route serializes the actual
-canonical envelope inside the business transaction and records its exact byte length and SHA-256 before delegating to
-the real Outbox producer. A delegate failure therefore rolls back the business row, measurement, and Outbox job
-together. The relay marks the same size/hash only after the real JetStream `PubAck`.
+canonical envelope inside the producer-pool business transaction and records its exact byte length and SHA-256 before
+delegating to the real Outbox producer. The Outbox repositories are relay-pool owned, but execute staging through the
+`pgx.Tx` carried in context; a delegate failure therefore rolls back the business row, measurement, and Outbox job
+together. Producer and relay connections use distinct PostgreSQL `application_name` values.
+
+After the real JetStream `PubAck`, the relay only places the confirmation and its actual timestamp into an in-memory
+recorder. The recorder deduplicates message IDs and persists at most 256 confirmations with one
+`UPDATE ... FROM unnest(...)`, either when full or every 50 ms. Recorder failures never turn a confirmed publication
+into relay retry/DLQ; readiness becomes unhealthy and post-drain integrity fails instead. Shutdown stops the relay
+before a bounded final recorder flush.
 
 ### Measurement boundary
 
@@ -105,9 +114,12 @@ effective msg/s = unique projections committed inside the load window / load-win
 effective MiB/s = exact canonical envelope bytes for those message IDs / load-window seconds / 1,048,576
 ```
 
-k6 summary time and pipeline drain are outside both denominators. The report separately records offered iterations,
+k6 summary time and pipeline drain are outside both denominators. After drain and recorder flush, the controller
+reconstructs the load-window counts from the stored timestamps, so asynchronous publication recording cannot move the
+measurement boundary. The report separately records offered iterations,
 HTTP `202` responses, committed business orders, staged envelopes, JetStream-confirmed publications, unique committed
-projections, p50/p95/p99 business latency, backlog slope and maxima, drain time, redeliveries, DLQ, and database pools.
+projections, p50/p95/p99 business latency, backlog slope and maxima, drain time, redeliveries, DLQ, and separate
+producer/relay pool sizes, acquire counts/durations, empty-acquire counts, and acquired-connection high-water marks.
 Business latency runs from k6 request dispatch (`offered_at`) to the committed projection write (`handled_at`).
 The NATS consumer's existing observations separately record the complete Inbox `OperationHandle` and subsequent
 `OperationBrokerAck` p50/p95/p99. The message-to-stage index is populated inside the producer transaction before it can

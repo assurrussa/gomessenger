@@ -300,6 +300,32 @@ func (p *probe) applicationStats(ctx context.Context, labels ...demo.BenchmarkLa
 	return result, nil
 }
 
+func (p *probe) flushPublications(ctx context.Context) error {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		p.appURL+"/benchmark/publications/flush",
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("build publication flush request: %w", err)
+	}
+	response, err := p.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("flush publication recorder: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return fmt.Errorf(
+			"flush publication recorder returned HTTP %d: %s",
+			response.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
+	}
+	return nil
+}
+
 func (p *probe) latencyStats(
 	ctx context.Context,
 	labels demo.BenchmarkLabels,
@@ -408,7 +434,10 @@ func (p *probe) environment(ctx context.Context, config Config) (Environment, er
 		HostCPUs: config.HostCPUs, GitCommit: config.GitCommit, GitDirty: config.GitDirty,
 		PostgreSQLVersion: postgresVersion, NATSServerVersion: p.nats.ConnectedServerVersion(),
 		K6Version: k6Version, OutboxWorkers: config.OutboxWorkers,
-		ConsumerConcurrency: config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
+		OutboxProducerMaxConns:    config.OutboxProducerMaxConns,
+		OutboxRelayMaxConns:       config.OutboxRelayMaxConns,
+		OutboxPGXConnectionBudget: config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
+		ConsumerConcurrency:       config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
 		JetStreamStorage: "file", PostgreSQLSettings: p.postgresSettings,
 	}, nil
 }

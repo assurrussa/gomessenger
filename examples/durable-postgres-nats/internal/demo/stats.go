@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // SQLPoolStats is the stable subset of database/sql pool state used by reports.
@@ -20,12 +23,14 @@ type SQLPoolStats struct {
 
 // PGXPoolStats is the stable subset of the Outbox pgx pool state used by reports.
 type PGXPoolStats struct {
-	MaxConnections       int32 `json:"maxConnections"`
-	TotalConnections     int32 `json:"totalConnections"`
-	AcquiredConnections  int32 `json:"acquiredConnections"`
-	IdleConnections      int32 `json:"idleConnections"`
-	EmptyAcquireCount    int64 `json:"emptyAcquireCount"`
-	AcquireDurationNanos int64 `json:"acquireDurationNanos"`
+	MaxConnections         int32 `json:"maxConnections"`
+	TotalConnections       int32 `json:"totalConnections"`
+	AcquiredConnections    int32 `json:"acquiredConnections"`
+	IdleConnections        int32 `json:"idleConnections"`
+	AcquireCount           int64 `json:"acquireCount"`
+	EmptyAcquireCount      int64 `json:"emptyAcquireCount"`
+	AcquireDurationNanos   int64 `json:"acquireDurationNanos"`
+	MaxAcquiredConnections int32 `json:"maxAcquiredConnections"`
 }
 
 // OutboxStats describes the live relay queue.
@@ -59,14 +64,16 @@ type AppStats struct {
 	ReadinessError  string                   `json:"readinessError,omitempty"`
 	Outbox          OutboxStats              `json:"outbox"`
 	BusinessDB      SQLPoolStats             `json:"businessDb"`
-	OutboxDB        PGXPoolStats             `json:"outboxDb"`
+	ProducerDB      PGXPoolStats             `json:"producerDb"`
+	RelayDB         PGXPoolStats             `json:"relayDb"`
+	Publications    PublicationRecorderStats `json:"publicationRecorder"`
 	InboxDuplicates int64                    `json:"inboxDuplicates"`
 	Consumer        ConsumerObservationStats `json:"consumer"`
 }
 
 // Stats reads a point-in-time application and pool snapshot.
 func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppStats, error) {
-	if a == nil || a.db == nil || a.outbox == nil {
+	if a == nil || a.db == nil || a.outbox == nil || a.publications == nil {
 		return AppStats{}, errors.New("demo application is not initialized")
 	}
 	queue, err := a.outbox.Service().GetQueueStats(ctx)
@@ -80,7 +87,8 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 	}
 	readyErr := a.Readiness(ctx)
 	dbStats := a.db.Stats()
-	outboxPool := a.outbox.Client().DB().Pool().Stat()
+	producerPool := a.outbox.ProducerClient().DB().Pool()
+	relayPool := a.outbox.RelayClient().DB().Pool()
 	result := AppStats{
 		ObservedAt: time.Now().UTC(),
 		Ready:      readyErr == nil,
@@ -95,14 +103,9 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 			WaitCount:          dbStats.WaitCount,
 			WaitDurationNanos:  dbStats.WaitDuration.Nanoseconds(),
 		},
-		OutboxDB: PGXPoolStats{
-			MaxConnections:       outboxPool.MaxConns(),
-			TotalConnections:     outboxPool.TotalConns(),
-			AcquiredConnections:  outboxPool.AcquiredConns(),
-			IdleConnections:      outboxPool.IdleConns(),
-			EmptyAcquireCount:    outboxPool.EmptyAcquireCount(),
-			AcquireDurationNanos: outboxPool.AcquireDuration().Nanoseconds(),
-		},
+		ProducerDB:      poolStats(producerPool, &a.producerMaxAcquired),
+		RelayDB:         poolStats(relayPool, &a.relayMaxAcquired),
+		Publications:    a.publications.Stats(),
 		InboxDuplicates: a.duplicates.Load(),
 		Consumer:        a.observations.stats(labels),
 	}
@@ -113,4 +116,35 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 		result.ReadinessError = readyErr.Error()
 	}
 	return result, nil
+}
+
+func poolStats(pool *pgxpool.Pool, maxAcquired *atomic.Int32) PGXPoolStats {
+	stats := pool.Stat()
+	observeMaxAcquired(pool, maxAcquired)
+	// A completed acquisition proves a high-water mark of at least one even
+	// when point-in-time sampling happens between short queries.
+	if stats.AcquireCount() > 0 && maxAcquired.Load() == 0 {
+		maxAcquired.CompareAndSwap(0, 1)
+	}
+	acquired := stats.AcquiredConns()
+	return PGXPoolStats{
+		MaxConnections:         stats.MaxConns(),
+		TotalConnections:       stats.TotalConns(),
+		AcquiredConnections:    acquired,
+		IdleConnections:        stats.IdleConns(),
+		AcquireCount:           stats.AcquireCount(),
+		EmptyAcquireCount:      stats.EmptyAcquireCount(),
+		AcquireDurationNanos:   stats.AcquireDuration().Nanoseconds(),
+		MaxAcquiredConnections: maxAcquired.Load(),
+	}
+}
+
+func observeMaxAcquired(pool *pgxpool.Pool, maxAcquired *atomic.Int32) {
+	acquired := pool.Stat().AcquiredConns()
+	for {
+		previous := maxAcquired.Load()
+		if acquired <= previous || maxAcquired.CompareAndSwap(previous, acquired) {
+			return
+		}
+	}
 }

@@ -1,5 +1,93 @@
 # Implementation notes
 
+## 2026-08-28 — Producer to Outbox relay pre-batch optimization
+
+- Removed the per-message `UPDATE demo.envelope_measurements` from the relay
+  success path. A successful JetStream `PubAck` now records the actual
+  publication instant in memory; a recorder deduplicates message IDs and uses
+  one `UPDATE ... FROM unnest(...)` for up to 256 confirmations or every 50 ms.
+  Recorder failures do not retry or DLQ the delivered message, but they make the
+  benchmark unhealthy and fail final integrity. Shutdown stops the relay before
+  a bounded recorder flush, and load-window counts are rebuilt from the flushed
+  timestamps after drain.
+- The three PostgreSQL 17.9 recorder-only controls retained one shared Outbox
+  pool. All passed reconciliation without redelivery or DLQ; 250 msg/s was
+  sustainable in all three runs, while 325 msg/s was sustainable in one of
+  three. The two failing 325 stages reached maximum Outbox backlogs of 1,142 and
+  2,486; the successful run reached 636. This control therefore remained too
+  variable to establish a higher capacity floor.
+- Split the example into host-owned producer and relay pgx pools with distinct
+  `application_name` values. Site defaults are producer `min=1/max=9` and relay
+  `min=1/max=1`; the controller rejects a site profile whose pgx maxima do not
+  sum to ten. `StageOrder` begins the business transaction on the producer pool
+  while the relay-bound repository stages through the `pgx.Tx` carried in
+  context, preserving atomic business-row plus Outbox-job commit/rollback.
+  Capacity telemetry reports both pool sizes, acquire counts/durations, empty
+  acquires, and observed maximum acquisition separately.
+- In the three comparable 9+1 candidate repetitions, 250 msg/s was sustainable
+  in all three and 325 msg/s in two of three. At 325, effective throughput was
+  324.758-324.825 msg/s, no iteration was dropped, and every run passed exact
+  integrity with zero redelivery and DLQ. The failing repetition reached a
+  1,139-job maximum Outbox backlog and 2,866 ms business p95; the two passing
+  repetitions reached 249/51 jobs and 217/104 ms. The second repetition was
+  intentionally stopped after its completed 325 stage when the default matrix
+  began an out-of-scope 350 stage; its completed 250/325 results remain intact.
+- Producer saturation reached the configured nine connections in every
+  candidate run, while relay acquisition remained bounded to its guaranteed
+  connection. Through the 325 boundary, cumulative relay acquire duration was
+  0.171-0.321 seconds versus approximately 2.505 seconds for the shared-pool
+  control, and the complete pgx budget remained ten. This proves the intended
+  fairness/isolation boundary, but the remaining 325 variability means no new
+  capacity floor is claimed and batch reservation remains out of scope.
+
+## 2026-08-27 — PostgreSQL Inbox fresh-success optimization
+
+- Replaced the fresh `ProcessAttempt` preparation with namespace-aware data-modifying CTEs for the default and explicit
+  attempt-generation tables. A fresh identity now creates its initial attempt in the same statement; conflicts retain
+  the existing identity lock, fingerprint validation, duplicate handling, and stored-attempt path. No schema, migration,
+  public API, transaction ownership, or ACK-ordering contract changed.
+- Removed explicit savepoint release before outer commit. The PostgreSQL and SQLite success paths commit directly; a
+  failed handler still executes `ROLLBACK TO SAVEPOINT`, persists the durable failure outcome outside the rolled-back
+  handler work, and lets the outer commit close the savepoint. PostgreSQL finalization/cancellation/concurrency tests and
+  a dedicated SQLite rollback-then-success regression cover these boundaries.
+- Recorded the candidate at commit `629bf011f910fff1b965073afa015530ab55e7bf` (`gitDirty=false`) on the same host and
+  container topology as the baseline. PostgreSQL-only statement telemetry observed exactly 20,000 calls each to
+  `BEGIN`, the combined identity/attempt CTE, `SAVEPOINT`, the one-row handler insert, completion update, and `COMMIT`.
+  The missing-attempt read, separate attempt insert, and successful `RELEASE SAVEPOINT` disappeared, confirming the
+  intended reduction from nine to six sequential database interactions.
+
+  | PostgreSQL-only profile | Baseline median | Candidate median | Change |
+  | --- | ---: | ---: | ---: |
+  | C1 throughput | 1,643.40 ops/s | 2,739.97 ops/s | +66.7% |
+  | C1 Inbox p50/p95/p99 | 0.564/0.760/1.284 ms | 0.346/0.429/0.617 ms | -38.7%/-43.6%/-51.9% |
+  | C4 throughput | 4,968.82 ops/s | 7,232.74 ops/s | +45.6% |
+  | C4 Inbox p50/p95/p99 | 0.752/1.138/1.574 ms | 0.529/0.664/0.991 ms | -29.7%/-41.6%/-37.0% |
+
+- The three PostgreSQL 17 site-shaped repetitions produced the following candidate medians. Every reached stage passed
+  exact post-drain reconciliation with no redelivery or DLQ.
+
+  | Target | Passed/reached | Median effective | Median Inbox p50/p95/p99 | Median business p95 | Median drain |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 250 msg/s | 3/3 | 249.950 msg/s | 0.545/0.862/1.309 ms | 100.553 ms | 0.510 s |
+  | 325 msg/s | 2/3 | 324.733 msg/s | 0.530/1.036/2.215 ms | 322.772 ms | 0.452 s |
+  | 350 msg/s | 2/2 | 348.558 msg/s | 0.528/0.930/1.863 ms | 225.465 ms | 0.787 s |
+  | 400 msg/s | 2/2 | 399.838 msg/s | 0.527/0.985/2.220 ms | 607.252 ms | 0.448 s |
+  | 500 msg/s | 0/2 | 463.042 msg/s | 0.554/1.456/2.234 ms | 10,572.612 ms | 10.502 s |
+
+  Two repetitions sustained every stage through 400 msg/s and stopped at 500. The remaining repetition sustained 250
+  and stopped at 325 after the Outbox backlog reached 6,973, k6 dropped 117 iterations, and business p95 reached
+  19.14 seconds; its Inbox p95 was only 1.84 ms, and integrity still passed. The 350 target therefore passed every run
+  that reached it, but not all three scheduled repetitions reached that target. Under the strict all-repetition reading,
+  this local matrix does not yet authorize describing a patch release as a proven 350 msg/s performance fix.
+- The unchanged PostgreSQL 18 O4/C4/32 quick profile sustained 500 msg/s in all three candidate repetitions. At 500,
+  median effective throughput was 499.700 msg/s and median Inbox p50/p95/p99 was 1.001/1.544/2.107 ms versus the
+  baseline 499.667 msg/s and 1.380/2.155/3.207 ms; median business p95 was 95.039 ms and median drain was 0.384 s.
+- Historical resource peaks were not directly comparable after the local Docker/host state shifted. A detached
+  contemporaneous baseline control measured 53.70 MiB peak application RSS and 40.02 MiB PostgreSQL-only runner RSS;
+  candidate medians were 52.09 MiB and 29.07 MiB respectively. The control also retained slower Inbox latency, so the
+  candidate has no observed greater-than-5% RSS or C4 latency regression in the contemporaneous comparison. Raw
+  candidate and control evidence remains ignored under `tmp/capacity/`.
+
 ## 2026-08-27 — PostgreSQL Inbox measurement baseline
 
 - Added a named PostgreSQL 17 site-shaped capacity profile while preserving the existing PostgreSQL 18 quick/full

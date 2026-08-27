@@ -134,14 +134,17 @@ func (b *backend) ProcessAttempt(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	duplicate, handled, err := b.prepareAttemptIdentity(ctx, tx, key, fingerprint)
+	duplicate, fresh, handled, err := b.prepareAttemptIdentity(ctx, tx, key, fingerprint)
 	if handled || err != nil {
 		return duplicate, err
 	}
 
-	decision, err := b.nextAttempt(ctx, tx, key, fingerprint, maxAttempts)
-	if err != nil {
-		return result, err
+	decision := attemptDecision{attempt: 1}
+	if !fresh {
+		decision, err = b.nextAttempt(ctx, tx, key, fingerprint, maxAttempts)
+		if err != nil {
+			return result, err
+		}
 	}
 	attempt := decision.attempt
 	if decision.terminal || decision.exhausted {
@@ -160,9 +163,6 @@ func (b *backend) ProcessAttempt(
 	handlerContext := inbox.ContextWithSQLTx(ctx, tx)
 	if handlerErr := handler(handlerContext); handlerErr != nil {
 		return b.finishFailedAttempt(ctx, tx, key, fingerprint, attempt, handlerErr)
-	}
-	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
-		return result, fmt.Errorf("inbox/pgsql: release handler savepoint: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
@@ -184,9 +184,6 @@ func (b *backend) finishFailedAttempt(
 ) (inbox.Result, error) {
 	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT gomessenger_handler"); err != nil {
 		return inbox.Result{}, fmt.Errorf("inbox/pgsql: rollback handler writes: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
-		return inbox.Result{}, fmt.Errorf("inbox/pgsql: release failed handler savepoint: %w", err)
 	}
 	if err := b.markAttemptTerminal(ctx, tx, key, fingerprint, handlerErr); err != nil {
 		return inbox.Result{}, err
@@ -227,39 +224,49 @@ func (b *backend) prepareAttemptIdentity(
 	tx *sql.Tx,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
-) (inbox.Result, bool, error) {
-	inserted, err := tx.ExecContext(ctx, b.statements.insertIdentity,
-		key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], b.clock().UTC())
+) (result inbox.Result, fresh bool, handled bool, err error) {
+	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
+	createdAt := b.clock().UTC()
+	statement := b.statements.insertIdentityAndAttempt
+	arguments := []any{key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:], createdAt}
+	if key.AttemptGeneration != "" {
+		statement = b.statements.insertIdentityAndAttemptGeneration
+		arguments = append(arguments, attemptFingerprint[:])
+	}
+	inserted, err := tx.ExecContext(ctx, statement, arguments...)
 	if err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: insert attempt identity: %w", err)
+		return inbox.Result{}, false, false, fmt.Errorf("inbox/pgsql: prepare attempt identity: %w", err)
 	}
 	rows, err := inserted.RowsAffected()
 	if err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: attempt identity rows: %w", err)
+		return inbox.Result{}, false, false, fmt.Errorf("inbox/pgsql: prepared attempt rows: %w", err)
+	}
+	if rows == 1 {
+		return inbox.Result{}, true, false, nil
 	}
 	if rows != 0 {
-		return inbox.Result{}, false, nil
+		return inbox.Result{}, false, false, fmt.Errorf("inbox/pgsql: prepared attempt rows: got %d, want 0 or 1", rows)
 	}
 	var stored []byte
 	var completedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx, b.statements.lockIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: lock attempt identity: %w", err)
+		return inbox.Result{}, false, false, fmt.Errorf("inbox/pgsql: lock attempt identity: %w", err)
 	}
 	if !fingerprintsEqual(stored, fingerprint) {
-		return inbox.Result{}, false, inbox.ErrFingerprintConflict
+		return inbox.Result{}, false, false, inbox.ErrFingerprintConflict
 	}
 	if !completedAt.Valid {
-		return inbox.Result{}, false, nil
+		return inbox.Result{}, false, false, nil
 	}
-	state, err := b.readAttempt(ctx, tx, key, inbox.AttemptFingerprint(key, fingerprint))
+	state, err := b.readAttempt(ctx, tx, key, attemptFingerprint)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return inbox.Result{}, false, err
+		return inbox.Result{}, false, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: commit attempt duplicate: %w", err)
+		return inbox.Result{}, false, false, fmt.Errorf("inbox/pgsql: commit attempt duplicate: %w", err)
 	}
-	return inbox.Result{Duplicate: true, Attempt: state.attempt}, true, nil
+	return inbox.Result{Duplicate: true, Attempt: state.attempt}, false, true, nil
 }
 
 func (b *backend) nextAttempt(

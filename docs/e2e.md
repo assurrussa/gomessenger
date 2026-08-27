@@ -84,7 +84,8 @@ make capacity-inbox-postgres
 k6 `constant-arrival-rate`, performs a separate warm-up, samples PostgreSQL/application/JetStream state each second,
 drains after every stage, and stops at the first unsustainable rate.
 
-`make capacity-nats-site` reproduces the PostgreSQL 17, Outbox `1`, consumer `1`, business-pool `10` topology with a
+`make capacity-nats-site` reproduces the PostgreSQL 17, Outbox `1`, consumer `1`, isolated Outbox producer/relay
+`9 + 1` pgx budget, and separate Inbox/measurement pool `10` topology with a
 small deterministic payload and two-minute `250,325,350,400,500 msg/s` stages. Set
 `CAPACITY_PAYLOAD_PROFILE=mixed` for the existing 80/15/5 payload mix. `make capacity-inbox-postgres` removes HTTP,
 Outbox, and NATS and measures the real PostgreSQL `ProcessAttempt` path for concurrency `1` and `4`, with three

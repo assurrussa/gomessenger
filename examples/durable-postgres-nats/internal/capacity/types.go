@@ -7,7 +7,7 @@ import (
 	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
-const reportSpecVersion = "1.0"
+const reportSpecVersion = "1.1"
 
 // BusinessSnapshot is the committed PostgreSQL truth for one run stage.
 type BusinessSnapshot struct {
@@ -132,23 +132,26 @@ type StageReport struct {
 
 // Environment records the exact checkout and local execution context.
 type Environment struct {
-	GoVersion           string            `json:"goVersion"`
-	ContainerOS         string            `json:"containerOs"`
-	ContainerArch       string            `json:"containerArch"`
-	ContainerCPUs       int               `json:"containerLogicalCpus"`
-	HostOS              string            `json:"hostOs"`
-	HostArch            string            `json:"hostArch"`
-	HostCPUs            string            `json:"hostLogicalCpus"`
-	GitCommit           string            `json:"gitCommit"`
-	GitDirty            string            `json:"gitDirty"`
-	PostgreSQLVersion   string            `json:"postgresqlVersion"`
-	NATSServerVersion   string            `json:"natsServerVersion"`
-	K6Version           string            `json:"k6Version"`
-	OutboxWorkers       int               `json:"outboxWorkers"`
-	ConsumerConcurrency int               `json:"consumerConcurrency"`
-	DBMaxOpenConns      int               `json:"dbMaxOpenConnections"`
-	JetStreamStorage    string            `json:"jetStreamStorage"`
-	PostgreSQLSettings  map[string]string `json:"postgresqlSettings"`
+	GoVersion                 string            `json:"goVersion"`
+	ContainerOS               string            `json:"containerOs"`
+	ContainerArch             string            `json:"containerArch"`
+	ContainerCPUs             int               `json:"containerLogicalCpus"`
+	HostOS                    string            `json:"hostOs"`
+	HostArch                  string            `json:"hostArch"`
+	HostCPUs                  string            `json:"hostLogicalCpus"`
+	GitCommit                 string            `json:"gitCommit"`
+	GitDirty                  string            `json:"gitDirty"`
+	PostgreSQLVersion         string            `json:"postgresqlVersion"`
+	NATSServerVersion         string            `json:"natsServerVersion"`
+	K6Version                 string            `json:"k6Version"`
+	OutboxWorkers             int               `json:"outboxWorkers"`
+	OutboxProducerMaxConns    int               `json:"outboxProducerMaxConnections"`
+	OutboxRelayMaxConns       int               `json:"outboxRelayMaxConnections"`
+	OutboxPGXConnectionBudget int               `json:"outboxPgxConnectionBudget"`
+	ConsumerConcurrency       int               `json:"consumerConcurrency"`
+	DBMaxOpenConns            int               `json:"dbMaxOpenConnections"`
+	JetStreamStorage          string            `json:"jetStreamStorage"`
+	PostgreSQLSettings        map[string]string `json:"postgresqlSettings"`
 }
 
 // ReportConfig is the stable, serializable experiment configuration.
