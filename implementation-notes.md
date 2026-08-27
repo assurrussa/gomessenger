@@ -46,6 +46,12 @@
   repetition: identity insert, missing-attempt select, attempt insert, savepoint, successful savepoint release, and
   completion update. Together with `BEGIN`, the one-row handler insert, and `COMMIT`, this confirms the expected nine
   sequential database interactions that the adapter-only follow-up will compare against.
+- Review found that the original regression helper could include one sampler point recorded after the load window while
+  k6 used its graceful-stop allowance. The fixed helper now enforces `elapsed <= load-window seconds`, with a regression
+  test. Re-evaluating every retained raw sample with that bound changed no stage classification: PostgreSQL 17 at
+  350 msg/s had corrected per-run slopes `-0.331`, `0.014`, and `0.372 msg/s` against a `3.5 msg/s` limit; PostgreSQL 18
+  at 500 msg/s also stayed below its slope limit, and its one failed repetition remains attributable to 339 dropped
+  iterations. The aggregate capacity claims above therefore remain unchanged.
 
 ## 2026-08-27 — reproducible NATS capacity experiment
 
