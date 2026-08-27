@@ -15,7 +15,7 @@
   deltas.
 - Both isolated runners now write `resources.jsonl` with container CPU, RAM, and cumulative Block I/O alongside ignored
   reports and raw artifacts. Hosted CI remains unchanged and does not execute performance workloads.
-- Recorded the comparable baseline at commit `175d83a6ad5504b1d6ed4584f28b42f25db75979` (`gitDirty=false`) on a
+- Recorded the final comparable baseline at commit `5bbe6521e717db52693ac2dff76986b737362235` (`gitDirty=false`) on a
   MacBook Pro `Mac17,9`, Apple M5 Pro (15 cores), 24 GB RAM, macOS 26.5.1 arm64. The Linux arm64 containers saw 12 CPUs
   and a 3.824 GiB memory limit; the toolchain was Go 1.27.0, NATS 2.12.3, k6 2.2.0, PostgreSQL 17.9 for the site and
   Inbox-only profiles, and PostgreSQL 18.6 for the existing quick profile. JetStream used file storage. Every recorded
@@ -23,35 +23,37 @@
 
   | Profile | Target | Passed/reached | Median effective | Median Inbox p50/p95/p99 | Median business p95 | Median drain | Median peak app RSS |
   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-  | PostgreSQL-only | C1 | 3/3 | 1,722.11 ops/s | 0.554/0.696/1.216 ms | — | — | 19.50 MiB¹ |
-  | PostgreSQL-only | C4 | 3/3 | 5,194.48 ops/s | 0.723/1.078/1.595 ms | — | — | 19.50 MiB¹ |
-  | PostgreSQL 17 site-shaped O1/C1 | 250 msg/s | 3/3 | 249.892 msg/s | 0.682/1.456/2.439 ms | 103.116 ms | 0.019 s | 32.04 MiB |
-  | PostgreSQL 17 site-shaped O1/C1 | 325 msg/s | 3/3 | 324.925 msg/s | 0.641/1.316/1.997 ms | 106.160 ms | 0.032 s | 32.04 MiB |
-  | PostgreSQL 17 site-shaped O1/C1 | 350 msg/s | 2/3 | 349.650 msg/s | 0.690/1.295/2.268 ms | 511.827 ms | 0.031 s | 32.04 MiB |
-  | PostgreSQL 17 site-shaped O1/C1 | 400 msg/s | 1/2² | — | — | — | — | 32.04 MiB |
-  | PostgreSQL 17 site-shaped O1/C1 | 500 msg/s | 0/1² | — | — | — | — | 32.04 MiB |
-  | PostgreSQL 18 quick O4/C4 | 50 msg/s | 3/3 | 49.933 msg/s | 1.914/3.774/4.670 ms | 99.053 ms | 0.004 s | 36.70 MiB |
-  | PostgreSQL 18 quick O4/C4 | 100 msg/s | 3/3 | 99.800 msg/s | 1.748/3.653/4.536 ms | 98.579 ms | 0.006 s | 36.70 MiB |
-  | PostgreSQL 18 quick O4/C4 | 250 msg/s | 3/3 | 249.533 msg/s | 1.665/3.576/4.222 ms | 96.236 ms | 0.010 s | 36.70 MiB |
-  | PostgreSQL 18 quick O4/C4 | 500 msg/s | 2/3 | 499.400 msg/s | 1.311/2.248/3.794 ms | 85.961 ms | 0.021 s | 36.70 MiB |
+  | PostgreSQL-only | C1 | 3/3 | 1,643.40 ops/s | 0.564/0.760/1.284 ms | — | — | 22.55 MiB¹ |
+  | PostgreSQL-only | C4 | 3/3 | 4,968.82 ops/s | 0.752/1.138/1.574 ms | — | — | 22.55 MiB¹ |
+  | PostgreSQL 17 site-shaped O1/C1 | 250 msg/s | 2/3 | 249.817 msg/s | 0.736/1.650/2.623 ms | 103.833 ms | 0.908 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 325 msg/s | 1/2² | 324.825 msg/s | 0.728/1.539/2.579 ms | 1,317.814 ms | 0.736 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 350 msg/s | 1/1² | 349.183 msg/s | 0.696/1.435/2.516 ms | 726.282 ms | 0.740 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 400 msg/s | 0/1² | 388.375 msg/s | 0.734/1.678/2.730 ms | 4,235.479 ms | 3.772 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 500 msg/s | 0/0² | — | — | — | — | 26.09 MiB |
+  | PostgreSQL 18 quick O4/C4 | 50 msg/s | 3/3 | 49.967 msg/s | 1.811/2.959/4.430 ms | 99.445 ms | 0.607 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 100 msg/s | 3/3 | 99.733 msg/s | 1.673/2.493/3.068 ms | 98.650 ms | 0.515 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 250 msg/s | 3/3 | 249.900 msg/s | 1.543/2.297/3.148 ms | 97.011 ms | 0.656 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 500 msg/s | 3/3 | 499.667 msg/s | 1.380/2.155/3.207 ms | 93.410 ms | 0.562 s | 31.97 MiB |
 
   ¹ The PostgreSQL-only runner samples one process across all six C1/C4 cases, so its single peak applies to both rows.
-  ² The controller stops a repetition at its first unsustainable stage. PostgreSQL 17 therefore reached 400 twice and
-  500 once; incomplete targets deliberately have no cross-run median.
-- The repeatable site-shaped floor is `capacity >= 325 msg/s`; 350 msg/s is the measured boundary, not a capacity claim:
-  it passed two repetitions and failed one because k6 dropped six iterations during a checkpoint-shaped stall. The
-  PostgreSQL 18 quick profile similarly passed 500 msg/s twice and failed once with 339 dropped iterations, so its
-  repeatable claim remains `capacity >= 250 msg/s` despite a 499.400 msg/s median at the highest tested target.
+  ² The controller stops a repetition at its first unsustainable stage. One PostgreSQL 17 run stopped at 325 because
+  business p95 reached 2,339.54 ms; another stopped at 250 after a local scheduling stall dropped 54 k6 iterations. The
+  remaining run passed 350 and stopped at 400 with 388.375 committed msg/s and 4,235.48 ms business p95. Later targets
+  therefore have fewer observations, and an unmeasured target is reported as `0/0` rather than as a failure.
+- This final three-run PostgreSQL 17 set does not justify a `capacity >= ...` claim that passed every repetition: 250
+  msg/s passed 2/3, while 350 passed its sole reached run. This variability is itself baseline evidence for the
+  adapter-only candidate. PostgreSQL 18 compatibility was stable in all repetitions and supports the checkout-local
+  statement `capacity >= 500 msg/s` for the unchanged O4/C4 quick profile.
 - PostgreSQL-only statement telemetry observed exactly 20,000 calls for each adapter-owned fresh-success statement per
   repetition: identity insert, missing-attempt select, attempt insert, savepoint, successful savepoint release, and
   completion update. Together with `BEGIN`, the one-row handler insert, and `COMMIT`, this confirms the expected nine
   sequential database interactions that the adapter-only follow-up will compare against.
-- Review found that the original regression helper could include one sampler point recorded after the load window while
-  k6 used its graceful-stop allowance. The fixed helper now enforces `elapsed <= load-window seconds`, with a regression
-  test. Re-evaluating every retained raw sample with that bound changed no stage classification: PostgreSQL 17 at
-  350 msg/s had corrected per-run slopes `-0.331`, `0.014`, and `0.372 msg/s` against a `3.5 msg/s` limit; PostgreSQL 18
-  at 500 msg/s also stayed below its slope limit, and its one failed repetition remains attributable to 339 dropped
-  iterations. The aggregate capacity claims above therefore remain unchanged.
+- Review and follow-up self-review tightened all runtime boundaries before the final matrix: backlog regression excludes
+  samples after the load window; the PostgreSQL load-end snapshot is independently scheduled from the first offered
+  request rather than from k6 process exit; Outbox and consumer runners are both supervised after readiness; and drain
+  duration starts at the exact load boundary rather than after k6 graceful stop. Across the final full-path reports,
+  PostgreSQL load-end snapshots landed 3-20 ms after the boundary. The corrected drain medians in the table include the
+  complete post-window tail.
 
 ## 2026-08-27 — reproducible NATS capacity experiment
 
