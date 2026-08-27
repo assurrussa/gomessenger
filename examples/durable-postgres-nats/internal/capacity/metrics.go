@@ -193,7 +193,8 @@ func sustainabilityReasons(config Config, report StageReport) []string {
 func backlogSlope(samples []Sample, loadSeconds float64) float64 {
 	points := make([]Sample, 0, len(samples))
 	for _, sample := range samples {
-		if sample.Phase == "load" && sample.ElapsedSeconds >= loadSeconds/2 {
+		if sample.Phase == "load" &&
+			sample.ElapsedSeconds >= loadSeconds/2 && sample.ElapsedSeconds <= loadSeconds {
 			points = append(points, sample)
 		}
 	}

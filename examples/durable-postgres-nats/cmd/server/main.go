@@ -46,15 +46,21 @@ func realMain() int {
 		log.Error("start capacity application", "error", err)
 		return 1
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := application.Close(shutdownCtx); err != nil {
-			log.Error("close capacity application", "error", err)
-		}
-	}()
-	if err := demo.RunHTTPServer(ctx, demo.EnvOr("HTTP_ADDR", ":8080"), application, log); err != nil {
-		log.Error("capacity HTTP service failed", "error", err)
+	serveErr := demo.RunHTTPServer(ctx, demo.EnvOr("HTTP_ADDR", ":8080"), application, log)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownErr := application.Close(shutdownCtx)
+	shutdownCancel()
+	if serveErr != nil {
+		log.Error("capacity HTTP service failed", "error", serveErr)
+	}
+	if shutdownErr != nil {
+		log.Error("close capacity application", "error", shutdownErr)
+	}
+	return serviceExitCode(serveErr, shutdownErr)
+}
+
+func serviceExitCode(serveErr, shutdownErr error) int {
+	if serveErr != nil || shutdownErr != nil {
 		return 1
 	}
 	return 0

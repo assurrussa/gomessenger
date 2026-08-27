@@ -53,6 +53,10 @@ func TestBacklogSlopeUsesFinalHalfOfLoadWindow(t *testing.T) {
 		{Phase: loadPhase, ElapsedSeconds: 5, Business: BusinessSnapshot{Accepted: 10, Committed: 10}},
 		{Phase: loadPhase, ElapsedSeconds: 7, Business: BusinessSnapshot{Accepted: 24, Committed: 20}},
 		{Phase: loadPhase, ElapsedSeconds: 10, Business: BusinessSnapshot{Accepted: 40, Committed: 30}},
+		// k6 may use its graceful-stop allowance after the exact load window while
+		// the sampler still labels the point as load. That completion must not
+		// flatten the bounded load-window regression.
+		{Phase: loadPhase, ElapsedSeconds: 12, Business: BusinessSnapshot{Accepted: 40, Committed: 40}},
 		{Phase: "drain", ElapsedSeconds: 11, Business: BusinessSnapshot{Accepted: 40, Committed: 40}},
 	}
 	slope := backlogSlope(samples, 10)
