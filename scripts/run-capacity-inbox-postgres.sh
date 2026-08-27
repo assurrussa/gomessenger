@@ -10,6 +10,11 @@ project_name="gomessenger-capacity-inbox-postgres"
 run_id="${CAPACITY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-inbox-$$}"
 results_dir="${repo_root}/tmp/capacity/${run_id}"
 mkdir -p "${results_dir}"
+# The benchmark image intentionally runs as an unprivileged fixed UID. A
+# bind-mounted directory created by the host is normally 0755, which prevents
+# that UID from writing artifacts on Linux. Limit the wider permission to this
+# ignored, run-specific directory instead of the shared tmp/capacity root.
+chmod 0777 "${results_dir}"
 
 export CAPACITY_RUN_ID="${run_id}"
 export CAPACITY_HOST_OS="${CAPACITY_HOST_OS:-$(uname -s)}"
