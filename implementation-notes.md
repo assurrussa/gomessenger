@@ -1,5 +1,32 @@
 # Implementation notes
 
+## 2026-08-27 — reproducible NATS capacity experiment
+
+- Extended `examples/durable-postgres-nats` into a shared application runtime with the original deterministic
+  retry/Inbox/DLQ correctness command, a long-lived capacity HTTP service, and an independent Go capacity controller.
+  The measured path is `HTTP -> PostgreSQL business transaction + Outbox -> JetStream -> Inbox -> business projection`;
+  the root public API and root dependency boundary are unchanged.
+- Added deterministic 80/15/5 order sizes, transaction-local exact canonical envelope byte/SHA-256 measurements,
+  broker-confirmation marking after JetStream `PubAck`, unique message identities on business/projection records, and
+  generator `offered_at` plus server `accepted_at` timestamps. Throughput uses a half-open timestamped load window;
+  k6 summary and bounded drain cannot improve the result.
+- Added a Go controller around pinned `grafana/k6:2.2.0` open-loop stages. It records one-second PostgreSQL, Outbox,
+  JetStream, application, and pool samples; applies the 99% throughput, backlog-slope, p95, drain, redelivery, and DLQ
+  criteria; and performs exact post-drain reconciliation before advancing. Integrity failures are distinct from an
+  expected unsustainable capacity boundary.
+- Added a dedicated file-backed JetStream/PostgreSQL Compose stack with named volumes, quick/full and minimum-rate Make
+  contracts, automatic isolated cleanup, optional diagnostic retention, and ignored JSON/Markdown/raw artifacts under
+  `tmp/capacity/<run-id>/`. Heavy capacity execution remains explicit and outside hosted CI.
+- Targeted unit tests and strict lint pass. A clean low-rate Docker smoke passed the exact window and post-drain checks:
+  25 unique projections committed inside a five-second 5 msg/s window, and all 26 HTTP-accepted boundary requests
+  reconciled after drain with no redelivery or DLQ. The standard quick profile then passed every 30-second stage through
+  500 msg/s. Its final stage committed 14,996 unique projections inside the load window (499.87 effective msg/s and
+  2.350 effective MiB/s), reconciled all 15,001 accepted orders after drain, and observed no dropped iteration,
+  redelivery, or DLQ. The result is only `capacity >= 500 msg/s` for the recorded dirty checkout and local host.
+- The refactored correctness demo passed its retry rollback, Inbox duplicate suppression, permanent DLQ, replay, and
+  broker-deduplication scenarios. The completed batch passed `make check`: formatting, build, vet, lint, unit,
+  race, checkptr, 91.0% root coverage, the clean consumer probe, and the durable transactional JetStream E2E.
+
 ## 2026-08-26 — v0.2.1 lifecycle hardening
 
 - Kept NATS readiness false until its pull iterator and worker pool exist, cleared it as soon as the pull loop stops,

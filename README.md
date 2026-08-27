@@ -130,6 +130,18 @@ intentional handler failure, suppresses a distinct duplicate delivery in the Inb
 DLQ, and confirms replay. The example is a checkout-level demonstration with local GoMessenger replacements; it is not
 evidence of published-module resolution or production readiness.
 
+The example also contains an opt-in open-loop NATS capacity experiment over
+`HTTP -> business transaction + Outbox -> JetStream -> Inbox -> business projection`:
+
+```sh
+make capacity-nats
+```
+
+It reports unique committed business effects and their exact canonical envelope bytes inside the load window, then
+reconciles every accepted order after a separate bounded drain. See the
+[example capacity contract](examples/durable-postgres-nats#capacity-experiment). Results describe only the recorded
+checkout, host, and local Docker topology; they are not production benchmark claims.
+
 ## Guarantees
 
 The durable contract is **at-least-once**:
