@@ -77,6 +77,9 @@ type Application struct {
 
 	outboxRunner   *runner
 	consumerRunner *runner
+	runtimeStopped <-chan struct{}
+	runtimeCause   func() error
+	cancelRuntime  context.CancelCauseFunc
 	draining       atomic.Bool
 	drainOnce      sync.Once
 	closeOnce      sync.Once
@@ -88,7 +91,11 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 	if err := normalizeConfig(&config); err != nil {
 		return nil, err
 	}
-	application = &Application{log: config.Logger}
+	runtimeCtx, cancelRuntime := context.WithCancelCause(context.WithoutCancel(ctx))
+	application = &Application{
+		log: config.Logger, runtimeStopped: runtimeCtx.Done(), cancelRuntime: cancelRuntime,
+		runtimeCause: func() error { return context.Cause(runtimeCtx) },
+	}
 	defer func() {
 		if openErr == nil {
 			return
@@ -139,12 +146,20 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 
 	// Open's context bounds startup only. Once ready, the host owns the runtime
 	// until Close, even if it releases or cancels that startup context.
-	application.outboxRunner = startOwnedRunner(ctx, outboxRuntime.Run)
-	if err := waitReady(ctx, "outbox", outboxRuntime.Readiness, application.outboxRunner); err != nil {
+	application.outboxRunner = startRunner(runtimeCtx, outboxRuntime.Run)
+	application.superviseRunner("outbox", application.outboxRunner)
+	if err := waitReady(
+		ctx, "outbox", outboxRuntime.Readiness, application.outboxRunner,
+		application.runtimeDone(), application.runtimeFailure,
+	); err != nil {
 		return nil, err
 	}
-	application.consumerRunner = startOwnedRunner(ctx, consumer.Run)
-	if err := waitReady(ctx, "consumer", consumer.Readiness, application.consumerRunner); err != nil {
+	application.consumerRunner = startRunner(runtimeCtx, consumer.Run)
+	application.superviseRunner("consumer", application.consumerRunner)
+	if err := waitReady(
+		ctx, "consumer", consumer.Readiness, application.consumerRunner,
+		application.runtimeDone(), application.runtimeFailure,
+	); err != nil {
 		return nil, err
 	}
 	return application, nil
@@ -243,6 +258,9 @@ func (a *Application) Readiness(ctx context.Context) error {
 	if a.draining.Load() {
 		return errors.New("demo application is draining")
 	}
+	if err := a.runtimeFailure(); err != nil {
+		return fmt.Errorf("demo required runtime failed: %w", err)
+	}
 	if err := a.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("business PostgreSQL readiness: %w", err)
 	}
@@ -299,8 +317,40 @@ func (a *Application) Close(ctx context.Context) error {
 		if a.db != nil {
 			joinError(&a.closeErr, "close PostgreSQL", a.db.Close())
 		}
+		if a.cancelRuntime != nil {
+			a.cancelRuntime(context.Canceled)
+		}
 	})
 	return a.closeErr
+}
+
+func (a *Application) superviseRunner(name string, runtimeRunner *runner) {
+	go func() {
+		<-runtimeRunner.done
+		if a.draining.Load() {
+			return
+		}
+		runErr := runtimeRunner.result()
+		if runErr == nil {
+			runErr = errors.New("runtime stopped without an error")
+		}
+		a.draining.Store(true)
+		a.cancelRuntime(fmt.Errorf("%s runtime stopped unexpectedly: %w", name, runErr))
+	}()
+}
+
+func (a *Application) runtimeDone() <-chan struct{} {
+	if a == nil {
+		return nil
+	}
+	return a.runtimeStopped
+}
+
+func (a *Application) runtimeFailure() error {
+	if a == nil || a.runtimeCause == nil {
+		return nil
+	}
+	return a.runtimeCause()
 }
 
 // DB exposes the host-owned business pool to the example's correctness checks.

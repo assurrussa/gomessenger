@@ -82,18 +82,33 @@ func RunHTTPServer(
 		}
 		return fmt.Errorf("serve capacity HTTP: %w", err)
 	case <-ctx.Done():
-		application.BeginDrain()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown capacity HTTP: %w", err)
-		}
-		err := <-serveErr
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve capacity HTTP during shutdown: %w", err)
-		}
-		return nil
+		return shutdownHTTPServer(ctx, application, server, serveErr, nil)
+	case <-application.runtimeDone():
+		return shutdownHTTPServer(
+			ctx, application, server, serveErr,
+			fmt.Errorf("capacity application runtime failed: %w", application.runtimeFailure()),
+		)
 	}
+}
+
+func shutdownHTTPServer(
+	ctx context.Context,
+	application *Application,
+	server *http.Server,
+	serveErr <-chan error,
+	triggerErr error,
+) error {
+	application.BeginDrain()
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(triggerErr, fmt.Errorf("shutdown capacity HTTP: %w", err))
+	}
+	err := <-serveErr
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return errors.Join(triggerErr, fmt.Errorf("serve capacity HTTP during shutdown: %w", err))
+	}
+	return triggerErr
 }
 
 func (h *capacityHTTPHandler) createOrder(writer http.ResponseWriter, request *http.Request) {

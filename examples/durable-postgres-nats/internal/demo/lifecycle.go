@@ -61,10 +61,15 @@ func waitReady(
 	name string,
 	readiness func(context.Context) error,
 	runtimeRunner *runner,
+	requiredRuntimeDone <-chan struct{},
+	requiredRuntimeCause func() error,
 ) error {
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if runtimeErr := requiredRuntimeCause(); runtimeErr != nil {
+			return fmt.Errorf("required runtime stopped while waiting for %s readiness: %w", name, runtimeErr)
+		}
 		if err := readiness(ctx); err == nil {
 			return nil
 		}
@@ -72,11 +77,17 @@ func waitReady(
 		case <-ctx.Done():
 			return fmt.Errorf("wait for %s readiness: %w", name, ctx.Err())
 		case <-runtimeRunner.done:
+			if runtimeErr := requiredRuntimeCause(); runtimeErr != nil {
+				return fmt.Errorf("required runtime stopped while waiting for %s readiness: %w", name, runtimeErr)
+			}
 			runErr := runtimeRunner.result()
 			if runErr == nil {
 				return fmt.Errorf("%s stopped before readiness", name)
 			}
 			return fmt.Errorf("%s stopped before readiness: %w", name, runErr)
+		case <-requiredRuntimeDone:
+			return fmt.Errorf("required runtime stopped while waiting for %s readiness: %w", name,
+				requiredRuntimeCause())
 		case <-ticker.C:
 		}
 	}

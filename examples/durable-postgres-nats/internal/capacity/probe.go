@@ -199,20 +199,13 @@ func (p *probe) loadWindowBusinessSnapshot(
 	labels demo.BenchmarkLabels,
 	duration time.Duration,
 ) (BusinessSnapshot, time.Time, error) {
-	var offeredAt sql.NullTime
-	if err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT MIN(offered_at)
-		FROM demo.orders WHERE run_id = $1 AND stage_id = $2`,
-		labels.RunID, labels.StageID,
-	).Scan(&offeredAt); err != nil {
-		return BusinessSnapshot{}, time.Time{}, fmt.Errorf("read load-window start: %w", err)
+	startedAt, err := p.loadWindowStartedAt(ctx, labels)
+	if err != nil || startedAt.IsZero() {
+		return BusinessSnapshot{}, startedAt, err
 	}
-	if !offeredAt.Valid {
-		return BusinessSnapshot{}, time.Time{}, nil
-	}
-	startedAt := offeredAt.Time.UTC()
 	endedAt := startedAt.Add(duration)
 	var result BusinessSnapshot
-	err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
+	err = p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT
 		(SELECT COUNT(*) FROM demo.orders
 			WHERE run_id = $1 AND stage_id = $2 AND accepted_at < $3),
 		(SELECT COUNT(*) FROM demo.envelope_measurements
@@ -233,6 +226,23 @@ func (p *probe) loadWindowBusinessSnapshot(
 		return BusinessSnapshot{}, time.Time{}, fmt.Errorf("read exact load-window snapshot: %w", err)
 	}
 	return result, startedAt, nil
+}
+
+func (p *probe) loadWindowStartedAt(
+	ctx context.Context,
+	labels demo.BenchmarkLabels,
+) (time.Time, error) {
+	var offeredAt sql.NullTime
+	if err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SELECT MIN(offered_at)
+		FROM demo.orders WHERE run_id = $1 AND stage_id = $2`,
+		labels.RunID, labels.StageID,
+	).Scan(&offeredAt); err != nil {
+		return time.Time{}, fmt.Errorf("read load-window start: %w", err)
+	}
+	if !offeredAt.Valid {
+		return time.Time{}, nil
+	}
+	return offeredAt.Time.UTC(), nil
 }
 
 func (p *probe) brokerSnapshot(ctx context.Context) (BrokerSnapshot, error) {

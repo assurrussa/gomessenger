@@ -49,6 +49,11 @@ type drainResult struct {
 	fullyDrained         bool
 }
 
+type postgresBoundaryResult struct {
+	snapshot pgtelemetry.Snapshot
+	err      error
+}
+
 func (e *MinimumRateError) Error() string {
 	return fmt.Sprintf("maximum sustainable rate %d msg/s is below required %d msg/s", e.Actual, e.Minimum)
 }
@@ -221,13 +226,23 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		return StageReport{}, err
 	}
 	e.log.Info("start capacity stage", "stage", spec.id, "target_msg_s", spec.rate, "duration", spec.duration)
-	process, err := startK6(ctx, e.config, spec.id, spec.rate, spec.duration)
+	stageCtx, cancelStage := context.WithCancel(ctx)
+	defer cancelStage()
+	process, err := startK6(stageCtx, e.config, spec.id, spec.rate, spec.duration)
 	if err != nil {
 		return StageReport{}, err
 	}
 	controllerStartedAt := time.Now().UTC()
 	ticker := time.NewTicker(e.config.SampleInterval)
 	defer ticker.Stop()
+	postgresBoundary := startPostgresBoundarySnapshot(
+		stageCtx,
+		spec.duration,
+		func(snapshotCtx context.Context) (time.Time, error) {
+			return e.probe.loadWindowStartedAt(snapshotCtx, labels)
+		},
+		e.probe.postgresSnapshot,
+	)
 	loadDeadline := time.NewTimer(spec.duration + 15*time.Second)
 	defer loadDeadline.Stop()
 	var loadEnd Sample
@@ -236,38 +251,54 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 	var commandErr error
 	var k6Result K6Result
 	var postgresLoadEnd pgtelemetry.Snapshot
-	for loadEnd.ObservedAt.IsZero() {
+	processDone := process.done
+	boundaryDone := postgresBoundary
+	processCompleted := false
+	boundaryCaptured := false
+	for !processCompleted || !boundaryCaptured {
 		select {
 		case <-ctx.Done():
-			_ = process.abort()
-			return StageReport{}, ctx.Err()
-		case commandErr = <-process.done:
+			cancelStage()
+			var cleanupErr error
+			if processCompleted {
+				_, cleanupErr = process.finish(commandErr)
+			} else {
+				cleanupErr = process.abort()
+			}
+			return StageReport{}, errors.Join(ctx.Err(), cleanupErr)
+		case commandErr = <-processDone:
+			processDone = nil
 			if time.Since(controllerStartedAt) < spec.duration-100*time.Millisecond {
 				_, finishErr := process.finish(commandErr)
 				return StageReport{}, errors.Join(
 					fmt.Errorf("k6 stage %s stopped before its load window completed", spec.id), finishErr,
 				)
 			}
-			if k6Result, err = process.finish(commandErr); err != nil {
-				return StageReport{}, err
-			}
-			postgresLoadEnd, err = e.probe.postgresSnapshot(ctx)
-			if err != nil {
-				return StageReport{}, err
-			}
-			loadEnd, loadStartedAt, err = takeLoadEndSample(
-				ctx, e.probe, e.artifacts, labels, spec.duration, controllerStartedAt, &samples,
-			)
-			if err == nil {
-				loadEndedAt = loadStartedAt.Add(spec.duration)
-				for index := range samples {
-					samples[index].ElapsedSeconds = samples[index].ObservedAt.Sub(loadStartedAt).Seconds()
+			processCompleted = true
+		case boundary := <-boundaryDone:
+			boundaryDone = nil
+			if boundary.err != nil {
+				cancelStage()
+				var cleanupErr error
+				if processCompleted {
+					_, cleanupErr = process.finish(commandErr)
+				} else {
+					cleanupErr = process.abort()
 				}
+				return StageReport{}, errors.Join(boundary.err, cleanupErr)
 			}
+			postgresLoadEnd = boundary.snapshot
+			boundaryCaptured = true
 		case <-loadDeadline.C:
-			abortErr := process.abort()
+			cancelStage()
+			var cleanupErr error
+			if processCompleted {
+				_, cleanupErr = process.finish(commandErr)
+			} else {
+				cleanupErr = process.abort()
+			}
 			return StageReport{}, errors.Join(
-				fmt.Errorf("k6 stage %s exceeded its bounded load window", spec.id), abortErr,
+				fmt.Errorf("k6 stage %s exceeded its bounded load window", spec.id), cleanupErr,
 			)
 		case <-ticker.C:
 			elapsed := time.Since(controllerStartedAt)
@@ -276,6 +307,19 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		if err != nil {
 			return StageReport{}, err
 		}
+	}
+	if k6Result, err = process.finish(commandErr); err != nil {
+		return StageReport{}, err
+	}
+	loadEnd, loadStartedAt, err = takeLoadEndSample(
+		ctx, e.probe, e.artifacts, labels, spec.duration, controllerStartedAt, &samples,
+	)
+	if err != nil {
+		return StageReport{}, err
+	}
+	loadEndedAt = loadStartedAt.Add(spec.duration)
+	for index := range samples {
+		samples[index].ElapsedSeconds = samples[index].ObservedAt.Sub(loadStartedAt).Seconds()
 	}
 	drain, err := drainStage(
 		ctx, e.config, e.probe, e.artifacts, labels, loadStartedAt, &samples,
@@ -321,6 +365,52 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		postgres: pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postgresAfterDrain),
 	})
 	return report, nil
+}
+
+func startPostgresBoundarySnapshot(
+	ctx context.Context,
+	duration time.Duration,
+	loadStartedAt func(context.Context) (time.Time, error),
+	capture func(context.Context) (pgtelemetry.Snapshot, error),
+) <-chan postgresBoundaryResult {
+	result := make(chan postgresBoundaryResult, 1)
+	go func() {
+		poll := time.NewTicker(25 * time.Millisecond)
+		defer poll.Stop()
+		var startedAt time.Time
+		for startedAt.IsZero() {
+			queryCtx, cancel := context.WithTimeout(ctx, time.Second)
+			var err error
+			startedAt, err = loadStartedAt(queryCtx)
+			cancel()
+			if err != nil {
+				result <- postgresBoundaryResult{err: err}
+				return
+			}
+			if !startedAt.IsZero() {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				result <- postgresBoundaryResult{err: ctx.Err()}
+				return
+			case <-poll.C:
+			}
+		}
+		boundary := time.NewTimer(max(time.Until(startedAt.Add(duration)), 0))
+		defer boundary.Stop()
+		select {
+		case <-ctx.Done():
+			result <- postgresBoundaryResult{err: ctx.Err()}
+			return
+		case <-boundary.C:
+		}
+		snapshotCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		snapshot, err := capture(snapshotCtx)
+		result <- postgresBoundaryResult{snapshot: snapshot, err: err}
+	}()
+	return result
 }
 
 func takeLoadEndSample(
