@@ -4,8 +4,12 @@ MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observa
 LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 E2E_MODULE := testdata/e2e
 DEMO_COMPOSE := examples/durable-postgres-nats/compose.yaml
+CAPACITY_COMPOSE := examples/durable-postgres-nats/compose.capacity.yaml
+CAPACITY_PROJECT := gomessenger-capacity-nats
+INBOX_CAPACITY_COMPOSE := examples/durable-postgres-nats/compose.inbox-capacity.yaml
+INBOX_CAPACITY_PROJECT := gomessenger-capacity-inbox-postgres
 
-.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-kafka test-postgres check bench-all release-ready release-readiness demo-durable-postgres-nats demo-durable-postgres-nats-down
+.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-kafka test-postgres check bench-all release-ready release-readiness demo-durable-postgres-nats demo-durable-postgres-nats-down capacity-nats capacity-nats-full capacity-nats-site capacity-inbox-postgres capacity-nats-down capacity-inbox-postgres-down
 
 prepare:
 	@$(GO) work sync
@@ -19,7 +23,7 @@ fmt-check:
 
 build:
 	@for module in $(MODULES); do \
-		if [ "$$module" = "tools/gomessengerctl" ] || [ "$$module" = "examples/durable-postgres-nats" ]; then \
+		if [ "$$module" = "tools/gomessengerctl" ]; then \
 			(cd $$module && GOWORK=off $(GO) build -o /dev/null .) || exit 1; \
 		else \
 			(cd $$module && GOWORK=off $(GO) build ./...) || exit 1; \
@@ -107,3 +111,26 @@ demo-durable-postgres-nats:
 
 demo-durable-postgres-nats-down:
 	@docker compose -f $(DEMO_COMPOSE) down --volumes --remove-orphans
+
+capacity-nats:
+	@bash ./scripts/run-capacity-nats.sh
+
+capacity-nats-full:
+	@CAPACITY_PROFILE=full bash ./scripts/run-capacity-nats.sh
+
+capacity-nats-site:
+	@CAPACITY_PROFILE=site \
+	POSTGRES_IMAGE="$${POSTGRES_IMAGE:-postgres:17-alpine}" \
+	OUTBOX_WORKERS="$${OUTBOX_WORKERS:-1}" \
+	NATS_CONSUMER_CONCURRENCY="$${NATS_CONSUMER_CONCURRENCY:-1}" \
+	DB_MAX_OPEN_CONNS="$${DB_MAX_OPEN_CONNS:-10}" \
+	bash ./scripts/run-capacity-nats.sh
+
+capacity-inbox-postgres:
+	@bash ./scripts/run-capacity-inbox-postgres.sh
+
+capacity-nats-down:
+	@docker compose -p $(CAPACITY_PROJECT) -f $(CAPACITY_COMPOSE) down --volumes --remove-orphans
+
+capacity-inbox-postgres-down:
+	@docker compose -p $(INBOX_CAPACITY_PROJECT) -f $(INBOX_CAPACITY_COMPOSE) down --volumes --remove-orphans

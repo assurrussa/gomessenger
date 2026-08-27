@@ -1,5 +1,87 @@
 # Implementation notes
 
+## 2026-08-27 — PostgreSQL Inbox measurement baseline
+
+- Added a named PostgreSQL 17 site-shaped capacity profile while preserving the existing PostgreSQL 18 quick/full
+  defaults. The new profile fixes Outbox/consumer concurrency at `1/1`, the business pool at `10`, uses a small
+  deterministic payload by default, and keeps the existing 80/15/5 mix as an explicit override.
+- Enabled capacity-only `pg_stat_statements`, query IDs, utility tracking, I/O timing, and WAL I/O timing. Each full-path
+  stage records before/load-end/post-drain statement, database, WAL, and version-tolerant `pg_stat_io` snapshots plus
+  sampled relevant waits. Controller SQL is marked and excluded from Inbox classification.
+- Attached the existing NATS `OperationHandle` and `OperationBrokerAck` observations without adding consumer SQL. The
+  producer registers `message_id -> run/stage` inside its transaction before commit and removes the mapping on failure.
+- Added a PostgreSQL-only `ProcessAttempt` runner with one transactional handler insert, prebuilt identities and
+  fingerprints, default C1/C4 `20,000`-operation cases, three repetitions, exact integrity checks, and statement/WAL/I/O
+  deltas.
+- Both isolated runners now write `resources.jsonl` with container CPU, RAM, and cumulative Block I/O alongside ignored
+  reports and raw artifacts. Hosted CI remains unchanged and does not execute performance workloads.
+- Recorded the final comparable baseline at commit `5bbe6521e717db52693ac2dff76986b737362235` (`gitDirty=false`) on a
+  MacBook Pro `Mac17,9`, Apple M5 Pro (15 cores), 24 GB RAM, macOS 26.5.1 arm64. The Linux arm64 containers saw 12 CPUs
+  and a 3.824 GiB memory limit; the toolchain was Go 1.27.0, NATS 2.12.3, k6 2.2.0, PostgreSQL 17.9 for the site and
+  Inbox-only profiles, and PostgreSQL 18.6 for the existing quick profile. JetStream used file storage. Every recorded
+  run passed exact integrity reconciliation with no lost or duplicate business effect.
+
+  | Profile | Target | Passed/reached | Median effective | Median Inbox p50/p95/p99 | Median business p95 | Median drain | Median peak app RSS |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | PostgreSQL-only | C1 | 3/3 | 1,643.40 ops/s | 0.564/0.760/1.284 ms | — | — | 22.55 MiB¹ |
+  | PostgreSQL-only | C4 | 3/3 | 4,968.82 ops/s | 0.752/1.138/1.574 ms | — | — | 22.55 MiB¹ |
+  | PostgreSQL 17 site-shaped O1/C1 | 250 msg/s | 2/3 | 249.817 msg/s | 0.736/1.650/2.623 ms | 103.833 ms | 0.908 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 325 msg/s | 1/2² | 324.825 msg/s | 0.728/1.539/2.579 ms | 1,317.814 ms | 0.736 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 350 msg/s | 1/1² | 349.183 msg/s | 0.696/1.435/2.516 ms | 726.282 ms | 0.740 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 400 msg/s | 0/1² | 388.375 msg/s | 0.734/1.678/2.730 ms | 4,235.479 ms | 3.772 s | 26.09 MiB |
+  | PostgreSQL 17 site-shaped O1/C1 | 500 msg/s | 0/0² | — | — | — | — | 26.09 MiB |
+  | PostgreSQL 18 quick O4/C4 | 50 msg/s | 3/3 | 49.967 msg/s | 1.811/2.959/4.430 ms | 99.445 ms | 0.607 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 100 msg/s | 3/3 | 99.733 msg/s | 1.673/2.493/3.068 ms | 98.650 ms | 0.515 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 250 msg/s | 3/3 | 249.900 msg/s | 1.543/2.297/3.148 ms | 97.011 ms | 0.656 s | 31.97 MiB |
+  | PostgreSQL 18 quick O4/C4 | 500 msg/s | 3/3 | 499.667 msg/s | 1.380/2.155/3.207 ms | 93.410 ms | 0.562 s | 31.97 MiB |
+
+  ¹ The PostgreSQL-only runner samples one process across all six C1/C4 cases, so its single peak applies to both rows.
+  ² The controller stops a repetition at its first unsustainable stage. One PostgreSQL 17 run stopped at 325 because
+  business p95 reached 2,339.54 ms; another stopped at 250 after a local scheduling stall dropped 54 k6 iterations. The
+  remaining run passed 350 and stopped at 400 with 388.375 committed msg/s and 4,235.48 ms business p95. Later targets
+  therefore have fewer observations, and an unmeasured target is reported as `0/0` rather than as a failure.
+- This final three-run PostgreSQL 17 set does not justify a `capacity >= ...` claim that passed every repetition: 250
+  msg/s passed 2/3, while 350 passed its sole reached run. This variability is itself baseline evidence for the
+  adapter-only candidate. PostgreSQL 18 compatibility was stable in all repetitions and supports the checkout-local
+  statement `capacity >= 500 msg/s` for the unchanged O4/C4 quick profile.
+- PostgreSQL-only statement telemetry observed exactly 20,000 calls for each adapter-owned fresh-success statement per
+  repetition: identity insert, missing-attempt select, attempt insert, savepoint, successful savepoint release, and
+  completion update. Together with `BEGIN`, the one-row handler insert, and `COMMIT`, this confirms the expected nine
+  sequential database interactions that the adapter-only follow-up will compare against.
+- Review and follow-up self-review tightened all runtime boundaries before the final matrix: backlog regression excludes
+  samples after the load window; the PostgreSQL load-end snapshot is independently scheduled from the first offered
+  request rather than from k6 process exit; Outbox and consumer runners are both supervised after readiness; and drain
+  duration starts at the exact load boundary rather than after k6 graceful stop. Across the final full-path reports,
+  PostgreSQL load-end snapshots landed 3-20 ms after the boundary. The corrected drain medians in the table include the
+  complete post-window tail.
+
+## 2026-08-27 — reproducible NATS capacity experiment
+
+- Extended `examples/durable-postgres-nats` into a shared application runtime with the original deterministic
+  retry/Inbox/DLQ correctness command, a long-lived capacity HTTP service, and an independent Go capacity controller.
+  The measured path is `HTTP -> PostgreSQL business transaction + Outbox -> JetStream -> Inbox -> business projection`;
+  the root public API and root dependency boundary are unchanged.
+- Added deterministic 80/15/5 order sizes, transaction-local exact canonical envelope byte/SHA-256 measurements,
+  broker-confirmation marking after JetStream `PubAck`, unique message identities on business/projection records, and
+  generator `offered_at` plus server `accepted_at` timestamps. Throughput uses a half-open timestamped load window;
+  k6 summary and bounded drain cannot improve the result.
+- Added a Go controller around pinned `grafana/k6:2.2.0` open-loop stages. It records one-second PostgreSQL, Outbox,
+  JetStream, application, and pool samples; applies the 99% throughput, backlog-slope, p95, drain, redelivery, and DLQ
+  criteria; and performs exact post-drain reconciliation before advancing. Integrity failures are distinct from an
+  expected unsustainable capacity boundary.
+- Added a dedicated file-backed JetStream/PostgreSQL Compose stack with named volumes, quick/full and minimum-rate Make
+  contracts, automatic isolated cleanup, optional diagnostic retention, and ignored JSON/Markdown/raw artifacts under
+  `tmp/capacity/<run-id>/`. Heavy capacity execution remains explicit and outside hosted CI.
+- Targeted unit tests and strict lint pass. A clean low-rate Docker smoke passed the exact window and post-drain checks:
+  25 unique projections committed inside a five-second 5 msg/s window, and all 26 HTTP-accepted boundary requests
+  reconciled after drain with no redelivery or DLQ. The standard quick profile then passed every 30-second stage through
+  500 msg/s. Its final stage committed 14,996 unique projections inside the load window (499.87 effective msg/s and
+  2.350 effective MiB/s), reconciled all 15,001 accepted orders after drain, and observed no dropped iteration,
+  redelivery, or DLQ. The result is only `capacity >= 500 msg/s` for the recorded dirty checkout and local host.
+- The refactored correctness demo passed its retry rollback, Inbox duplicate suppression, permanent DLQ, replay, and
+  broker-deduplication scenarios. The completed batch passed `make check`: formatting, build, vet, lint, unit,
+  race, checkptr, 91.0% root coverage, the clean consumer probe, and the durable transactional JetStream E2E.
+
 ## 2026-08-26 — v0.2.1 lifecycle hardening
 
 - Kept NATS readiness false until its pull iterator and worker pool exist, cleared it as soon as the pull loop stops,

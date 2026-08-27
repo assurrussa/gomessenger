@@ -91,6 +91,7 @@ linters:
             - modernc.org/sqlite
             - github.com/prometheus/client_golang
             - go.opentelemetry.io/otel
+            - example.com/gomessenger-durable-postgres-nats
     gomoddirectives:
       replace-local: true
       replace-allow-list:

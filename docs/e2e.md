@@ -67,6 +67,51 @@ a distinct duplicate broker delivery, permanent DLQ hand-off, and deterministic 
 `testdata/e2e`, it is Docker-based and optimized for evaluation logs rather than exhaustive failure assertions. Both
 remain checkout proofs; neither replaces the published clean-consumer gate or real-service pilot.
 
+## Local NATS capacity experiment
+
+The runnable example also exposes a long-lived HTTP service and a Go-controlled k6 experiment over the full
+`POST /orders -> business transaction + Outbox -> JetStream -> Inbox -> order_projection` path. Run its quick profile
+with:
+
+```sh
+make capacity-nats
+make capacity-nats-site
+make capacity-inbox-postgres
+```
+
+`make capacity-nats-full` runs the longer schedule; `CAPACITY_RATES=500 make capacity-nats` isolates one rate; and
+`CAPACITY_MIN_RATE=500 make capacity-nats` turns the result into a checkout-local performance gate. The controller uses
+k6 `constant-arrival-rate`, performs a separate warm-up, samples PostgreSQL/application/JetStream state each second,
+drains after every stage, and stops at the first unsustainable rate.
+
+`make capacity-nats-site` reproduces the PostgreSQL 17, Outbox `1`, consumer `1`, business-pool `10` topology with a
+small deterministic payload and two-minute `250,325,350,400,500 msg/s` stages. Set
+`CAPACITY_PAYLOAD_PROFILE=mixed` for the existing 80/15/5 payload mix. `make capacity-inbox-postgres` removes HTTP,
+Outbox, and NATS and measures the real PostgreSQL `ProcessAttempt` path for concurrency `1` and `4`, with three
+repetitions of `20,000` measured operations after a `1,000`-operation warm-up.
+
+The primary metrics use a timestamped half-open load window and exclude drain:
+
+```text
+effective msg/s = unique committed projection delta / load-window seconds
+effective MiB/s = exact canonical envelope bytes for those message IDs / load-window seconds / 1,048,576
+```
+
+After drain, accepted HTTP responses must reconcile exactly with business orders, transactional envelope measurements,
+JetStream-confirmed publications, stream message delta, and unique projections. Integrity failures exit nonzero;
+ordinary performance saturation reports the first unsustainable stage, while passing the whole schedule reports
+`capacity >= maximum tested rate`. Reports and raw samples live under ignored `tmp/capacity/<run-id>/`.
+
+The isolated PostgreSQL stacks preload `pg_stat_statements` and enable query IDs, utility tracking, I/O timing, and WAL
+I/O timing. Reports retain before/load-end/post-drain statement/database/WAL/I/O snapshots, sampled lock/I/O/WAL waits,
+Inbox handle and broker ACK percentiles, and `resources.jsonl` container CPU/RAM/cumulative Block I/O. Probe SQL is
+marked and excluded from Inbox statement classification.
+
+This Docker experiment is explicit and local: it is not part of `make check` or hosted CI, supports NATS only, and does
+not replace the real-service pilot or establish production capacity. Its exact commands, profiles, classification
+rules, artifacts, and tuning variables are documented in the
+[example README](../examples/durable-postgres-nats#capacity-experiment).
+
 ## Kafka compatibility pipeline
 
 The same E2E module contains an opt-in Kafka pipeline. It is skipped when no broker is declared, so the source-only
