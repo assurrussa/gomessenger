@@ -111,3 +111,44 @@ func TestCustomNamespaceRendersAllStatementsAndMigrations(t *testing.T) {
 		t.Fatalf("custom migrations contain unresolved or default names:\n%s", sql)
 	}
 }
+
+func TestFreshAttemptStatementsUseOneDataModifyingCTE(t *testing.T) {
+	t.Parallel()
+
+	statements := newStatements(namespace{
+		inbox:              `"inbox"`,
+		attempts:           `"attempts"`,
+		attemptGenerations: `"attempt_generations"`,
+	})
+	tests := []struct {
+		name      string
+		statement string
+		table     string
+	}{
+		{name: "default generation", statement: statements.insertIdentityAndAttempt, table: `"attempts"`},
+		{
+			name: "explicit generation", statement: statements.insertIdentityAndAttemptGeneration,
+			table: `"attempt_generations"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			normalized := strings.Join(strings.Fields(test.statement), " ")
+			for _, fragment := range []string{
+				`WITH inserted_identity AS ( INSERT INTO "inbox"`,
+				`ON CONFLICT (consumer_id, source, message_id) DO NOTHING`,
+				`RETURNING consumer_id, source, message_id`,
+				`INSERT INTO ` + test.table,
+				`FROM inserted_identity`,
+			} {
+				if !strings.Contains(normalized, fragment) {
+					t.Fatalf("fresh-attempt statement does not contain %q:\n%s", fragment, normalized)
+				}
+			}
+			if strings.Count(normalized, "INSERT INTO") != 2 {
+				t.Fatalf("fresh-attempt statement has unexpected inserts:\n%s", normalized)
+			}
+		})
+	}
+}

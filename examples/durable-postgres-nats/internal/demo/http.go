@@ -24,6 +24,7 @@ type capacityHTTPService interface {
 	) (messenger.Receipt, error)
 	Readiness(ctx context.Context) error
 	Stats(ctx context.Context, labels BenchmarkLabels) (AppStats, error)
+	FlushPublications(ctx context.Context) error
 }
 
 type capacityHTTPHandler struct {
@@ -44,6 +45,7 @@ func NewHTTPHandler(service capacityHTTPService, log *slog.Logger) (http.Handler
 	mux.HandleFunc("POST /orders", handler.createOrder)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /benchmark/stats", handler.stats)
+	mux.HandleFunc("POST /benchmark/publications/flush", handler.flushPublications)
 	return mux, nil
 }
 
@@ -192,6 +194,18 @@ func (h *capacityHTTPHandler) stats(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(writer, http.StatusOK, stats)
+}
+
+func (h *capacityHTTPHandler) flushPublications(writer http.ResponseWriter, request *http.Request) {
+	flushCtx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
+	defer cancel()
+	if err := h.service.FlushPublications(flushCtx); err != nil {
+		writeJSONError(writer, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: "flushed"})
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

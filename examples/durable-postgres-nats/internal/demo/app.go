@@ -17,7 +17,6 @@ import (
 	natsadapter "github.com/assurrussa/gomessenger/adapters/nats"
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
 	outboxmigrator "github.com/assurrussa/outbox/backends/pgsql/migrator"
-	outboxruntime "github.com/assurrussa/outbox/backends/pgsql/runtime"
 	outboxstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
 	outboxlogger "github.com/assurrussa/outbox/outbox/logger"
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the host-owned business pool driver.
@@ -32,14 +31,17 @@ const defaultPostgresDSN = "postgres://gomessenger:gomessenger@127.0.0.1:5432/go
 
 // Config controls one shared demo application runtime.
 type Config struct {
-	PostgresDSN         string
-	NATSURL             string
-	ConnectionName      string
-	OutboxWorkers       int
-	ConsumerConcurrency int
-	DBMaxOpenConns      int
-	FileStorage         bool
-	Logger              *slog.Logger
+	PostgresDSN                string
+	NATSURL                    string
+	ConnectionName             string
+	OutboxWorkers              int
+	OutboxReservationBatchSize int
+	OutboxProducerMaxConns     int
+	OutboxRelayMaxConns        int
+	ConsumerConcurrency        int
+	DBMaxOpenConns             int
+	FileStorage                bool
+	Logger                     *slog.Logger
 }
 
 // CorrectnessConfig returns the intentionally small development topology used
@@ -48,7 +50,9 @@ func CorrectnessConfig(logger *slog.Logger) Config {
 	return Config{
 		PostgresDSN: EnvOr("POSTGRES_DSN", defaultPostgresDSN),
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-durable-demo",
-		OutboxWorkers: 1, ConsumerConcurrency: 1, DBMaxOpenConns: 5, Logger: logger,
+		OutboxWorkers: 1, OutboxReservationBatchSize: 1,
+		OutboxProducerMaxConns: 1, OutboxRelayMaxConns: 1,
+		ConsumerConcurrency: 1, DBMaxOpenConns: 5, Logger: logger,
 	}
 }
 
@@ -57,7 +61,9 @@ func CapacityConfig(logger *slog.Logger) Config {
 	return Config{
 		PostgresDSN: EnvOr("POSTGRES_DSN", defaultPostgresDSN),
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-capacity-api",
-		OutboxWorkers: 4, ConsumerConcurrency: 4, DBMaxOpenConns: 32,
+		OutboxWorkers: 4, OutboxReservationBatchSize: 1,
+		OutboxProducerMaxConns: 9, OutboxRelayMaxConns: 1,
+		ConsumerConcurrency: 4, DBMaxOpenConns: 32,
 		FileStorage: true, Logger: logger,
 	}
 }
@@ -67,23 +73,25 @@ type Application struct {
 	log          *slog.Logger
 	db           *sql.DB
 	connection   *natsio.Conn
-	outbox       *outboxruntime.Runtime
+	outbox       *splitOutboxRuntime
 	consumer     *natsadapter.Consumer
 	bus          *messenger.Messenger
 	event        messenger.Event[OrderCreated]
 	attempts     *attemptTracker
 	duplicates   *atomic.Int64
 	observations *benchmarkObservationRecorder
+	publications *publicationRecorder
 
-	outboxRunner   *runner
-	consumerRunner *runner
-	runtimeStopped <-chan struct{}
-	runtimeCause   func() error
-	cancelRuntime  context.CancelCauseFunc
-	draining       atomic.Bool
-	drainOnce      sync.Once
-	closeOnce      sync.Once
-	closeErr       error
+	publicationRunner *runner
+	outboxRunner      *runner
+	consumerRunner    *runner
+	runtimeStopped    <-chan struct{}
+	runtimeCause      func() error
+	cancelRuntime     context.CancelCauseFunc
+	draining          atomic.Bool
+	drainOnce         sync.Once
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 // Open starts the complete producer, relay, broker, Inbox, and consumer path.
@@ -130,7 +138,7 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 		return nil, fmt.Errorf("apply demo topology: %w", err)
 	}
 
-	outboxRuntime, consumer, bus, event, attempts, duplicates, observations, err := buildMessaging(
+	outboxRuntime, consumer, bus, event, attempts, duplicates, observations, publications, err := buildMessaging(
 		ctx, config, db, connection,
 	)
 	if err != nil {
@@ -143,9 +151,18 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 	application.attempts = attempts
 	application.duplicates = duplicates
 	application.observations = observations
+	application.publications = publications
 
 	// Open's context bounds startup only. Once ready, the host owns the runtime
 	// until Close, even if it releases or cancels that startup context.
+	application.publicationRunner = startRunner(runtimeCtx, publications.Run)
+	application.superviseRunner("publication recorder", application.publicationRunner)
+	if err := waitReady(
+		ctx, "publication recorder", publications.Readiness, application.publicationRunner,
+		application.runtimeDone(), application.runtimeFailure,
+	); err != nil {
+		return nil, err
+	}
 	application.outboxRunner = startRunner(runtimeCtx, outboxRuntime.Run)
 	application.superviseRunner("outbox", application.outboxRunner)
 	if err := waitReady(
@@ -198,7 +215,7 @@ func (a *Application) StageOrder(
 
 	var receipt messenger.Receipt
 	registeredObservation := false
-	err = a.outbox.Transactor().RunInTx(ctx, func(txCtx context.Context) error {
+	err = a.outbox.ProducerTransactor().RunInTx(ctx, func(txCtx context.Context) error {
 		tx := outboxstorage.GetTx(txCtx)
 		if tx == nil {
 			return errors.New("missing Outbox business transaction")
@@ -252,7 +269,8 @@ func (a *Application) StageOrder(
 
 // Readiness checks every resource required to accept and complete an order.
 func (a *Application) Readiness(ctx context.Context) error {
-	if a == nil || a.db == nil || a.connection == nil || a.outbox == nil || a.consumer == nil {
+	if a == nil || a.db == nil || a.connection == nil || a.outbox == nil || a.consumer == nil ||
+		a.publications == nil {
 		return errors.New("demo application is not initialized")
 	}
 	if a.draining.Load() {
@@ -263,6 +281,9 @@ func (a *Application) Readiness(ctx context.Context) error {
 	}
 	if err := a.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("business PostgreSQL readiness: %w", err)
+	}
+	if err := a.publications.Readiness(ctx); err != nil {
+		return fmt.Errorf("publication recorder readiness: %w", err)
 	}
 	if !a.connection.IsConnected() {
 		return errors.New("NATS connection is not ready")
@@ -308,8 +329,15 @@ func (a *Application) Close(ctx context.Context) error {
 		if a.outboxRunner != nil {
 			joinError(&a.closeErr, "stop outbox runtime", a.outboxRunner.stop(ctx))
 		}
+		if a.publicationRunner != nil {
+			joinError(&a.closeErr, "stop publication recorder", a.publicationRunner.stop(ctx))
+		}
+		if a.publications != nil {
+			joinError(&a.closeErr, "final publication recorder flush", a.publications.Flush(ctx))
+		}
 		if a.outbox != nil {
-			joinError(&a.closeErr, "close outbox runtime", a.outbox.Close())
+			joinError(&a.closeErr, "close Outbox relay pool", a.outbox.CloseRelay())
+			joinError(&a.closeErr, "close host-owned Outbox producer pool", a.outbox.CloseProducer())
 		}
 		if a.connection != nil {
 			a.connection.Close()
@@ -368,6 +396,16 @@ func (a *Application) OutboxTotal(ctx context.Context) (int64, error) {
 	return stats.Total, nil
 }
 
+// FlushPublications persists broker confirmations already accepted by the
+// in-memory recorder. It is a capacity-only measurement boundary; relay
+// delivery does not depend on its result.
+func (a *Application) FlushPublications(ctx context.Context) error {
+	if a == nil || a.publications == nil {
+		return errors.New("publication recorder is not initialized")
+	}
+	return a.publications.Flush(ctx)
+}
+
 func normalizeConfig(config *Config) error {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
@@ -377,6 +415,15 @@ func normalizeConfig(config *Config) error {
 	}
 	if config.OutboxWorkers < 1 || config.OutboxWorkers > 128 {
 		return errors.New("outbox workers must be in 1..128")
+	}
+	if config.OutboxReservationBatchSize < 1 || config.OutboxReservationBatchSize > 1_000 {
+		return errors.New("outbox reservation batch size must be in 1..1000")
+	}
+	if config.OutboxProducerMaxConns < 1 || config.OutboxProducerMaxConns > 1_024 {
+		return errors.New("outbox producer max connections must be in 1..1024")
+	}
+	if config.OutboxRelayMaxConns < 1 || config.OutboxRelayMaxConns > 1_024 {
+		return errors.New("outbox relay max connections must be in 1..1024")
 	}
 	if config.ConsumerConcurrency < 1 || config.ConsumerConcurrency > 128 {
 		return errors.New("consumer concurrency must be in 1..128")
@@ -406,60 +453,43 @@ func buildMessaging(
 	db *sql.DB,
 	connection *natsio.Conn,
 ) (
-	*outboxruntime.Runtime,
+	*splitOutboxRuntime,
 	*natsadapter.Consumer,
 	*messenger.Messenger,
 	messenger.Event[OrderCreated],
 	*attemptTracker,
 	*atomic.Int64,
 	*benchmarkObservationRecorder,
+	*publicationRecorder,
 	error,
 ) {
-	outboxRuntime, err := outboxruntime.Open(ctx, outboxruntime.Config{
-		DSN: config.PostgresDSN, Workers: config.OutboxWorkers,
-		IdleTime: 100 * time.Millisecond, ReserveFor: 5 * time.Second, Logger: outboxlogger.Discard(),
-	})
+	outboxRuntime, err := openSplitOutboxRuntime(ctx, config)
 	if err != nil {
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("open PostgreSQL outbox runtime: %w", err)
 	}
-	closeOutbox := func() { _ = outboxRuntime.Close() }
+	closeOutbox := func() {
+		_ = outboxRuntime.CloseRelay()
+		_ = outboxRuntime.CloseProducer()
+	}
+	publications, err := newPublicationRecorder(db)
+	if err != nil {
+		closeOutbox()
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil, err
+	}
 
 	brokerRoute, err := natsadapter.NewRoute(connection, natsadapter.RouteConfig{
 		Name: "nats.demo.events", Namespace: Namespace, WireMode: natsadapter.WireNative,
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create NATS route: %w", err)
 	}
-	publisher, err := newMeasurementPublisher(brokerRoute, func(
-		ctx context.Context,
-		measurement envelopeMeasurement,
-	) error {
-		tag, updateErr := db.ExecContext(ctx, `UPDATE demo.envelope_measurements
-			SET published_at = COALESCE(published_at, clock_timestamp())
-			WHERE message_id = $1
-			  AND run_id = $2
-			  AND stage_id = $3
-			  AND envelope_bytes = $4
-			  AND envelope_sha256 = $5`,
-			measurement.MessageID, measurement.Labels.RunID, measurement.Labels.StageID,
-			measurement.EnvelopeBytes, measurement.SHA256,
-		)
-		if updateErr != nil {
-			return fmt.Errorf("update published envelope measurement: %w", updateErr)
-		}
-		if rows, rowsErr := tag.RowsAffected(); rowsErr != nil {
-			return fmt.Errorf("read published measurement result: %w", rowsErr)
-		} else if rows != 1 {
-			return fmt.Errorf("broker-confirmed envelope %s does not match its staged measurement", measurement.MessageID)
-		}
-		return nil
-	})
+	publisher, err := newMeasurementPublisher(brokerRoute, publications.Record)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, err
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil, err
 	}
 	relay, err := outboxadapter.NewRelayJob(publisher, outboxadapter.RelayJobConfig{
 		ExecutionTimeout: 5 * time.Second,
@@ -467,12 +497,12 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create Outbox relay: %w", err)
 	}
-	if err := outboxRuntime.Service().RegisterJob(relay); err != nil {
+	if err := outboxRuntime.registerJob(relay); err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("register Outbox relay: %w", err)
 	}
 	producer, err := outboxadapter.NewProducer(outboxRuntime.Service(), outboxadapter.ProducerConfig{
@@ -480,13 +510,13 @@ func buildMessaging(
 	})
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create Outbox producer: %w", err)
 	}
 	measuredProducer, err := newMeasurementRoute(producer)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, err
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil, err
 	}
 
 	event := messenger.MustEvent("orders.created", 1, messenger.JSON[OrderCreated]())
@@ -495,7 +525,7 @@ func buildMessaging(
 	bus, _, err := builder.Build()
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("build producer messenger: %w", err)
 	}
 
@@ -503,14 +533,14 @@ func buildMessaging(
 		inboxpgsql.WithSchema(Namespace), inboxpgsql.WithTablePrefix("gm_"))
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create PostgreSQL inbox: %w", err)
 	}
 	observed := &observingInbox{delegate: durableInbox}
 	store, err := inbox.New(observed)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("observe PostgreSQL inbox: %w", err)
 	}
 	attempts := newAttemptTracker()
@@ -533,10 +563,10 @@ func buildMessaging(
 	)
 	if err != nil {
 		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil,
+		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create durable consumer: %w", err)
 	}
-	return outboxRuntime, consumer, bus, event, attempts, &observed.duplicates, observations, nil
+	return outboxRuntime, consumer, bus, event, attempts, &observed.duplicates, observations, publications, nil
 }
 
 type handlerApplication struct {

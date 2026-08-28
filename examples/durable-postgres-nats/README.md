@@ -81,18 +81,31 @@ make capacity-inbox-postgres-down
 The quick profile uses a 15-second warm-up and 30-second stages at `50,100,250,500 msg/s`, with a 30-second drain
 limit. The full profile uses a 30-second warm-up and two-minute stages at `50,100,250,500,1000,2000 msg/s`, with a
 60-second drain limit. Both start with four Outbox workers and consumer concurrency four; override them with
-`OUTBOX_WORKERS` and `NATS_CONSUMER_CONCURRENCY`.
+`OUTBOX_WORKERS`, `OUTBOX_RESERVATION_BATCH_SIZE`, and `NATS_CONSUMER_CONCURRENCY`.
+The reservation batch defaults to `1` and accepts `1..1000`; it changes claim
+prefetch only, while each worker still handles, publishes, and acknowledges
+jobs sequentially. Outbox staging and relay use separate pgx pools, controlled by
+`OUTBOX_PRODUCER_MAX_CONNS` and `OUTBOX_RELAY_MAX_CONNS`.
 
-`make capacity-nats-site` is a separate PostgreSQL 17 profile with one Outbox worker, one NATS consumer, a ten-
-connection business pool, a 30-second warm-up, and two-minute stages at `250,325,350,400,500 msg/s`; each stage has a
-30-second drain limit. Its default payload is one small deterministic order. Set `CAPACITY_PAYLOAD_PROFILE=mixed` to
-use the existing 80/15/5 mix. `POSTGRES_IMAGE` may select a PostgreSQL 17 or 18 image without changing the repository's
-PostgreSQL 18 default for quick/full runs.
+`make capacity-nats-site` is a separate PostgreSQL 17 profile with two Outbox workers, reservation batch one, one NATS consumer, a producer/relay
+pgx budget fixed at `9 + 1 = 10`, a separate ten-connection `database/sql` Inbox/measurement pool, a 30-second warm-up,
+and one two-minute stage at `2000 msg/s`; the stage has a 30-second drain limit. Override the schedule with
+`CAPACITY_RATES`. The site profile rejects
+producer/relay overrides whose sum is not ten. Its default payload is one small deterministic order. Set
+`CAPACITY_PAYLOAD_PROFILE=mixed` to use the existing 80/15/5 mix. `POSTGRES_IMAGE` may select a PostgreSQL 17 or 18
+image without changing the repository's PostgreSQL 18 default for quick/full runs.
 
 k6 generates a deterministic 80/15/5 mix of small, medium, and large orders. The producer route serializes the actual
-canonical envelope inside the business transaction and records its exact byte length and SHA-256 before delegating to
-the real Outbox producer. A delegate failure therefore rolls back the business row, measurement, and Outbox job
-together. The relay marks the same size/hash only after the real JetStream `PubAck`.
+canonical envelope inside the producer-pool business transaction and records its exact byte length and SHA-256 before
+delegating to the real Outbox producer. The Outbox repositories are relay-pool owned, but execute staging through the
+`pgx.Tx` carried in context; a delegate failure therefore rolls back the business row, measurement, and Outbox job
+together. Producer and relay connections use distinct PostgreSQL `application_name` values.
+
+After the real JetStream `PubAck`, the relay only places the confirmation and its actual timestamp into an in-memory
+recorder. The recorder deduplicates message IDs and persists at most 256 confirmations with one
+`UPDATE ... FROM unnest(...)`, either when full or every 50 ms. Recorder failures never turn a confirmed publication
+into relay retry/DLQ; readiness becomes unhealthy and post-drain integrity fails instead. Shutdown stops the relay
+before a bounded final recorder flush.
 
 ### Measurement boundary
 
@@ -101,13 +114,20 @@ k6 attaches the request dispatch time. PostgreSQL records that `offered_at` valu
 offered request through exactly the configured stage duration:
 
 ```text
-effective msg/s = unique projections committed inside the load window / load-window seconds
-effective MiB/s = exact canonical envelope bytes for those message IDs / load-window seconds / 1,048,576
+relay msg/s = JetStream-confirmed publications inside the load window / load-window seconds
+consumer msg/s = unique projections committed inside the load window / load-window seconds
+Outbox lag = staged envelopes - JetStream-confirmed publications
+consumer lag = JetStream-confirmed publications - unique committed projections
+consumer MiB/s = exact canonical envelope bytes for committed message IDs / load-window seconds / 1,048,576
 ```
 
-k6 summary time and pipeline drain are outside both denominators. The report separately records offered iterations,
+k6 summary time and pipeline drain are outside every throughput denominator. After drain and recorder flush, the controller
+reconstructs the load-window counts from the stored timestamps, so asynchronous publication recording cannot move the
+measurement boundary. The report separately records offered iterations,
 HTTP `202` responses, committed business orders, staged envelopes, JetStream-confirmed publications, unique committed
-projections, p50/p95/p99 business latency, backlog slope and maxima, drain time, redeliveries, DLQ, and database pools.
+projections, relay/consumer throughput, Outbox/consumer lag and growth, p50/p95/p99 business latency, end-to-end backlog
+slope and maxima, drain time, redeliveries, DLQ, the exact binary-resolved Outbox module version, and separate
+producer/relay pool sizes, acquire counts/durations, empty-acquire counts, and acquired-connection high-water marks.
 Business latency runs from k6 request dispatch (`offered_at`) to the committed projection write (`handled_at`).
 The NATS consumer's existing observations separately record the complete Inbox `OperationHandle` and subsequent
 `OperationBrokerAck` p50/p95/p99. The message-to-stage index is populated inside the producer transaction before it can
@@ -118,8 +138,9 @@ timing. Every stage retains snapshots before load, at load end, and after drain,
 WAL, I/O, and sampled relevant-wait deltas. Controller SQL carries a stable probe marker and is excluded from Inbox
 statement classification.
 
-A measured stage is sustainable only when it has no HTTP failures or dropped iterations; accepted and committed
-throughput are each at least 99% of target; second-half business backlog grows by no more than 1% of target rate;
+A measured stage is sustainable only when it has no HTTP failures or dropped iterations; accepted, relay, and consumer
+throughput are each at least 99% of target; second-half Outbox, consumer, and end-to-end backlog each grow by no more
+than 1% of target rate;
 business p95 is at most two seconds; bounded drain completes; and no unexpected redelivery or DLQ appears. After drain,
 the controller exactly reconciles HTTP-accepted orders, business rows, measurements, broker-confirmed envelopes,
 JetStream message delta, and unique projections. Loss, an extra effect, or a mismatched envelope hash is an integrity
@@ -131,6 +152,15 @@ Artifacts are written to the ignored `tmp/capacity/<run-id>/` directory: `report
 container CPU, memory, and cumulative Block I/O. The stack and its dedicated named PostgreSQL/NATS
 volumes are removed automatically. Set `KEEP_CAPACITY_STACK=1` to retain them for diagnosis, then use
 `make capacity-nats-down` for explicit cleanup.
+
+Capacity report spec `1.3` records the reservation batch as
+`environment.outboxReservationBatchSize`, the binary-resolved dependency as
+`environment.outboxVersion`, and includes both in the Markdown environment.
+The capacity-only `/benchmark/stats` response uses one Outbox queue snapshot:
+`outbox.observedAt`, nullable global `oldestAvailableAt`, and `byCapability`
+groups expose exact `(name, schemaVersion)` backlog. A group's `supported`
+flag means that this process registered that exact handler; it is not a
+cluster-wide capability registry.
 
 ### PostgreSQL-only Inbox benchmark
 

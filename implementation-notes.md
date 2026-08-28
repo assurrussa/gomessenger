@@ -1,5 +1,243 @@
 # Implementation notes
 
+## 2026-08-29 — Published Outbox v0.12.0 integration
+
+- Pinned the Outbox adapter, durable PostgreSQL example, clean consumer, and
+  SQLite E2E module to the published Outbox root and matching backend
+  `v0.12.0` tags. Local joint-development replacements remain confined to
+  `go.work`; source and release gates use `GOWORK=off`.
+- The durable example now resolves the same unified version-aware fenced batch
+  contract used during capacity development without local Outbox replacements.
+  Reservation batch size remains a host option in `1..1000`, with the site
+  default still `1` because the confirmation A/B did not establish a higher
+  repeatable capacity floor.
+- `release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0` resolved the published
+  root, PostgreSQL, and SQLite tags and refreshed the four affected module
+  graphs. Repository-wide verification follows on that published graph.
+- Review follow-up made the publication recorder a required supervised runtime,
+  evicts confirmations after a successful flush, and keeps an in-flight batch
+  retryable without recording normal runner cancellation as a telemetry
+  failure. Flush ownership is context-aware so a final flush cannot outlive an
+  already-expired shutdown deadline. Deterministic tests cover both shutdown
+  boundaries.
+- Relay pool high-water measurement now uses `pgxpool` prepare/release hooks at
+  the actual acquisition boundary instead of relying on one-second HTTP
+  snapshots. Producer and relay pools are both constructed from the parsed
+  `pgxpool.Config`, so adding their distinct `application_name` values preserves
+  URL, keyword/value, and Unix-socket PostgreSQL connection strings. A short
+  PostgreSQL 17 + NATS smoke with pools `8 + 2` completed exact reconciliation,
+  drained successfully, and recorded relay `maxAcquiredConnections=2`; its
+  deliberately short stage is connectivity/measurement evidence, not a
+  capacity result.
+- The published-graph branch passes `make check` with zero lint findings, 91.0%
+  root coverage, race/checkptr, clean consumer, and durable E2E coverage. The
+  real capacity smoke also proved that the observed relay pool preserves UUID
+  scanning, fenced claims, PubAck, and drain behavior.
+- Release preparation now tidies the Outbox adapter through a temporary local
+  root replacement and removes it before returning, so it does not try to
+  resolve an unpublished GoMessenger root tag. An isolated `v0.2.2` pre-tag
+  probe passed both `release-ready` and `release-readiness`; the prepared
+  adapter required `v0.2.2` with no remaining module replacement.
+
+## 2026-08-28 — Capacity publication-recorder batch boundary
+
+- Fixed the asynchronous broker-confirmation recorder so a size-trigger writes
+  only complete batches. Confirmations that arrive while that SQL is running
+  remain queued for the next complete batch or 50 ms interval instead of being
+  chased immediately as a stream of small `UPDATE ... FROM unnest(...)`
+  statements. Interval and final flushes persist a snapshot of the pending
+  tail in bounded batches.
+- Added deterministic concurrency coverage that blocks the first batch write,
+  records a partial tail during that write, and proves the size-trigger leaves
+  the tail pending until an explicit flush. The capacity report contract and
+  production relay behavior are unchanged; this narrows observer interference
+  before repeating the 2,000 msg/s batch-16/consumer-2 profile.
+- The first 60-second AC screening repetition after the fix used Outbox workers
+  `2`, reservation batch `16`, consumer concurrency `2`, and pools `9 + 1`.
+  Relay/consumer throughput reached `1998.583/1998.383 msg/s`, Outbox/consumer
+  lag ended at `85/12`, business p95 was `1275.932 ms`, drain was `0.625 s`,
+  and reconciliation passed without drops, redelivery, or DLQ. Publication
+  measurement writes fell from `5,180` calls at `22.3` rows/call and `17.155 s`
+  total execution in the preceding failed C2 run to `1,196` calls at `100.2`
+  rows/call and `0.546 s`. This is checkout-local screening evidence, not the
+  required three published-Outbox confirmation repetitions.
+- Recorder unit tests, targeted demo/capacity tests, the recorder race test,
+  targeted `go vet`, and new-diff `golangci-lint` pass. The patched isolated
+  capacity checkout also passes its `GOWORK=off` recorder tests.
+
+## 2026-08-28 — Queue snapshot and capacity pipeline boundaries
+
+- Replaced the capacity-only `/benchmark/stats` Outbox age query with the
+  single `QueueStats` snapshot supplied by Outbox. The response uses the
+  snapshot `ObservedAt`, derives the global oldest-ready timestamp from the
+  minimum non-zero capability timestamp, returns `null` when no ready job
+  exists, and exposes every exact `(name, schemaVersion)` backlog with a
+  process-local `supported` flag. `stats.go` no longer imports `database/sql`
+  or executes a `SELECT MIN(created_at)` query.
+- Raised the capacity artifact contract to spec `1.3`. Relay throughput is the
+  published delta divided by the load window; consumer throughput and MiB/s
+  use committed projections; Outbox and consumer lag are reported separately
+  as `staged - published` and `published - committed`. JSON, Markdown,
+  structured logs, and sustainability diagnostics no longer use the ambiguous
+  committed-only `effective*` fields. Drain remains outside all denominators.
+- Capacity environment JSON and Markdown now record the Outbox module version
+  from Go build metadata. A published build reports its exact tag; a workspace
+  path replacement reports `devel (local replace)` instead of pretending that
+  the required tag supplied the binary.
+- Release preparation/readiness now updates, tidies, and validates the durable
+  example's matching Outbox root plus PostgreSQL requirements in addition to
+  the adapter, clean consumer, and SQLite E2E requirements.
+- Targeted `go test ./internal/demo ./internal/capacity` passes against the
+  workspace Outbox candidate. As of this check, the Go proxy still exposes
+  only `v0.11.0` for Outbox root, PostgreSQL, and SQLite; therefore no
+  `v0.12.0` pins, `GOWORK=off` capacity runs, default changes, final evidence
+  rewrite, shared-wiki verification date, or repository-wide `make check` are
+  claimed yet.
+
+## 2026-08-28 — Outbox reservation-batch capacity control
+
+- Added `OUTBOX_RESERVATION_BATCH_SIZE` to the durable PostgreSQL/NATS service
+  and capacity runner. The accepted range is `1..1000`; correctness, quick,
+  full, and site defaults remain `1` until repeatable capacity evidence selects
+  a higher minimum.
+- The split Outbox runtime forwards the value to
+  `outbox.WithReservationBatchSize`. Workers remain the handler-concurrency
+  boundary; a batch changes only reservation/prefetch and keeps PubAck,
+  conditional delete, retry, and DLQ per-job.
+- Capacity artifact spec `1.2` recorded the exact value in JSON and Markdown so
+  batch runs cannot be compared as if they had the same topology.
+- The A/B held site topology at workers `2`, producer/relay pools `9 + 1`, and
+  consumer `1`. Short screening ran `1/16/32/64/100` for 30 seconds at
+  `500/650`; every size passed exact integrity with zero redelivery/DLQ. At
+  650, business p95 was 93.459-99.604 ms, maximum Outbox backlog was 61-68,
+  and drain was 0.369-0.432 seconds. The two lowest-p95 candidates, `64` and
+  `100`, advanced to confirmation.
+- Three two-minute confirmation repetitions used the scheduled
+  `500/650/800/1000` ladder and stopped each run at its first unsustainable
+  stage. The control passed 500 in all three and failed 650 in all three:
+  business p95 rose to 6.371-8.633 seconds and backlog to 5,609-7,189 while
+  throughput remained approximately 649.6 msg/s. `64` passed 500 once; its
+  other two repetitions dropped 2 and 246 scheduled iterations at 500, and
+  its first repetition dropped 7 at 650. `100` reached maxima of 500, 650,
+  and 500; its best repetition passed 650 at 649.967 msg/s, 120.933 ms p95,
+  backlog 189, and 0.604-second drain, then dropped 8 iterations at 800.
+- Every screening and confirmation stage reconciled exactly with zero broker
+  redelivery and zero DLQ. Neither candidate sustained a higher stage than the
+  control in all three repetitions, so the site default remains the minimum
+  `1`; larger batches remain an explicit opt-in rather than a capacity claim.
+  The durable reports are under ignored `tmp/capacity/batch-screen-*` and
+  `tmp/capacity/batch-confirm-*`.
+- Workspace-aware targeted Go tests passed against the local Outbox checkout.
+  The repository-wide `make check` intentionally uses `GOWORK=off` and still
+  resolves published Outbox `v0.11.0`, so it stops at the new option until a
+  later Outbox release is published and pinned. The capacity images therefore
+  used an isolated temporary source copy with local module replacements; the
+  checked-in module graph was not rewritten, and no tag or publication was
+  performed.
+
+## 2026-08-28 — Producer to Outbox relay pre-batch optimization
+
+- Removed the per-message `UPDATE demo.envelope_measurements` from the relay
+  success path. A successful JetStream `PubAck` now records the actual
+  publication instant in memory; a recorder deduplicates message IDs and uses
+  one `UPDATE ... FROM unnest(...)` for up to 256 confirmations or every 50 ms.
+  Recorder failures do not retry or DLQ the delivered message, but they make the
+  benchmark unhealthy and fail final integrity. Shutdown stops the relay before
+  a bounded recorder flush, and load-window counts are rebuilt from the flushed
+  timestamps after drain.
+- The three PostgreSQL 17.9 recorder-only controls retained one shared Outbox
+  pool. All passed reconciliation without redelivery or DLQ; 250 msg/s was
+  sustainable in all three runs, while 325 msg/s was sustainable in one of
+  three. The two failing 325 stages reached maximum Outbox backlogs of 1,142 and
+  2,486; the successful run reached 636. This control therefore remained too
+  variable to establish a higher capacity floor.
+- Split the example into host-owned producer and relay pgx pools with distinct
+  `application_name` values. Site defaults are producer `min=1/max=9` and relay
+  `min=1/max=1`; the controller rejects a site profile whose pgx maxima do not
+  sum to ten. `StageOrder` begins the business transaction on the producer pool
+  while the relay-bound repository stages through the `pgx.Tx` carried in
+  context, preserving atomic business-row plus Outbox-job commit/rollback.
+  Capacity telemetry reports both pool sizes, acquire counts/durations, empty
+  acquires, and observed maximum acquisition separately.
+- In the three comparable 9+1 candidate repetitions, 250 msg/s was sustainable
+  in all three and 325 msg/s in two of three. At 325, effective throughput was
+  324.758-324.825 msg/s, no iteration was dropped, and every run passed exact
+  integrity with zero redelivery and DLQ. The failing repetition reached a
+  1,139-job maximum Outbox backlog and 2,866 ms business p95; the two passing
+  repetitions reached 249/51 jobs and 217/104 ms. The second repetition was
+  intentionally stopped after its completed 325 stage when the default matrix
+  began an out-of-scope 350 stage; its completed 250/325 results remain intact.
+- Producer saturation reached the configured nine connections in every
+  candidate run, while relay acquisition remained bounded to its guaranteed
+  connection. Through the 325 boundary, cumulative relay acquire duration was
+  0.171-0.321 seconds versus approximately 2.505 seconds for the shared-pool
+  control, and the complete pgx budget remained ten. This proves the intended
+  fairness/isolation boundary, but the remaining 325 variability means no new
+  capacity floor is claimed and batch reservation remains out of scope.
+- A direct clean-checkout verification then sustained both 250 and 325 msg/s
+  with the same one-worker `9 + 1` topology. At 325 it delivered 324.725 msg/s,
+  reached a 224-job maximum backlog, drained in 0.521 seconds, and retained
+  exact reconciliation with zero redelivery and DLQ.
+- The first pre-batch throughput change was host-only worker concurrency. Two
+  relay workers sharing the guaranteed relay connection sustained a direct
+  500 msg/s stage at 499.958 msg/s, with a 383-job maximum backlog, 182.292 ms
+  business p95, a 0.490-second drain, and exact reconciliation. ACK/delete and
+  reservation remain individual; the library worker default is unchanged.
+- A same-budget `8 + 2` A/B run removed relay-pool acquisition wait but shifted
+  contention into the producer pool: producer acquire wait rose to 3.411
+  seconds, maximum backlog reached 1,941, and business p95 reached 2.412
+  seconds, failing the site SLO. The site profile therefore defaults to two
+  relay workers with the proven `9 + 1` pool split. This targeted run selects a
+  benchmark topology; it is not a general 500 msg/s capacity-floor claim.
+
+## 2026-08-27 — PostgreSQL Inbox fresh-success optimization
+
+- Replaced the fresh `ProcessAttempt` preparation with namespace-aware data-modifying CTEs for the default and explicit
+  attempt-generation tables. A fresh identity now creates its initial attempt in the same statement; conflicts retain
+  the existing identity lock, fingerprint validation, duplicate handling, and stored-attempt path. No schema, migration,
+  public API, transaction ownership, or ACK-ordering contract changed.
+- Removed explicit savepoint release before outer commit. The PostgreSQL and SQLite success paths commit directly; a
+  failed handler still executes `ROLLBACK TO SAVEPOINT`, persists the durable failure outcome outside the rolled-back
+  handler work, and lets the outer commit close the savepoint. PostgreSQL finalization/cancellation/concurrency tests and
+  a dedicated SQLite rollback-then-success regression cover these boundaries.
+- Recorded the candidate at commit `629bf011f910fff1b965073afa015530ab55e7bf` (`gitDirty=false`) on the same host and
+  container topology as the baseline. PostgreSQL-only statement telemetry observed exactly 20,000 calls each to
+  `BEGIN`, the combined identity/attempt CTE, `SAVEPOINT`, the one-row handler insert, completion update, and `COMMIT`.
+  The missing-attempt read, separate attempt insert, and successful `RELEASE SAVEPOINT` disappeared, confirming the
+  intended reduction from nine to six sequential database interactions.
+
+  | PostgreSQL-only profile | Baseline median | Candidate median | Change |
+  | --- | ---: | ---: | ---: |
+  | C1 throughput | 1,643.40 ops/s | 2,739.97 ops/s | +66.7% |
+  | C1 Inbox p50/p95/p99 | 0.564/0.760/1.284 ms | 0.346/0.429/0.617 ms | -38.7%/-43.6%/-51.9% |
+  | C4 throughput | 4,968.82 ops/s | 7,232.74 ops/s | +45.6% |
+  | C4 Inbox p50/p95/p99 | 0.752/1.138/1.574 ms | 0.529/0.664/0.991 ms | -29.7%/-41.6%/-37.0% |
+
+- The three PostgreSQL 17 site-shaped repetitions produced the following candidate medians. Every reached stage passed
+  exact post-drain reconciliation with no redelivery or DLQ.
+
+  | Target | Passed/reached | Median effective | Median Inbox p50/p95/p99 | Median business p95 | Median drain |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 250 msg/s | 3/3 | 249.950 msg/s | 0.545/0.862/1.309 ms | 100.553 ms | 0.510 s |
+  | 325 msg/s | 2/3 | 324.733 msg/s | 0.530/1.036/2.215 ms | 322.772 ms | 0.452 s |
+  | 350 msg/s | 2/2 | 348.558 msg/s | 0.528/0.930/1.863 ms | 225.465 ms | 0.787 s |
+  | 400 msg/s | 2/2 | 399.838 msg/s | 0.527/0.985/2.220 ms | 607.252 ms | 0.448 s |
+  | 500 msg/s | 0/2 | 463.042 msg/s | 0.554/1.456/2.234 ms | 10,572.612 ms | 10.502 s |
+
+  Two repetitions sustained every stage through 400 msg/s and stopped at 500. The remaining repetition sustained 250
+  and stopped at 325 after the Outbox backlog reached 6,973, k6 dropped 117 iterations, and business p95 reached
+  19.14 seconds; its Inbox p95 was only 1.84 ms, and integrity still passed. The 350 target therefore passed every run
+  that reached it, but not all three scheduled repetitions reached that target. Under the strict all-repetition reading,
+  this local matrix does not yet authorize describing a patch release as a proven 350 msg/s performance fix.
+- The unchanged PostgreSQL 18 O4/C4/32 quick profile sustained 500 msg/s in all three candidate repetitions. At 500,
+  median effective throughput was 499.700 msg/s and median Inbox p50/p95/p99 was 1.001/1.544/2.107 ms versus the
+  baseline 499.667 msg/s and 1.380/2.155/3.207 ms; median business p95 was 95.039 ms and median drain was 0.384 s.
+- Historical resource peaks were not directly comparable after the local Docker/host state shifted. A detached
+  contemporaneous baseline control measured 53.70 MiB peak application RSS and 40.02 MiB PostgreSQL-only runner RSS;
+  candidate medians were 52.09 MiB and 29.07 MiB respectively. The control also retained slower Inbox latency, so the
+  candidate has no observed greater-than-5% RSS or C4 latency regression in the contemporaneous comparison. Raw
+  candidate and control evidence remains ignored under `tmp/capacity/`.
+
 ## 2026-08-27 — PostgreSQL Inbox measurement baseline
 
 - Added a named PostgreSQL 17 site-shaped capacity profile while preserving the existing PostgreSQL 18 quick/full

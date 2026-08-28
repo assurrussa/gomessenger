@@ -82,7 +82,7 @@ may describe unreleased APIs that are not present in that release line. Use the 
 [Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.2.1) for the exact release API, or use the checkout
 workflow below when evaluating unreleased changes.
 
-Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.11.0`; the
+Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.12.0`; the
 host selects and installs its matching database backend separately. To evaluate the current checkout instead:
 
 ```sh
@@ -140,11 +140,21 @@ make capacity-inbox-postgres
 ```
 
 The default command retains the four-Outbox/four-consumer PostgreSQL 18 profile. The site-shaped command uses
-PostgreSQL 17 with one Outbox worker, one consumer, and a ten-connection business pool; the PostgreSQL-only command
+PostgreSQL 17 with two Outbox workers, reservation batch `1`, one consumer, isolated Outbox producer/relay pools fixed at `9 + 1`, and a
+separate ten-connection Inbox/measurement pool; the PostgreSQL-only command
 isolates the real Inbox `ProcessAttempt` transaction without Outbox or NATS. They report unique committed business
 effects, canonical envelope bytes, Inbox/ACK latency, and PostgreSQL statement/WAL/I/O telemetry. See the
 [example capacity contract](examples/durable-postgres-nats#capacity-experiment). Results describe only the recorded
 checkout, host, and local Docker topology; they are not production benchmark claims.
+
+Set `OUTBOX_RESERVATION_BATCH_SIZE=16` (valid `1..1000`) to A/B only the
+reservation/prefetch width. The default remains `1`. Each Outbox worker still
+publishes and acknowledges jobs sequentially, so this does not multiply
+handler concurrency. Capacity report spec `1.3` records the batch and exact
+Outbox module version in JSON and Markdown. It reports relay throughput from
+published envelopes, consumer throughput and MiB/s from committed projections,
+and separates `staged - published` Outbox lag from `published - committed`
+consumer lag. Warm-up and drain remain outside every throughput denominator.
 
 ## Guarantees
 
@@ -209,7 +219,7 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 
 The module set uses synchronized path-qualified `v0.2.1` tags. Release completion requires every tag above plus the
 clean post-publication consumer probe; neither is inferred from source-only checks. Outbox root and its
-PostgreSQL/SQLite backend tags at `v0.11.0` are the pinned durable-producer dependencies. During repository development
+PostgreSQL/SQLite backend tags at `v0.12.0` are the pinned durable-producer dependencies. During repository development
 `go.work` selects local GoMessenger modules; published consumers use matching path-qualified tags and no local
 `replace` directives. See the [release process](docs/release.md) for dependency order and verification.
 
@@ -584,8 +594,8 @@ checked explicitly:
 
 ```sh
 make check
-make release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.11.0
-make release-readiness VERSION=v0.2.1 OUTBOX_VERSION=v0.11.0
+make release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0
+make release-readiness VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0
 ```
 
 Run the full source gate before `release-ready` removes development replacements. `release-readiness` then checks the

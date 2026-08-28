@@ -26,6 +26,25 @@ func realMain() int {
 		log.Error("invalid capacity service configuration", "error", err)
 		return 2
 	}
+	config.OutboxReservationBatchSize, err = envInt(
+		"OUTBOX_RESERVATION_BATCH_SIZE", config.OutboxReservationBatchSize,
+	)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.OutboxProducerMaxConns, err = envInt(
+		"OUTBOX_PRODUCER_MAX_CONNS", config.OutboxProducerMaxConns,
+	)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.OutboxRelayMaxConns, err = envInt("OUTBOX_RELAY_MAX_CONNS", config.OutboxRelayMaxConns)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
 	config.ConsumerConcurrency, err = envInt("NATS_CONSUMER_CONCURRENCY", config.ConsumerConcurrency)
 	if err != nil {
 		log.Error("invalid capacity service configuration", "error", err)

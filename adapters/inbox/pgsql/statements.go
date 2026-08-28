@@ -1,26 +1,28 @@
 package pgsql
 
 type statements struct {
-	insertIdentity             string
-	markComplete               string
-	markTerminal               string
-	markTerminalGeneration     string
-	lockIdentity               string
-	readIdentity               string
-	insertAttempt              string
-	insertAttemptGeneration    string
-	incrementAttempt           string
-	incrementAttemptGeneration string
-	readAttempt                string
-	readAttemptGeneration      string
-	deleteAttempt              string
-	deleteAttemptGeneration    string
-	hasAttempts                string
-	deleteIncompleteIdentity   string
-	pruneAttemptGenerations    string
-	pruneAttempts              string
-	pruneInbox                 string
-	lockPruneBatch             string
+	insertIdentity                     string
+	insertIdentityAndAttempt           string
+	insertIdentityAndAttemptGeneration string
+	markComplete                       string
+	markTerminal                       string
+	markTerminalGeneration             string
+	lockIdentity                       string
+	readIdentity                       string
+	insertAttempt                      string
+	insertAttemptGeneration            string
+	incrementAttempt                   string
+	incrementAttemptGeneration         string
+	readAttempt                        string
+	readAttemptGeneration              string
+	deleteAttempt                      string
+	deleteAttemptGeneration            string
+	hasAttempts                        string
+	deleteIncompleteIdentity           string
+	pruneAttemptGenerations            string
+	pruneAttempts                      string
+	pruneInbox                         string
+	lockPruneBatch                     string
 }
 
 func newStatements(names namespace) statements {
@@ -29,6 +31,28 @@ func newStatements(names namespace) statements {
         (consumer_id, source, message_id, fingerprint, created_at)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (consumer_id, source, message_id) DO NOTHING`),
+		insertIdentityAndAttempt: names.render(`WITH inserted_identity AS (
+        INSERT INTO {{inbox}}
+            (consumer_id, source, message_id, fingerprint, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (consumer_id, source, message_id) DO NOTHING
+        RETURNING consumer_id, source, message_id
+    )
+    INSERT INTO {{attempts}}
+        (consumer_id, source, message_id, fingerprint, attempts, updated_at)
+    SELECT consumer_id, source, message_id, $4, 1, $5
+    FROM inserted_identity`),
+		insertIdentityAndAttemptGeneration: names.render(`WITH inserted_identity AS (
+        INSERT INTO {{inbox}}
+            (consumer_id, source, message_id, fingerprint, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (consumer_id, source, message_id) DO NOTHING
+        RETURNING consumer_id, source, message_id
+    )
+    INSERT INTO {{attempt_generations}}
+        (consumer_id, source, message_id, fingerprint, attempts, updated_at)
+    SELECT consumer_id, source, message_id, $6, 1, $5
+    FROM inserted_identity`),
 		markComplete: names.render(`UPDATE {{inbox}} SET completed_at = $1
         WHERE consumer_id = $2 AND source = $3 AND message_id = $4`),
 		markTerminal: names.render(`UPDATE {{attempts}}

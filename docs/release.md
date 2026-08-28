@@ -45,21 +45,24 @@ Passing local gates proves the checkout, not the published module graph.
 
 ## Prepare exact module requirements
 
-The GoMessenger outbox adapter depends on the additive outbox v0.11 contract. Outbox root and backend `v0.11.0` tags are
+The GoMessenger outbox adapter depends on the unified outbox v0.12 contract. Outbox root and backend `v0.12.0` tags are
 already published. Prepare all GoMessenger module requirements in one reviewable commit:
 
 ```sh
 make check
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
 ```
 
 `release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements
-from nested `go.mod` files, adds matching local pre-tag replacements only to `go.work`, and formats source. It
-deliberately does not tidy unpublished nested dependencies.
+from nested `go.mod` files, adds matching local pre-tag replacements to `go.work`, and uses a temporary local root
+replacement only while tidying the Outbox adapter before its requested GoMessenger tag exists. It then tidies the
+durable example, clean consumer, and SQLite E2E modules with `GOWORK=off`, and formats source. Run it only after the
+selected Outbox root and backend tags resolve from the Go proxy.
 `release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus
-the Outbox root and SQLite backend requirements used by clean consumer/E2E modules. It rejects remaining `replace`
-directives in published module files and any Outbox replacement in clean consumer/E2E modules. The unpublished local
+the Outbox root/SQLite pair used by clean consumer/E2E modules and the Outbox root/PostgreSQL pair used by the durable
+example. It rejects remaining `replace` directives in published module files and any Outbox replacement in these
+consumer/example modules. The unpublished local
 E2E module deliberately keeps GoMessenger path replacements to test the checkout itself; it is not a published-module
 resolution probe. The gate does not resolve or test the not-yet-published GoMessenger tags. The full source gate must
 pass before release preparation; published resolution is proved separately after the dependency-ordered tags exist.

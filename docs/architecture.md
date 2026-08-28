@@ -65,9 +65,9 @@ that could change identity or timestamps.
 
 ## Producer transaction
 
-The outbox adapter requires the additive unique-put capability published in outbox v0.11.0. It uses the message ID as the
-unique key and fingerprints the immutable job definition. The host supplies the transaction through its configured
-outbox repository context; GoMessenger does not begin or commit the business transaction.
+The outbox adapter requires the unified version-aware repository contract published in outbox v0.12.0. It uses the
+message ID as the unique key and fingerprints the immutable job definition. The host supplies the transaction through
+its configured outbox repository context; GoMessenger does not begin or commit the business transaction.
 
 This boundary provides the following invariant:
 

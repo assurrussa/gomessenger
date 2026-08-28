@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.2.1
-	github.com/assurrussa/outbox v0.11.0
+	github.com/assurrussa/outbox v0.12.0
 )
 
 require (

@@ -155,9 +155,6 @@ func (b *backend) ProcessAttempt(
 	if handlerErr := handler(handlerContext); handlerErr != nil {
 		return b.finishFailedAttempt(ctx, tx, key, fingerprint, attempt, handlerErr)
 	}
-	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
-		return result, fmt.Errorf("inbox/sqlite: release handler savepoint: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, b.statements.markComplete,
 		b.clock().UTC(), key.ConsumerID, key.Source, key.MessageID.String()); err != nil {
 		return result, fmt.Errorf("inbox/sqlite: mark attempt complete: %w", err)
@@ -178,9 +175,6 @@ func (b *backend) finishFailedAttempt(
 ) (inbox.Result, error) {
 	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT gomessenger_handler"); err != nil {
 		return inbox.Result{}, fmt.Errorf("inbox/sqlite: rollback handler writes: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT gomessenger_handler"); err != nil {
-		return inbox.Result{}, fmt.Errorf("inbox/sqlite: release failed handler savepoint: %w", err)
 	}
 	if err := b.markAttemptTerminal(ctx, tx, key, fingerprint, handlerErr); err != nil {
 		return inbox.Result{}, err

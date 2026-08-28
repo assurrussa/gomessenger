@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
 	outboxstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
@@ -108,44 +109,57 @@ type confirmedEnvelopePublisher interface {
 
 type measurementPublisher struct {
 	delegate confirmedEnvelopePublisher
-	mark     func(context.Context, envelopeMeasurement) error
+	record   func(publicationConfirmation)
+	now      func() time.Time
 }
 
 func newMeasurementPublisher(
 	delegate confirmedEnvelopePublisher,
-	mark func(context.Context, envelopeMeasurement) error,
+	record func(publicationConfirmation),
 ) (*measurementPublisher, error) {
-	if delegate == nil || mark == nil {
+	return newMeasurementPublisherWithClock(delegate, record, time.Now)
+}
+
+func newMeasurementPublisherWithClock(
+	delegate confirmedEnvelopePublisher,
+	record func(publicationConfirmation),
+	now func() time.Time,
+) (*measurementPublisher, error) {
+	if delegate == nil || record == nil || now == nil {
 		return nil, errors.New("capacity measurement publisher requires a delegate and marker")
 	}
-	return &measurementPublisher{delegate: delegate, mark: mark}, nil
+	return &measurementPublisher{delegate: delegate, record: record, now: now}, nil
 }
 
 func (p *measurementPublisher) PublishEnvelope(
 	ctx context.Context,
 	payload []byte,
 ) (messenger.Receipt, error) {
-	receipt, err := p.delegate.PublishEnvelope(ctx, payload)
-	if err != nil {
-		return messenger.Receipt{}, err
-	}
 	envelope, err := messenger.UnmarshalEnvelope(payload)
 	if err != nil {
-		return messenger.Receipt{}, fmt.Errorf("decode broker-confirmed envelope: %w", err)
+		return messenger.Receipt{}, fmt.Errorf("decode envelope before broker publish: %w", err)
 	}
 	labels, measured, err := benchmarkLabels(envelope.Headers)
 	if err != nil {
 		return messenger.Receipt{}, err
 	}
-	if !measured {
-		return receipt, nil
+	var confirmation publicationConfirmation
+	if measured {
+		digest := sha256.Sum256(payload)
+		confirmation.envelopeMeasurement = envelopeMeasurement{
+			MessageID: envelope.ID.String(), Labels: labels, EnvelopeBytes: int64(len(payload)),
+			SHA256: hex.EncodeToString(digest[:]),
+		}
 	}
-	digest := sha256.Sum256(payload)
-	if err := p.mark(ctx, envelopeMeasurement{
-		MessageID: envelope.ID.String(), Labels: labels, EnvelopeBytes: int64(len(payload)),
-		SHA256: hex.EncodeToString(digest[:]),
-	}); err != nil {
-		return messenger.Receipt{}, fmt.Errorf("mark broker-confirmed envelope: %w", err)
+	receipt, err := p.delegate.PublishEnvelope(ctx, payload)
+	if err != nil {
+		return messenger.Receipt{}, err
+	}
+	if measured {
+		// PubAck is complete. Recorder health is observed out of band and must
+		// never turn a confirmed broker publication into a relay retry.
+		confirmation.PublishedAt = p.now().UTC()
+		p.record(confirmation)
 	}
 	return receipt, nil
 }

@@ -146,11 +146,13 @@ func TestMeasurementPublisherMarksExactConfirmedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalEnvelope() error = %v", err)
 	}
-	var got envelopeMeasurement
-	publisher, err := newMeasurementPublisher(publisherStub{}, func(_ context.Context, measurement envelopeMeasurement) error {
-		got = measurement
-		return nil
-	})
+	publishedAt := time.Date(2026, 8, 27, 12, 34, 56, 789, time.FixedZone("test", 5*60*60))
+	var got publicationConfirmation
+	publisher, err := newMeasurementPublisherWithClock(
+		publisherStub{},
+		func(confirmation publicationConfirmation) { got = confirmation },
+		func() time.Time { return publishedAt },
+	)
 	if err != nil {
 		t.Fatalf("newMeasurementPublisher() error = %v", err)
 	}
@@ -161,6 +163,40 @@ func TestMeasurementPublisherMarksExactConfirmedEnvelope(t *testing.T) {
 	if got.MessageID != messageID.String() || got.EnvelopeBytes != int64(len(envelope)) ||
 		got.SHA256 != fmtDigest(digest) {
 		t.Fatalf("measurement = %#v", got)
+	}
+	if !got.PublishedAt.Equal(publishedAt) || got.PublishedAt.Location() != time.UTC {
+		t.Fatalf("publishedAt = %s, want UTC %s", got.PublishedAt, publishedAt.UTC())
+	}
+}
+
+func TestMeasurementPublisherDoesNotRecordWithoutPubAck(t *testing.T) {
+	t.Parallel()
+
+	messageID := mustMessageID(t)
+	metadata := messenger.Metadata{
+		ID: messageID, Kind: messenger.KindEvent, Name: "orders.created", SchemaVersion: 1,
+		Source: "urn:test", Time: time.Unix(1_700_000_000, 0).UTC(), CorrelationID: messageID,
+		ContentType: "application/json",
+		Headers: map[string]string{
+			BenchmarkRunHeader: testRunID, BenchmarkStageHeader: testStageID,
+		},
+	}
+	envelope, err := messenger.MarshalEnvelope(metadata, []byte(`{"orderId":"one"}`), messenger.DataJSON)
+	if err != nil {
+		t.Fatalf("MarshalEnvelope() error = %v", err)
+	}
+	publishErr := errors.New("PubAck failed")
+	recorded := false
+	publisher, err := newMeasurementPublisher(
+		publisherStub{err: publishErr},
+		func(publicationConfirmation) { recorded = true },
+	)
+	if err != nil {
+		t.Fatalf("newMeasurementPublisher() error = %v", err)
+	}
+	_, err = publisher.PublishEnvelope(context.Background(), envelope)
+	if !errors.Is(err, publishErr) || recorded {
+		t.Fatalf("PublishEnvelope() error=%v recorded=%v", err, recorded)
 	}
 }
 

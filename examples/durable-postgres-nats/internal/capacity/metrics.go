@@ -66,9 +66,14 @@ func buildStageReport(input stageReportInput) StageReport {
 		LoadStartedAt: input.loadStartedAt, LoadEndedAt: input.loadEndedAt, LoadWindowSeconds: loadSeconds,
 		DrainSeconds: input.drainDuration.Seconds(), DrainCompleted: input.drainCompleted,
 		LoadWindow: loadCounts, AfterDrain: afterDrain,
-		EffectiveMessagesPerSec: ratePerSecond(loadCounts.Committed, loadSeconds),
-		EffectiveMiBPerSec:      float64(loadCounts.CommittedBytes) / bytesPerMiB / loadSeconds,
+		RelayMessagesPerSec:     ratePerSecond(loadCounts.Published, loadSeconds),
+		ConsumerMessagesPerSec:  ratePerSecond(loadCounts.Committed, loadSeconds),
+		ConsumerMiBPerSec:       float64(loadCounts.CommittedBytes) / bytesPerMiB / loadSeconds,
 		AcceptedMessagesPerSec:  ratePerSecond(loadCounts.BusinessAccepted, loadSeconds),
+		OutboxLag:               loadCounts.Staged - loadCounts.Published,
+		ConsumerLag:             loadCounts.Published - loadCounts.Committed,
+		OutboxLagGrowthPerSec:   outboxLagSlope(input.samples, loadSeconds),
+		ConsumerLagGrowthPerSec: consumerLagSlope(input.samples, loadSeconds),
 		BacklogSlopePerSec:      backlogSlope(input.samples, loadSeconds),
 		Latency:                 input.latency,
 		InboxHandle:             input.final.Application.Consumer.InboxHandle,
@@ -152,15 +157,30 @@ func sustainabilityReasons(config Config, report StageReport) []string {
 			"business acceptance %.2f msg/s is below %.2f msg/s", report.AcceptedMessagesPerSec, minimumRate,
 		))
 	}
-	if report.EffectiveMessagesPerSec < minimumRate {
+	if report.RelayMessagesPerSec < minimumRate {
 		reasons = append(reasons, fmt.Sprintf(
-			"committed throughput %.2f msg/s is below %.2f msg/s", report.EffectiveMessagesPerSec, minimumRate,
+			"relay throughput %.2f msg/s is below %.2f msg/s", report.RelayMessagesPerSec, minimumRate,
+		))
+	}
+	if report.ConsumerMessagesPerSec < minimumRate {
+		reasons = append(reasons, fmt.Sprintf(
+			"consumer throughput %.2f msg/s is below %.2f msg/s", report.ConsumerMessagesPerSec, minimumRate,
 		))
 	}
 	maximumSlope := float64(report.TargetRate) * maximumLagSlopeRatio
+	if report.OutboxLagGrowthPerSec > maximumSlope {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox lag growth %.2f msg/s exceeds %.2f msg/s", report.OutboxLagGrowthPerSec, maximumSlope,
+		))
+	}
+	if report.ConsumerLagGrowthPerSec > maximumSlope {
+		reasons = append(reasons, fmt.Sprintf(
+			"consumer lag growth %.2f msg/s exceeds %.2f msg/s", report.ConsumerLagGrowthPerSec, maximumSlope,
+		))
+	}
 	if report.BacklogSlopePerSec > maximumSlope {
 		reasons = append(reasons, fmt.Sprintf(
-			"backlog slope %.2f msg/s exceeds %.2f msg/s", report.BacklogSlopePerSec, maximumSlope,
+			"end-to-end backlog growth %.2f msg/s exceeds %.2f msg/s", report.BacklogSlopePerSec, maximumSlope,
 		))
 	}
 	if report.Latency.P95Millis > float64(config.E2EP95SLO.Milliseconds()) {
@@ -191,6 +211,28 @@ func sustainabilityReasons(config Config, report StageReport) []string {
 }
 
 func backlogSlope(samples []Sample, loadSeconds float64) float64 {
+	return boundaryLagSlope(samples, loadSeconds, func(snapshot BusinessSnapshot) int64 {
+		return snapshot.Accepted - snapshot.Committed
+	})
+}
+
+func outboxLagSlope(samples []Sample, loadSeconds float64) float64 {
+	return boundaryLagSlope(samples, loadSeconds, func(snapshot BusinessSnapshot) int64 {
+		return snapshot.Staged - snapshot.Published
+	})
+}
+
+func consumerLagSlope(samples []Sample, loadSeconds float64) float64 {
+	return boundaryLagSlope(samples, loadSeconds, func(snapshot BusinessSnapshot) int64 {
+		return snapshot.Published - snapshot.Committed
+	})
+}
+
+func boundaryLagSlope(
+	samples []Sample,
+	loadSeconds float64,
+	lag func(BusinessSnapshot) int64,
+) float64 {
 	points := make([]Sample, 0, len(samples))
 	for _, sample := range samples {
 		if sample.Phase == "load" &&
@@ -204,7 +246,7 @@ func backlogSlope(samples []Sample, loadSeconds float64) float64 {
 	var sumX, sumY, sumXY, sumXX float64
 	for _, point := range points {
 		x := point.ElapsedSeconds
-		y := float64(point.Business.Accepted - point.Business.Committed)
+		y := float64(lag(point.Business))
 		sumX += x
 		sumY += y
 		sumXY += x * y

@@ -80,6 +80,8 @@ done
 check_dependency_no_replace testdata/consumer github.com/assurrussa/outbox
 check_dependency_no_replace testdata/e2e github.com/assurrussa/outbox
 check_dependency_no_replace testdata/e2e github.com/assurrussa/outbox/backends/sqlite
+check_dependency_no_replace examples/durable-postgres-nats github.com/assurrussa/outbox
+check_dependency_no_replace examples/durable-postgres-nats github.com/assurrussa/outbox/backends/pgsql
 
 check_requirement adapters/inbox github.com/assurrussa/gomessenger "$version"
 check_requirement adapters/kafka github.com/assurrussa/gomessenger "$version"
@@ -102,3 +104,5 @@ check_requirement testdata/consumer github.com/assurrussa/gomessenger/observabil
 check_requirement testdata/consumer github.com/assurrussa/outbox "$outbox_version"
 check_requirement testdata/e2e github.com/assurrussa/outbox "$outbox_version"
 check_requirement testdata/e2e github.com/assurrussa/outbox/backends/sqlite "$outbox_version"
+check_requirement examples/durable-postgres-nats github.com/assurrussa/outbox "$outbox_version"
+check_requirement examples/durable-postgres-nats github.com/assurrussa/outbox/backends/pgsql "$outbox_version"
