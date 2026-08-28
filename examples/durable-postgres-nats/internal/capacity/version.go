@@ -2,12 +2,15 @@ package capacity
 
 import "runtime/debug"
 
-const outboxModulePath = "github.com/assurrussa/outbox"
+const (
+	outboxModulePath = "github.com/assurrussa/outbox"
+	unknownValue     = "unknown"
+)
 
 func outboxModuleVersion() string {
 	build, ok := debug.ReadBuildInfo()
 	if !ok {
-		return "unknown"
+		return unknownValue
 	}
 	return dependencyVersion(build.Deps, outboxModulePath)
 }
@@ -26,7 +29,7 @@ func dependencyVersion(dependencies []*debug.Module, path string) string {
 		if dependency.Version != "" {
 			return dependency.Version
 		}
-		return "unknown"
+		return unknownValue
 	}
-	return "unknown"
+	return unknownValue
 }

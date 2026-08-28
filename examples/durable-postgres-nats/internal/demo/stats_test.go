@@ -3,13 +3,9 @@ package demo
 
 import (
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,32 +96,15 @@ func TestStatsSourceDoesNotExecuteAdditionalSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, imported := range parsed.Imports {
-		path, unquoteErr := strconv.Unquote(imported.Path.Value)
-		if unquoteErr != nil {
-			t.Fatal(unquoteErr)
-		}
-		if path == "database/sql" {
-			t.Fatal("stats.go must not import database/sql")
+	sourceText := string(source)
+	for _, forbidden := range []string{`"database/sql"`, ".QueryRowContext(", ".QueryContext("} {
+		if strings.Contains(sourceText, forbidden) {
+			t.Fatalf("stats.go contains forbidden SQL boundary %q", forbidden)
 		}
 	}
-	ast.Inspect(parsed, func(node ast.Node) bool {
-		switch value := node.(type) {
-		case *ast.SelectorExpr:
-			if value.Sel.Name == "QueryRowContext" || value.Sel.Name == "QueryContext" {
-				t.Errorf("stats.go executes an additional SQL query through %s", value.Sel.Name)
-			}
-		case *ast.BasicLit:
-			if value.Kind == token.STRING && strings.Contains(strings.ToUpper(value.Value), "SELECT ") {
-				t.Error("stats.go contains an additional SELECT statement")
-			}
-		}
-		return true
-	})
+	if strings.Contains(strings.ToUpper(sourceText), "SELECT ") {
+		t.Fatal("stats.go contains an additional SELECT statement")
+	}
 }
 
 const outboxRelayCapability = "gomessenger.relay"

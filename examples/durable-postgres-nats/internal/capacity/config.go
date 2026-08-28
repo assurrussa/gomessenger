@@ -113,11 +113,11 @@ func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 		ConsumerConcurrency:        4,
 		DBMaxOpenConns:             32,
 		PayloadProfile:             demo.CapacityPayloadMixed,
-		HostOS:                     envValue(lookup, "CAPACITY_HOST_OS", "unknown"),
-		HostArch:                   envValue(lookup, "CAPACITY_HOST_ARCH", "unknown"),
-		HostCPUs:                   envValue(lookup, "CAPACITY_HOST_CPUS", "unknown"),
-		GitCommit:                  envValue(lookup, "CAPACITY_GIT_COMMIT", "unknown"),
-		GitDirty:                   envValue(lookup, "CAPACITY_GIT_DIRTY", "unknown"),
+		HostOS:                     envValue(lookup, "CAPACITY_HOST_OS", unknownValue),
+		HostArch:                   envValue(lookup, "CAPACITY_HOST_ARCH", unknownValue),
+		HostCPUs:                   envValue(lookup, "CAPACITY_HOST_CPUS", unknownValue),
+		GitCommit:                  envValue(lookup, "CAPACITY_GIT_COMMIT", unknownValue),
+		GitDirty:                   envValue(lookup, "CAPACITY_GIT_DIRTY", unknownValue),
 	}
 	if profile == ProfileFull {
 		config.Rates = []int{50, 100, 250, 500, 1_000, 2_000}

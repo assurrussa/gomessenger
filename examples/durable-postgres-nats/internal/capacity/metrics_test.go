@@ -179,12 +179,12 @@ func TestReportSpec13JSONAndMarkdownExposeOnlySeparatedMetrics(t *testing.T) {
 		SpecVersion: reportSpecVersion,
 		RunID:       "spec-1.3",
 		Stages:      []StageReport{stage},
-		Environment: Environment{OutboxVersion: "v0.12.0", PostgreSQLSettings: map[string]string{}},
+		Environment: Environment{OutboxVersion: testOutboxVersion, PostgreSQLSettings: map[string]string{}},
 	})
 	for _, fragment := range []string{
 		"Relay msg/s", "Consumer msg/s", "Consumer MiB/s", "Outbox lag", "Consumer lag",
 		"relay msg/s = published delta", "consumer msg/s = committed projection delta",
-		"Outbox module: `v0.12.0`",
+		"Outbox module: `" + testOutboxVersion + "`",
 	} {
 		if !strings.Contains(markdown, fragment) {
 			t.Fatalf("Markdown does not contain %q:\n%s", fragment, markdown)
@@ -249,6 +249,10 @@ func sampleAt(elapsed float64, count int64, committedBytes int64, streamMessages
 }
 
 func sampleWithBoundaries(elapsed float64, staged, published, committed, committedBytes int64) Sample {
+	if published < 0 {
+		panic("published count must not be negative")
+	}
+
 	return Sample{
 		ElapsedSeconds: elapsed,
 		Phase:          loadPhase,

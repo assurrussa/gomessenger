@@ -420,7 +420,7 @@ func (p *probe) environment(ctx context.Context, config Config) (Environment, er
 	if err := p.db.QueryRowContext(ctx, `/* gomessenger-capacity-probe */ SHOW server_version`).Scan(&postgresVersion); err != nil {
 		return Environment{}, fmt.Errorf("read PostgreSQL version: %w", err)
 	}
-	k6Version := "unknown"
+	k6Version := unknownValue
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	// The binary is an explicit local capacity-runner setting, never HTTP input.
