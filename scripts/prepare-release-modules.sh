@@ -31,6 +31,22 @@ workspace_replace() {
 	go work edit -replace="${dependency}@${wanted}=${local_path}"
 }
 
+tidy_with_local_root() {
+	module="$1"
+	(
+		cd "$module"
+		cleanup_local_root() {
+			go mod edit -dropreplace="github.com/assurrussa/gomessenger@${version}" >/dev/null 2>&1 || true
+		}
+		trap cleanup_local_root EXIT HUP INT TERM
+		go mod edit -dropreplace=github.com/assurrussa/gomessenger
+		go mod edit -replace="github.com/assurrussa/gomessenger@${version}=../.."
+		GOWORK=off go mod tidy
+		cleanup_local_root
+		trap - EXIT HUP INT TERM
+	)
+}
+
 require_resolvable_module() {
 	dependency="$1"
 	wanted="$2"
@@ -77,7 +93,6 @@ drop_replace adapters/kafka github.com/assurrussa/gomessenger
 drop_replace adapters/kafka github.com/assurrussa/gomessenger/adapters/inbox
 drop_replace adapters/nats github.com/assurrussa/gomessenger
 drop_replace adapters/nats github.com/assurrussa/gomessenger/adapters/inbox
-drop_replace adapters/outbox github.com/assurrussa/gomessenger
 drop_replace adapters/outbox github.com/assurrussa/outbox
 drop_replace observability github.com/assurrussa/gomessenger
 drop_replace tools/gomessengerctl github.com/assurrussa/gomessenger
@@ -94,7 +109,8 @@ workspace_replace github.com/assurrussa/gomessenger/adapters/nats "$version" ./a
 workspace_replace github.com/assurrussa/gomessenger/adapters/outbox "$version" ./adapters/outbox
 workspace_replace github.com/assurrussa/gomessenger/observability "$version" ./observability
 
-for module in adapters/outbox examples/durable-postgres-nats testdata/consumer testdata/e2e; do
+tidy_with_local_root adapters/outbox
+for module in examples/durable-postgres-nats testdata/consumer testdata/e2e; do
 	(cd "$module" && GOWORK=off go mod tidy)
 done
 

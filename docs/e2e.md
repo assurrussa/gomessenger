@@ -86,7 +86,8 @@ drains after every stage, and stops at the first unsustainable rate.
 
 `make capacity-nats-site` reproduces PostgreSQL 17, Outbox workers `2`, reservation batch `1`, consumer `1`, and isolated Outbox producer/relay
 `9 + 1` pgx budget, and separate Inbox/measurement pool `10` topology with a
-small deterministic payload and two-minute `250,325,350,400,500 msg/s` stages. Set
+small deterministic payload and one two-minute `2000 msg/s` stage. Override the
+schedule with `CAPACITY_RATES`. Set
 `CAPACITY_PAYLOAD_PROFILE=mixed` for the existing 80/15/5 payload mix. `make capacity-inbox-postgres` removes HTTP,
 Outbox, and NATS and measures the real PostgreSQL `ProcessAttempt` path for concurrency `1` and `4`, with three
 repetitions of `20,000` measured operations after a `1,000`-operation warm-up.

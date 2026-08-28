@@ -55,7 +55,8 @@ make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
 ```
 
 `release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements
-from nested `go.mod` files, adds matching local pre-tag replacements only to `go.work`, tidies the Outbox adapter,
+from nested `go.mod` files, adds matching local pre-tag replacements to `go.work`, and uses a temporary local root
+replacement only while tidying the Outbox adapter before its requested GoMessenger tag exists. It then tidies the
 durable example, clean consumer, and SQLite E2E modules with `GOWORK=off`, and formats source. Run it only after the
 selected Outbox root and backend tags resolve from the Go proxy.
 `release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus

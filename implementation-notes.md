@@ -30,6 +30,11 @@
   root coverage, race/checkptr, clean consumer, and durable E2E coverage. The
   real capacity smoke also proved that the observed relay pool preserves UUID
   scanning, fenced claims, PubAck, and drain behavior.
+- Release preparation now tidies the Outbox adapter through a temporary local
+  root replacement and removes it before returning, so it does not try to
+  resolve an unpublished GoMessenger root tag. An isolated `v0.2.2` pre-tag
+  probe passed both `release-ready` and `release-readiness`; the prepared
+  adapter required `v0.2.2` with no remaining module replacement.
 
 ## 2026-08-28 — Capacity publication-recorder batch boundary
 
