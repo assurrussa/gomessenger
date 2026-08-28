@@ -112,7 +112,7 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 			WaitDurationNanos:  dbStats.WaitDuration.Nanoseconds(),
 		},
 		ProducerDB:      poolStats(producerPool, &a.producerMaxAcquired),
-		RelayDB:         poolStats(relayPool, &a.relayMaxAcquired),
+		RelayDB:         poolStats(relayPool, a.outbox.RelayMaxAcquired()),
 		Publications:    a.publications.Stats(),
 		InboxDuplicates: a.duplicates.Load(),
 		Consumer:        a.observations.stats(labels),

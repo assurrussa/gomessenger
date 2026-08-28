@@ -7,16 +7,20 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pgsql "github.com/assurrussa/outbox/backends/pgsql"
 	"github.com/assurrussa/outbox/backends/pgsql/repositories/jobsfailedrepo"
 	"github.com/assurrussa/outbox/backends/pgsql/repositories/jobsrepo"
+	pgsqlstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
 	"github.com/assurrussa/outbox/backends/pgsql/storage/pgsqlclient"
 	"github.com/assurrussa/outbox/backends/pgsql/storage/pgsqlinit"
 	pgsqltx "github.com/assurrussa/outbox/backends/pgsql/storage/transaction"
 	coreoutbox "github.com/assurrussa/outbox/outbox"
 	"github.com/assurrussa/outbox/outbox/logger"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -29,9 +33,10 @@ const (
 // pgx transaction carried in context by the producer transactor.
 type splitOutboxRuntime struct {
 	producerClient     *pgsqlclient.Client
-	relayClient        *pgsqlclient.Client
+	relayClient        pgsql.Client
 	producerTransactor *pgsqltx.Manager
 	service            *coreoutbox.Service
+	relayAcquisitions  *poolAcquireObserver
 	capabilitiesMu     sync.RWMutex
 	capabilities       map[coreoutbox.JobCapability]struct{}
 
@@ -65,14 +70,12 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 	}
 	closeProducer := func() { _ = producerClient.Close() }
 
-	relayClient, err := pgsqlinit.Create(
+	relayClient, relayAcquisitions, err := openObservedRelayClient(
 		ctx,
 		relayDSN,
-		pgsqlclient.WithMinConnectionsCount(1),
 		// normalizeConfig caps the host setting at 1,024 before this constructor runs.
 		//nolint:gosec // The validated value cannot overflow int32.
-		pgsqlclient.WithMaxConnectionsCount(int32(config.OutboxRelayMaxConns)),
-		pgsqlclient.WithLogger(logger.Discard()),
+		int32(config.OutboxRelayMaxConns),
 	)
 	if err != nil {
 		closeProducer()
@@ -114,6 +117,7 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 		relayClient:        relayClient,
 		producerTransactor: pgsqltx.New(producerClient.DB()),
 		service:            service,
+		relayAcquisitions:  relayAcquisitions,
 		capabilities:       make(map[coreoutbox.JobCapability]struct{}),
 	}, nil
 }
@@ -172,6 +176,10 @@ func (r *splitOutboxRuntime) ProducerClient() pgsql.Client { return r.producerCl
 
 func (r *splitOutboxRuntime) RelayClient() pgsql.Client { return r.relayClient }
 
+func (r *splitOutboxRuntime) RelayMaxAcquired() *atomic.Int32 {
+	return &r.relayAcquisitions.maximum
+}
+
 func (r *splitOutboxRuntime) ProducerTransactor() *pgsqltx.Manager { return r.producerTransactor }
 
 func (r *splitOutboxRuntime) CloseRelay() error {
@@ -188,6 +196,69 @@ func (r *splitOutboxRuntime) CloseProducer() error {
 	}
 	r.closeProducerOnce.Do(func() { r.closeProducerErr = r.producerClient.Close() })
 	return r.closeProducerErr
+}
+
+type observedPoolClient struct {
+	db pgsqlstorage.DBEngine
+}
+
+func (c *observedPoolClient) DB() pgsqlstorage.DBEngine { return c.db }
+
+func (c *observedPoolClient) Close() error {
+	c.db.Close()
+	return nil
+}
+
+type poolAcquireObserver struct {
+	current atomic.Int32
+	maximum atomic.Int32
+}
+
+func (o *poolAcquireObserver) prepareConn(context.Context, *pgx.Conn) (bool, error) {
+	current := o.current.Add(1)
+	for {
+		previous := o.maximum.Load()
+		if current <= previous || o.maximum.CompareAndSwap(previous, current) {
+			return true, nil
+		}
+	}
+}
+
+func (o *poolAcquireObserver) afterRelease(*pgx.Conn) bool {
+	o.current.Add(-1)
+	return true
+}
+
+func openObservedRelayClient(
+	ctx context.Context,
+	dsn string,
+	maxConnections int32,
+) (pgsql.Client, *poolAcquireObserver, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse relay connection string: %w", err)
+	}
+	observer := &poolAcquireObserver{}
+	config.MinConns = 1
+	config.MaxConns = maxConnections
+	config.MaxConnIdleTime = 5 * time.Minute
+	config.MaxConnLifetime = time.Hour
+	config.PrepareConn = observer.prepareConn
+	config.AfterRelease = observer.afterRelease
+	config.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
+		return connection.Ping(ctx)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open relay connection pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("ping relay connection pool: %w", err)
+	}
+	return &observedPoolClient{
+		db: pgsqlclient.NewDBEngine(pool, "prod", logger.Discard()),
+	}, observer, nil
 }
 
 func withApplicationName(dsn, applicationName string) (string, error) {

@@ -90,7 +90,6 @@ type Application struct {
 	cancelRuntime       context.CancelCauseFunc
 	draining            atomic.Bool
 	producerMaxAcquired atomic.Int32
-	relayMaxAcquired    atomic.Int32
 	drainOnce           sync.Once
 	closeOnce           sync.Once
 	closeErr            error

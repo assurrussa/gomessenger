@@ -87,7 +87,7 @@ prefetch only, while each worker still handles, publishes, and acknowledges
 jobs sequentially. Outbox staging and relay use separate pgx pools, controlled by
 `OUTBOX_PRODUCER_MAX_CONNS` and `OUTBOX_RELAY_MAX_CONNS`.
 
-`make capacity-nats-site` is a separate PostgreSQL 17 profile with one Outbox worker, reservation batch one, one NATS consumer, a producer/relay
+`make capacity-nats-site` is a separate PostgreSQL 17 profile with two Outbox workers, reservation batch one, one NATS consumer, a producer/relay
 pgx budget fixed at `9 + 1 = 10`, a separate ten-connection `database/sql` Inbox/measurement pool, a 30-second warm-up,
 and one two-minute stage at `2000 msg/s`; the stage has a 30-second drain limit. Override the schedule with
 `CAPACITY_RATES`. The site profile rejects

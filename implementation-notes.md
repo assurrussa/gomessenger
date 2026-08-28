@@ -14,6 +14,20 @@
 - `release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0` resolved the published
   root, PostgreSQL, and SQLite tags and refreshed the four affected module
   graphs. Repository-wide verification follows on that published graph.
+- Review follow-up made the publication recorder a required supervised runtime,
+  evicts confirmations after a successful flush, and keeps an in-flight batch
+  retryable without recording normal runner cancellation as a telemetry
+  failure. Deterministic tests cover the shutdown retry boundary.
+- Relay pool high-water measurement now uses `pgxpool` prepare/release hooks at
+  the actual acquisition boundary instead of relying on one-second HTTP
+  snapshots. A short PostgreSQL 17 + NATS smoke with pools `8 + 2` completed
+  exact reconciliation and recorded relay `maxAcquiredConnections=2`; its
+  deliberately short 100 msg/s stage is connectivity/measurement evidence,
+  not a capacity result.
+- The published-graph branch passes `make check` with zero lint findings, 91.0%
+  root coverage, race/checkptr, clean consumer, and durable E2E coverage. The
+  real capacity smoke also proved that the observed relay pool preserves UUID
+  scanning, fenced claims, PubAck, and drain behavior.
 
 ## 2026-08-28 — Capacity publication-recorder batch boundary
 
