@@ -108,6 +108,7 @@ func renderMarkdown(report RunReport) string {
 	var builder strings.Builder
 	builder.WriteString("# GoMessenger capacity report\n\n")
 	builder.WriteString("Run: `" + report.RunID + "`\n\n")
+	builder.WriteString("Report spec: `" + report.SpecVersion + "`\n\n")
 	statement := report.CapacityStatement
 	if statement == "" {
 		statement = "run is incomplete"
@@ -131,23 +132,30 @@ func renderMarkdown(report RunReport) string {
 	}
 	builder.WriteString("## Measured stages\n\n")
 	builder.WriteString(
-		"| Rate | Sustainable | Offered | HTTP 202 total | DB accepted | Staged | JetStream | Committed |" +
-			" Effective msg/s | Effective MiB/s | Business p95 | Inbox p95 | ACK p95 | Drain |\n",
+		"| Rate | Sustainable | Offered | HTTP 202 total | DB accepted | Staged | Published | Committed |" +
+			" Relay msg/s | Consumer msg/s | Consumer MiB/s | Outbox lag | Consumer lag |" +
+			" Business p95 | Inbox p95 | ACK p95 | Drain |\n",
 	)
-	builder.WriteString("|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	builder.WriteString(
+		"|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+	)
 	for _, stage := range report.Stages {
 		_, _ = fmt.Fprintf(&builder,
-			"| %d | %t | %d | %d | %d | %d | %d | %d | %.2f | %.3f | %.2f ms | %.2f ms | %.2f ms | %.2f s |\n",
+			"| %d | %t | %d | %d | %d | %d | %d | %d | %.2f | %.2f | %.3f | %d | %d |"+
+				" %.2f ms | %.2f ms | %.2f ms | %.2f s |\n",
 			stage.TargetRate,
 			stage.Sustainable,
 			stage.LoadWindow.Offered,
 			stage.LoadWindow.HTTPAccepted,
 			stage.LoadWindow.BusinessAccepted,
 			stage.LoadWindow.Staged,
-			stage.LoadWindow.StreamPublished,
+			stage.LoadWindow.Published,
 			stage.LoadWindow.Committed,
-			stage.EffectiveMessagesPerSec,
-			stage.EffectiveMiBPerSec,
+			stage.RelayMessagesPerSec,
+			stage.ConsumerMessagesPerSec,
+			stage.ConsumerMiBPerSec,
+			stage.OutboxLag,
+			stage.ConsumerLag,
 			stage.Latency.P95Millis,
 			stage.InboxHandle.P95Millis,
 			stage.BrokerAck.P95Millis,
@@ -183,9 +191,12 @@ func renderMarkdown(report RunReport) string {
 		}
 	}
 	builder.WriteString("\n## Metric boundary\n\n")
-	builder.WriteString("- `effective msg/s = committed projection delta during the offered window / offered-window seconds`\n")
+	builder.WriteString("- `relay msg/s = published delta during the offered window / offered-window seconds`\n")
+	builder.WriteString("- `consumer msg/s = committed projection delta during the offered window / offered-window seconds`\n")
+	builder.WriteString("- `Outbox lag = staged delta - published delta`\n")
+	builder.WriteString("- `consumer lag = published delta - committed projection delta`\n")
 	builder.WriteString(
-		"- `effective MiB/s = exact canonical envelope bytes joined to those committed message IDs" +
+		"- `consumer MiB/s = exact canonical envelope bytes joined to those committed message IDs" +
 			" / offered-window seconds / 1,048,576`\n",
 	)
 	builder.WriteString(
@@ -198,10 +209,11 @@ func renderMarkdown(report RunReport) string {
 			"- Host: `%s/%s`, logical CPUs `%s`\n"+
 			"- Container: `%s/%s`, logical CPUs `%d`\n"+
 			"- Go: `%s`\n"+
+			"- Outbox module: `%s`\n"+
 			"- PostgreSQL: `%s`\n"+
 			"- NATS: `%s`\n"+
 			"- k6: `%s`\n"+
-			"- Topology: file-backed JetStream, Outbox workers `%d`, "+
+			"- Topology: file-backed JetStream, Outbox workers `%d`, reservation batch `%d`, "+
 			"producer/relay pgx `%d + %d = %d`, consumer concurrency `%d`, "+
 			"business DB max-open `%d`\n"+
 			"- PostgreSQL telemetry: compute_query_id `%s`, statement track `%s`, utility track `%s`,"+
@@ -215,10 +227,12 @@ func renderMarkdown(report RunReport) string {
 		report.Environment.ContainerArch,
 		report.Environment.ContainerCPUs,
 		report.Environment.GoVersion,
+		report.Environment.OutboxVersion,
 		report.Environment.PostgreSQLVersion,
 		report.Environment.NATSServerVersion,
 		report.Environment.K6Version,
 		report.Environment.OutboxWorkers,
+		report.Environment.OutboxReservationBatchSize,
 		report.Environment.OutboxProducerMaxConns,
 		report.Environment.OutboxRelayMaxConns,
 		report.Environment.OutboxPGXConnectionBudget,

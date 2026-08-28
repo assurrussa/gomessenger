@@ -2,12 +2,12 @@ package demo
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
+	coreoutbox "github.com/assurrussa/outbox/outbox"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,12 +33,27 @@ type PGXPoolStats struct {
 	MaxAcquiredConnections int32 `json:"maxAcquiredConnections"`
 }
 
-// OutboxStats describes the live relay queue.
+// OutboxCapabilityStats describes one exact persisted Outbox capability group.
+type OutboxCapabilityStats struct {
+	Name              string                   `json:"name"`
+	SchemaVersion     coreoutbox.SchemaVersion `json:"schemaVersion"`
+	Supported         bool                     `json:"supported"`
+	Total             int64                    `json:"total"`
+	Available         int64                    `json:"available"`
+	Processing        int64                    `json:"processing"`
+	OldestAvailableAt *time.Time               `json:"oldestAvailableAt"`
+	OldestAgeSeconds  float64                  `json:"oldestAgeSeconds"`
+}
+
+// OutboxStats describes the live relay queue from one Outbox snapshot.
 type OutboxStats struct {
-	Total            int64   `json:"total"`
-	Available        int64   `json:"available"`
-	Processing       int64   `json:"processing"`
-	OldestAgeSeconds float64 `json:"oldestAgeSeconds"`
+	ObservedAt        time.Time               `json:"observedAt"`
+	Total             int64                   `json:"total"`
+	Available         int64                   `json:"available"`
+	Processing        int64                   `json:"processing"`
+	OldestAvailableAt *time.Time              `json:"oldestAvailableAt"`
+	OldestAgeSeconds  float64                 `json:"oldestAgeSeconds"`
+	ByCapability      []OutboxCapabilityStats `json:"byCapability"`
 }
 
 // OperationStats reports one observed consumer boundary without message labels.
@@ -80,21 +95,14 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 	if err != nil {
 		return AppStats{}, fmt.Errorf("read Outbox queue stats: %w", err)
 	}
-	var oldest sql.NullFloat64
-	if err := a.db.QueryRowContext(ctx, `SELECT EXTRACT(EPOCH FROM (clock_timestamp() - MIN(created_at)))
-		FROM jobs`).Scan(&oldest); err != nil {
-		return AppStats{}, fmt.Errorf("read oldest Outbox job age: %w", err)
-	}
 	readyErr := a.Readiness(ctx)
 	dbStats := a.db.Stats()
 	producerPool := a.outbox.ProducerClient().DB().Pool()
 	relayPool := a.outbox.RelayClient().DB().Pool()
 	result := AppStats{
-		ObservedAt: time.Now().UTC(),
+		ObservedAt: queue.ObservedAt,
 		Ready:      readyErr == nil,
-		Outbox: OutboxStats{
-			Total: queue.Total, Available: queue.Available, Processing: queue.Processing,
-		},
+		Outbox:     outboxStatsFromSnapshot(queue, a.outbox.supportsCapability),
 		BusinessDB: SQLPoolStats{
 			MaxOpenConnections: dbStats.MaxOpenConnections,
 			OpenConnections:    dbStats.OpenConnections,
@@ -109,13 +117,56 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 		InboxDuplicates: a.duplicates.Load(),
 		Consumer:        a.observations.stats(labels),
 	}
-	if oldest.Valid && oldest.Float64 > 0 {
-		result.Outbox.OldestAgeSeconds = oldest.Float64
-	}
 	if readyErr != nil {
 		result.ReadinessError = readyErr.Error()
 	}
 	return result, nil
+}
+
+func outboxStatsFromSnapshot(
+	queue coreoutbox.QueueStats,
+	supports func(string, coreoutbox.SchemaVersion) bool,
+) OutboxStats {
+	result := OutboxStats{
+		ObservedAt:   queue.ObservedAt,
+		Total:        queue.Total,
+		Available:    queue.Available,
+		Processing:   queue.Processing,
+		ByCapability: make([]OutboxCapabilityStats, 0, len(queue.ByCapability)),
+	}
+	var oldest time.Time
+	for _, group := range queue.ByCapability {
+		capability := OutboxCapabilityStats{
+			Name:          group.Name,
+			SchemaVersion: group.SchemaVersion,
+			Supported:     supports != nil && supports(group.Name, group.SchemaVersion),
+			Total:         group.Total,
+			Available:     group.Available,
+			Processing:    group.Processing,
+		}
+		if !group.OldestAvailableAt.IsZero() {
+			availableAt := group.OldestAvailableAt.UTC()
+			capability.OldestAvailableAt = &availableAt
+			capability.OldestAgeSeconds = ageSeconds(queue.ObservedAt, availableAt)
+			if oldest.IsZero() || availableAt.Before(oldest) {
+				oldest = availableAt
+			}
+		}
+		result.ByCapability = append(result.ByCapability, capability)
+	}
+	if !oldest.IsZero() {
+		result.OldestAvailableAt = &oldest
+		result.OldestAgeSeconds = ageSeconds(queue.ObservedAt, oldest)
+	}
+	return result
+}
+
+func ageSeconds(observedAt, availableAt time.Time) float64 {
+	age := observedAt.Sub(availableAt).Seconds()
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 func poolStats(pool *pgxpool.Pool, maxAcquired *atomic.Int32) PGXPoolStats {

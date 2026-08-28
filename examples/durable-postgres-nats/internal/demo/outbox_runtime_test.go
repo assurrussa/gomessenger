@@ -34,3 +34,14 @@ func TestNormalizeConfigRejectsInvalidOutboxPools(t *testing.T) {
 		t.Fatal("normalizeConfig() unexpectedly accepted a zero relay pool")
 	}
 }
+
+func TestNormalizeConfigRejectsInvalidReservationBatchSize(t *testing.T) {
+	t.Parallel()
+	for _, size := range []int{0, 1_001} {
+		config := CorrectnessConfig(nil)
+		config.OutboxReservationBatchSize = size
+		if err := normalizeConfig(&config); err == nil {
+			t.Fatalf("normalizeConfig() unexpectedly accepted reservation batch size %d", size)
+		}
+	}
+}

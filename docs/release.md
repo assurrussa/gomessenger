@@ -55,11 +55,13 @@ make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
 ```
 
 `release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements
-from nested `go.mod` files, adds matching local pre-tag replacements only to `go.work`, and formats source. It
-deliberately does not tidy unpublished nested dependencies.
+from nested `go.mod` files, adds matching local pre-tag replacements only to `go.work`, tidies the Outbox adapter,
+durable example, clean consumer, and SQLite E2E modules with `GOWORK=off`, and formats source. Run it only after the
+selected Outbox root and backend tags resolve from the Go proxy.
 `release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus
-the Outbox root and SQLite backend requirements used by clean consumer/E2E modules. It rejects remaining `replace`
-directives in published module files and any Outbox replacement in clean consumer/E2E modules. The unpublished local
+the Outbox root/SQLite pair used by clean consumer/E2E modules and the Outbox root/PostgreSQL pair used by the durable
+example. It rejects remaining `replace` directives in published module files and any Outbox replacement in these
+consumer/example modules. The unpublished local
 E2E module deliberately keeps GoMessenger path replacements to test the checkout itself; it is not a published-module
 resolution probe. The gate does not resolve or test the not-yet-published GoMessenger tags. The full source gate must
 pass before release preparation; published resolution is proved separately after the dependency-ordered tags exist.

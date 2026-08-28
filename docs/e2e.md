@@ -84,24 +84,47 @@ make capacity-inbox-postgres
 k6 `constant-arrival-rate`, performs a separate warm-up, samples PostgreSQL/application/JetStream state each second,
 drains after every stage, and stops at the first unsustainable rate.
 
-`make capacity-nats-site` reproduces the PostgreSQL 17, Outbox `1`, consumer `1`, isolated Outbox producer/relay
+`make capacity-nats-site` reproduces PostgreSQL 17, Outbox workers `2`, reservation batch `1`, consumer `1`, and isolated Outbox producer/relay
 `9 + 1` pgx budget, and separate Inbox/measurement pool `10` topology with a
 small deterministic payload and two-minute `250,325,350,400,500 msg/s` stages. Set
 `CAPACITY_PAYLOAD_PROFILE=mixed` for the existing 80/15/5 payload mix. `make capacity-inbox-postgres` removes HTTP,
 Outbox, and NATS and measures the real PostgreSQL `ProcessAttempt` path for concurrency `1` and `4`, with three
 repetitions of `20,000` measured operations after a `1,000`-operation warm-up.
 
+`OUTBOX_RESERVATION_BATCH_SIZE` controls only how many immediately available
+jobs one worker reserves per claim (`1..1000`, default `1`). Handlers, PubAck,
+conditional delete, retry, and DLQ remain per-job and sequential inside each
+worker. For a short screening run:
+
+```sh
+OUTBOX_RESERVATION_BATCH_SIZE=16 \
+CAPACITY_RATES=500,650 \
+CAPACITY_WARMUP_DURATION=10s \
+CAPACITY_STAGE_DURATION=30s \
+make capacity-nats-site
+```
+
+Reports include the exact batch in both `report.json` and `report.md`; compare
+runs only with the same two workers, `9 + 1` Outbox pools, one consumer,
+payload profile, durations, and SLO.
+
 The primary metrics use a timestamped half-open load window and exclude drain:
 
 ```text
-effective msg/s = unique committed projection delta / load-window seconds
-effective MiB/s = exact canonical envelope bytes for those message IDs / load-window seconds / 1,048,576
+relay msg/s = published delta / load-window seconds
+consumer msg/s = committed projection delta / load-window seconds
+Outbox lag = staged delta - published delta
+consumer lag = published delta - committed projection delta
+consumer MiB/s = exact canonical envelope bytes for committed message IDs / load-window seconds / 1,048,576
 ```
 
 After drain, accepted HTTP responses must reconcile exactly with business orders, transactional envelope measurements,
 JetStream-confirmed publications, stream message delta, and unique projections. Integrity failures exit nonzero;
 ordinary performance saturation reports the first unsustainable stage, while passing the whole schedule reports
-`capacity >= maximum tested rate`. Reports and raw samples live under ignored `tmp/capacity/<run-id>/`.
+`capacity >= maximum tested rate`. Capacity report spec `1.3` records the exact
+Outbox module version used by the binary, separate relay/consumer rates and
+lags, and no longer emits the former `effective*` fields. Reports and raw
+samples live under ignored `tmp/capacity/<run-id>/`.
 
 The isolated PostgreSQL stacks preload `pg_stat_statements` and enable query IDs, utility tracking, I/O timing, and WAL
 I/O timing. Reports retain before/load-end/post-drain statement/database/WAL/I/O snapshots, sampled lock/I/O/WAL waits,

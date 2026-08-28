@@ -7,7 +7,7 @@ import (
 	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
-const reportSpecVersion = "1.1"
+const reportSpecVersion = "1.3"
 
 // BusinessSnapshot is the committed PostgreSQL truth for one run stage.
 type BusinessSnapshot struct {
@@ -109,9 +109,14 @@ type StageReport struct {
 	DrainCompleted          bool                 `json:"drainCompleted"`
 	LoadWindow              StageCounts          `json:"loadWindow"`
 	AfterDrain              StageCounts          `json:"afterDrain"`
-	EffectiveMessagesPerSec float64              `json:"effectiveMessagesPerSecond"`
-	EffectiveMiBPerSec      float64              `json:"effectiveMiBPerSecond"`
+	RelayMessagesPerSec     float64              `json:"relayMessagesPerSecond"`
+	ConsumerMessagesPerSec  float64              `json:"consumerMessagesPerSecond"`
+	ConsumerMiBPerSec       float64              `json:"consumerMiBPerSecond"`
 	AcceptedMessagesPerSec  float64              `json:"acceptedMessagesPerSecond"`
+	OutboxLag               int64                `json:"outboxLag"`
+	ConsumerLag             int64                `json:"consumerLag"`
+	OutboxLagGrowthPerSec   float64              `json:"outboxLagGrowthPerSecond"`
+	ConsumerLagGrowthPerSec float64              `json:"consumerLagGrowthPerSecond"`
 	BacklogSlopePerSec      float64              `json:"backlogSlopePerSecond"`
 	MaxBusinessBacklog      int64                `json:"maxBusinessBacklog"`
 	MaxOutboxBacklog        int64                `json:"maxOutboxBacklog"`
@@ -132,26 +137,28 @@ type StageReport struct {
 
 // Environment records the exact checkout and local execution context.
 type Environment struct {
-	GoVersion                 string            `json:"goVersion"`
-	ContainerOS               string            `json:"containerOs"`
-	ContainerArch             string            `json:"containerArch"`
-	ContainerCPUs             int               `json:"containerLogicalCpus"`
-	HostOS                    string            `json:"hostOs"`
-	HostArch                  string            `json:"hostArch"`
-	HostCPUs                  string            `json:"hostLogicalCpus"`
-	GitCommit                 string            `json:"gitCommit"`
-	GitDirty                  string            `json:"gitDirty"`
-	PostgreSQLVersion         string            `json:"postgresqlVersion"`
-	NATSServerVersion         string            `json:"natsServerVersion"`
-	K6Version                 string            `json:"k6Version"`
-	OutboxWorkers             int               `json:"outboxWorkers"`
-	OutboxProducerMaxConns    int               `json:"outboxProducerMaxConnections"`
-	OutboxRelayMaxConns       int               `json:"outboxRelayMaxConnections"`
-	OutboxPGXConnectionBudget int               `json:"outboxPgxConnectionBudget"`
-	ConsumerConcurrency       int               `json:"consumerConcurrency"`
-	DBMaxOpenConns            int               `json:"dbMaxOpenConnections"`
-	JetStreamStorage          string            `json:"jetStreamStorage"`
-	PostgreSQLSettings        map[string]string `json:"postgresqlSettings"`
+	GoVersion                  string            `json:"goVersion"`
+	OutboxVersion              string            `json:"outboxVersion"`
+	ContainerOS                string            `json:"containerOs"`
+	ContainerArch              string            `json:"containerArch"`
+	ContainerCPUs              int               `json:"containerLogicalCpus"`
+	HostOS                     string            `json:"hostOs"`
+	HostArch                   string            `json:"hostArch"`
+	HostCPUs                   string            `json:"hostLogicalCpus"`
+	GitCommit                  string            `json:"gitCommit"`
+	GitDirty                   string            `json:"gitDirty"`
+	PostgreSQLVersion          string            `json:"postgresqlVersion"`
+	NATSServerVersion          string            `json:"natsServerVersion"`
+	K6Version                  string            `json:"k6Version"`
+	OutboxWorkers              int               `json:"outboxWorkers"`
+	OutboxReservationBatchSize int               `json:"outboxReservationBatchSize"`
+	OutboxProducerMaxConns     int               `json:"outboxProducerMaxConnections"`
+	OutboxRelayMaxConns        int               `json:"outboxRelayMaxConnections"`
+	OutboxPGXConnectionBudget  int               `json:"outboxPgxConnectionBudget"`
+	ConsumerConcurrency        int               `json:"consumerConcurrency"`
+	DBMaxOpenConns             int               `json:"dbMaxOpenConnections"`
+	JetStreamStorage           string            `json:"jetStreamStorage"`
+	PostgreSQLSettings         map[string]string `json:"postgresqlSettings"`
 }
 
 // ReportConfig is the stable, serializable experiment configuration.

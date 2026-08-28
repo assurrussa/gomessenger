@@ -140,12 +140,21 @@ make capacity-inbox-postgres
 ```
 
 The default command retains the four-Outbox/four-consumer PostgreSQL 18 profile. The site-shaped command uses
-PostgreSQL 17 with one Outbox worker, one consumer, isolated Outbox producer/relay pools fixed at `9 + 1`, and a
+PostgreSQL 17 with two Outbox workers, reservation batch `1`, one consumer, isolated Outbox producer/relay pools fixed at `9 + 1`, and a
 separate ten-connection Inbox/measurement pool; the PostgreSQL-only command
 isolates the real Inbox `ProcessAttempt` transaction without Outbox or NATS. They report unique committed business
 effects, canonical envelope bytes, Inbox/ACK latency, and PostgreSQL statement/WAL/I/O telemetry. See the
 [example capacity contract](examples/durable-postgres-nats#capacity-experiment). Results describe only the recorded
 checkout, host, and local Docker topology; they are not production benchmark claims.
+
+Set `OUTBOX_RESERVATION_BATCH_SIZE=16` (valid `1..1000`) to A/B only the
+reservation/prefetch width. The default remains `1`. Each Outbox worker still
+publishes and acknowledges jobs sequentially, so this does not multiply
+handler concurrency. Capacity report spec `1.3` records the batch and exact
+Outbox module version in JSON and Markdown. It reports relay throughput from
+published envelopes, consumer throughput and MiB/s from committed projections,
+and separates `staged - published` Outbox lag from `published - committed`
+consumer lag. Warm-up and drain remain outside every throughput denominator.
 
 ## Guarantees
 

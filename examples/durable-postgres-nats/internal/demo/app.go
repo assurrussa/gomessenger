@@ -31,16 +31,17 @@ const defaultPostgresDSN = "postgres://gomessenger:gomessenger@127.0.0.1:5432/go
 
 // Config controls one shared demo application runtime.
 type Config struct {
-	PostgresDSN            string
-	NATSURL                string
-	ConnectionName         string
-	OutboxWorkers          int
-	OutboxProducerMaxConns int
-	OutboxRelayMaxConns    int
-	ConsumerConcurrency    int
-	DBMaxOpenConns         int
-	FileStorage            bool
-	Logger                 *slog.Logger
+	PostgresDSN                string
+	NATSURL                    string
+	ConnectionName             string
+	OutboxWorkers              int
+	OutboxReservationBatchSize int
+	OutboxProducerMaxConns     int
+	OutboxRelayMaxConns        int
+	ConsumerConcurrency        int
+	DBMaxOpenConns             int
+	FileStorage                bool
+	Logger                     *slog.Logger
 }
 
 // CorrectnessConfig returns the intentionally small development topology used
@@ -49,7 +50,8 @@ func CorrectnessConfig(logger *slog.Logger) Config {
 	return Config{
 		PostgresDSN: EnvOr("POSTGRES_DSN", defaultPostgresDSN),
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-durable-demo",
-		OutboxWorkers: 1, OutboxProducerMaxConns: 1, OutboxRelayMaxConns: 1,
+		OutboxWorkers: 1, OutboxReservationBatchSize: 1,
+		OutboxProducerMaxConns: 1, OutboxRelayMaxConns: 1,
 		ConsumerConcurrency: 1, DBMaxOpenConns: 5, Logger: logger,
 	}
 }
@@ -59,7 +61,8 @@ func CapacityConfig(logger *slog.Logger) Config {
 	return Config{
 		PostgresDSN: EnvOr("POSTGRES_DSN", defaultPostgresDSN),
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-capacity-api",
-		OutboxWorkers: 4, OutboxProducerMaxConns: 9, OutboxRelayMaxConns: 1,
+		OutboxWorkers: 4, OutboxReservationBatchSize: 1,
+		OutboxProducerMaxConns: 9, OutboxRelayMaxConns: 1,
 		ConsumerConcurrency: 4, DBMaxOpenConns: 32,
 		FileStorage: true, Logger: logger,
 	}
@@ -418,6 +421,9 @@ func normalizeConfig(config *Config) error {
 	if config.OutboxWorkers < 1 || config.OutboxWorkers > 128 {
 		return errors.New("outbox workers must be in 1..128")
 	}
+	if config.OutboxReservationBatchSize < 1 || config.OutboxReservationBatchSize > 1_000 {
+		return errors.New("outbox reservation batch size must be in 1..1000")
+	}
 	if config.OutboxProducerMaxConns < 1 || config.OutboxProducerMaxConns > 1_024 {
 		return errors.New("outbox producer max connections must be in 1..1024")
 	}
@@ -499,7 +505,7 @@ func buildMessaging(
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create Outbox relay: %w", err)
 	}
-	if err := outboxRuntime.Service().RegisterJob(relay); err != nil {
+	if err := outboxRuntime.registerJob(relay); err != nil {
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("register Outbox relay: %w", err)

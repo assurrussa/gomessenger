@@ -430,14 +430,16 @@ func (p *probe) environment(ctx context.Context, config Config) (Environment, er
 	}
 	return Environment{
 		GoVersion: runtime.Version(), ContainerOS: runtime.GOOS, ContainerArch: runtime.GOARCH,
+		OutboxVersion: outboxModuleVersion(),
 		ContainerCPUs: runtime.NumCPU(), HostOS: config.HostOS, HostArch: config.HostArch,
 		HostCPUs: config.HostCPUs, GitCommit: config.GitCommit, GitDirty: config.GitDirty,
 		PostgreSQLVersion: postgresVersion, NATSServerVersion: p.nats.ConnectedServerVersion(),
 		K6Version: k6Version, OutboxWorkers: config.OutboxWorkers,
-		OutboxProducerMaxConns:    config.OutboxProducerMaxConns,
-		OutboxRelayMaxConns:       config.OutboxRelayMaxConns,
-		OutboxPGXConnectionBudget: config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
-		ConsumerConcurrency:       config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
+		OutboxReservationBatchSize: config.OutboxReservationBatchSize,
+		OutboxProducerMaxConns:     config.OutboxProducerMaxConns,
+		OutboxRelayMaxConns:        config.OutboxRelayMaxConns,
+		OutboxPGXConnectionBudget:  config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
+		ConsumerConcurrency:        config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
 		JetStreamStorage: "file", PostgreSQLSettings: p.postgresSettings,
 	}, nil
 }

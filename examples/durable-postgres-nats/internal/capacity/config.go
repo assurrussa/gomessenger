@@ -27,33 +27,34 @@ const (
 
 // Config controls one isolated capacity experiment.
 type Config struct {
-	Profile                string
-	Rates                  []int
-	WarmupDuration         time.Duration
-	StageDuration          time.Duration
-	DrainTimeout           time.Duration
-	SampleInterval         time.Duration
-	ReadyTimeout           time.Duration
-	E2EP95SLO              time.Duration
-	MinimumRate            int
-	AppURL                 string
-	PostgresDSN            string
-	NATSURL                string
-	ResultsRoot            string
-	RunID                  string
-	K6Binary               string
-	K6Script               string
-	OutboxWorkers          int
-	OutboxProducerMaxConns int
-	OutboxRelayMaxConns    int
-	ConsumerConcurrency    int
-	DBMaxOpenConns         int
-	PayloadProfile         string
-	HostOS                 string
-	HostArch               string
-	HostCPUs               string
-	GitCommit              string
-	GitDirty               string
+	Profile                    string
+	Rates                      []int
+	WarmupDuration             time.Duration
+	StageDuration              time.Duration
+	DrainTimeout               time.Duration
+	SampleInterval             time.Duration
+	ReadyTimeout               time.Duration
+	E2EP95SLO                  time.Duration
+	MinimumRate                int
+	AppURL                     string
+	PostgresDSN                string
+	NATSURL                    string
+	ResultsRoot                string
+	RunID                      string
+	K6Binary                   string
+	K6Script                   string
+	OutboxWorkers              int
+	OutboxReservationBatchSize int
+	OutboxProducerMaxConns     int
+	OutboxRelayMaxConns        int
+	ConsumerConcurrency        int
+	DBMaxOpenConns             int
+	PayloadProfile             string
+	HostOS                     string
+	HostArch                   string
+	HostCPUs                   string
+	GitCommit                  string
+	GitDirty                   string
 }
 
 // ResultDir returns the isolated artifact directory for this run.
@@ -91,31 +92,32 @@ func fromLookup(
 
 func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 	config := Config{
-		Profile:                profile,
-		Rates:                  []int{50, 100, 250, 500},
-		WarmupDuration:         15 * time.Second,
-		StageDuration:          30 * time.Second,
-		DrainTimeout:           30 * time.Second,
-		SampleInterval:         time.Second,
-		ReadyTimeout:           60 * time.Second,
-		E2EP95SLO:              2 * time.Second,
-		AppURL:                 strings.TrimRight(envValue(lookup, "CAPACITY_APP_URL", "http://127.0.0.1:8080"), "/"),
-		PostgresDSN:            envValue(lookup, "POSTGRES_DSN", defaultPostgresDSN),
-		NATSURL:                envValue(lookup, "NATS_URL", "nats://127.0.0.1:4222"),
-		ResultsRoot:            envValue(lookup, "CAPACITY_RESULTS_DIR", "tmp/capacity"),
-		K6Binary:               envValue(lookup, "K6_BIN", "k6"),
-		K6Script:               envValue(lookup, "K6_SCRIPT", "load/capacity.js"),
-		OutboxWorkers:          4,
-		OutboxProducerMaxConns: 9,
-		OutboxRelayMaxConns:    1,
-		ConsumerConcurrency:    4,
-		DBMaxOpenConns:         32,
-		PayloadProfile:         demo.CapacityPayloadMixed,
-		HostOS:                 envValue(lookup, "CAPACITY_HOST_OS", "unknown"),
-		HostArch:               envValue(lookup, "CAPACITY_HOST_ARCH", "unknown"),
-		HostCPUs:               envValue(lookup, "CAPACITY_HOST_CPUS", "unknown"),
-		GitCommit:              envValue(lookup, "CAPACITY_GIT_COMMIT", "unknown"),
-		GitDirty:               envValue(lookup, "CAPACITY_GIT_DIRTY", "unknown"),
+		Profile:                    profile,
+		Rates:                      []int{50, 100, 250, 500},
+		WarmupDuration:             15 * time.Second,
+		StageDuration:              30 * time.Second,
+		DrainTimeout:               30 * time.Second,
+		SampleInterval:             time.Second,
+		ReadyTimeout:               60 * time.Second,
+		E2EP95SLO:                  2 * time.Second,
+		AppURL:                     strings.TrimRight(envValue(lookup, "CAPACITY_APP_URL", "http://127.0.0.1:8080"), "/"),
+		PostgresDSN:                envValue(lookup, "POSTGRES_DSN", defaultPostgresDSN),
+		NATSURL:                    envValue(lookup, "NATS_URL", "nats://127.0.0.1:4222"),
+		ResultsRoot:                envValue(lookup, "CAPACITY_RESULTS_DIR", "tmp/capacity"),
+		K6Binary:                   envValue(lookup, "K6_BIN", "k6"),
+		K6Script:                   envValue(lookup, "K6_SCRIPT", "load/capacity.js"),
+		OutboxWorkers:              4,
+		OutboxReservationBatchSize: 1,
+		OutboxProducerMaxConns:     9,
+		OutboxRelayMaxConns:        1,
+		ConsumerConcurrency:        4,
+		DBMaxOpenConns:             32,
+		PayloadProfile:             demo.CapacityPayloadMixed,
+		HostOS:                     envValue(lookup, "CAPACITY_HOST_OS", "unknown"),
+		HostArch:                   envValue(lookup, "CAPACITY_HOST_ARCH", "unknown"),
+		HostCPUs:                   envValue(lookup, "CAPACITY_HOST_CPUS", "unknown"),
+		GitCommit:                  envValue(lookup, "CAPACITY_GIT_COMMIT", "unknown"),
+		GitDirty:                   envValue(lookup, "CAPACITY_GIT_DIRTY", "unknown"),
 	}
 	if profile == ProfileFull {
 		config.Rates = []int{50, 100, 250, 500, 1_000, 2_000}
@@ -124,7 +126,7 @@ func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 		config.DrainTimeout = time.Minute
 	}
 	if profile == ProfileSite {
-		config.Rates = []int{250, 325, 350, 400, 500}
+		config.Rates = []int{2000}
 		config.WarmupDuration = 30 * time.Second
 		config.StageDuration = 2 * time.Minute
 		config.DrainTimeout = 30 * time.Second
@@ -169,6 +171,7 @@ func applyOverrides(config *Config, lookup func(string) (string, bool)) error {
 	}{
 		{name: "CAPACITY_MIN_RATE", target: &config.MinimumRate, allowZero: true},
 		{name: "OUTBOX_WORKERS", target: &config.OutboxWorkers},
+		{name: "OUTBOX_RESERVATION_BATCH_SIZE", target: &config.OutboxReservationBatchSize},
 		{name: "OUTBOX_PRODUCER_MAX_CONNS", target: &config.OutboxProducerMaxConns},
 		{name: "OUTBOX_RELAY_MAX_CONNS", target: &config.OutboxRelayMaxConns},
 		{name: "NATS_CONSUMER_CONCURRENCY", target: &config.ConsumerConcurrency},
@@ -213,6 +216,9 @@ func validateConfig(config Config) error {
 	}
 	if config.Profile == ProfileSite && config.OutboxProducerMaxConns+config.OutboxRelayMaxConns != 10 {
 		return errors.New("site profile Outbox producer and relay connection budget must equal 10")
+	}
+	if config.OutboxReservationBatchSize < 1 || config.OutboxReservationBatchSize > 1_000 {
+		return errors.New("OUTBOX_RESERVATION_BATCH_SIZE must be in 1..1000")
 	}
 	if config.PayloadProfile != demo.CapacityPayloadSmall && config.PayloadProfile != demo.CapacityPayloadMixed {
 		return fmt.Errorf("CAPACITY_PAYLOAD_PROFILE must be %q or %q",

@@ -32,6 +32,8 @@ type splitOutboxRuntime struct {
 	relayClient        *pgsqlclient.Client
 	producerTransactor *pgsqltx.Manager
 	service            *coreoutbox.Service
+	capabilitiesMu     sync.RWMutex
+	capabilities       map[coreoutbox.JobCapability]struct{}
 
 	closeRelayOnce    sync.Once
 	closeProducerOnce sync.Once
@@ -93,14 +95,11 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 	relayTransactor := pgsqltx.New(relayClient.DB())
 	service, err := coreoutbox.New(
 		coreoutbox.WithWorkers(config.OutboxWorkers),
+		coreoutbox.WithReservationBatchSize(config.OutboxReservationBatchSize),
 		coreoutbox.WithIdleTime(100*time.Millisecond),
 		coreoutbox.WithReserveFor(5*time.Second),
 		coreoutbox.WithJobsRepo(jobs),
-		coreoutbox.WithCapabilityJobsRepo(jobs),
-		coreoutbox.WithFanoutJobsRepo(jobs),
-		coreoutbox.WithJobsStatRepo(jobs),
 		coreoutbox.WithJobsFailedRepo(failed),
-		coreoutbox.WithCapabilityJobsFailedRepo(failed),
 		coreoutbox.WithTransactor(relayTransactor),
 		coreoutbox.WithLogger(logger.Discard()),
 	)
@@ -115,6 +114,7 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 		relayClient:        relayClient,
 		producerTransactor: pgsqltx.New(producerClient.DB()),
 		service:            service,
+		capabilities:       make(map[coreoutbox.JobCapability]struct{}),
 	}, nil
 }
 
@@ -140,6 +140,33 @@ func (r *splitOutboxRuntime) BeginDrain() {
 }
 
 func (r *splitOutboxRuntime) Service() *coreoutbox.Service { return r.service }
+
+func (r *splitOutboxRuntime) registerJob(job coreoutbox.Job) error {
+	if err := r.service.RegisterJob(job); err != nil {
+		return err
+	}
+	capability := coreoutbox.JobCapability{
+		Name:          job.Name(),
+		SchemaVersion: coreoutbox.DefaultSchemaVersion,
+	}
+	if versioned, ok := job.(coreoutbox.VersionedJob); ok {
+		capability.SchemaVersion = versioned.SchemaVersion()
+	}
+	r.capabilitiesMu.Lock()
+	r.capabilities[capability] = struct{}{}
+	r.capabilitiesMu.Unlock()
+	return nil
+}
+
+func (r *splitOutboxRuntime) supportsCapability(name string, schemaVersion coreoutbox.SchemaVersion) bool {
+	if r == nil {
+		return false
+	}
+	r.capabilitiesMu.RLock()
+	_, supported := r.capabilities[coreoutbox.JobCapability{Name: name, SchemaVersion: schemaVersion}]
+	r.capabilitiesMu.RUnlock()
+	return supported
+}
 
 func (r *splitOutboxRuntime) ProducerClient() pgsql.Client { return r.producerClient }
 

@@ -1,5 +1,75 @@
 # Implementation notes
 
+## 2026-08-28 — Queue snapshot and capacity pipeline boundaries
+
+- Replaced the capacity-only `/benchmark/stats` Outbox age query with the
+  single `QueueStats` snapshot supplied by Outbox. The response uses the
+  snapshot `ObservedAt`, derives the global oldest-ready timestamp from the
+  minimum non-zero capability timestamp, returns `null` when no ready job
+  exists, and exposes every exact `(name, schemaVersion)` backlog with a
+  process-local `supported` flag. `stats.go` no longer imports `database/sql`
+  or executes a `SELECT MIN(created_at)` query.
+- Raised the capacity artifact contract to spec `1.3`. Relay throughput is the
+  published delta divided by the load window; consumer throughput and MiB/s
+  use committed projections; Outbox and consumer lag are reported separately
+  as `staged - published` and `published - committed`. JSON, Markdown,
+  structured logs, and sustainability diagnostics no longer use the ambiguous
+  committed-only `effective*` fields. Drain remains outside all denominators.
+- Capacity environment JSON and Markdown now record the Outbox module version
+  from Go build metadata. A published build reports its exact tag; a workspace
+  path replacement reports `devel (local replace)` instead of pretending that
+  the required tag supplied the binary.
+- Release preparation/readiness now updates, tidies, and validates the durable
+  example's matching Outbox root plus PostgreSQL requirements in addition to
+  the adapter, clean consumer, and SQLite E2E requirements.
+- Targeted `go test ./internal/demo ./internal/capacity` passes against the
+  workspace Outbox candidate. As of this check, the Go proxy still exposes
+  only `v0.11.0` for Outbox root, PostgreSQL, and SQLite; therefore no
+  `v0.12.0` pins, `GOWORK=off` capacity runs, default changes, final evidence
+  rewrite, shared-wiki verification date, or repository-wide `make check` are
+  claimed yet.
+
+## 2026-08-28 — Outbox reservation-batch capacity control
+
+- Added `OUTBOX_RESERVATION_BATCH_SIZE` to the durable PostgreSQL/NATS service
+  and capacity runner. The accepted range is `1..1000`; correctness, quick,
+  full, and site defaults remain `1` until repeatable capacity evidence selects
+  a higher minimum.
+- The split Outbox runtime forwards the value to
+  `outbox.WithReservationBatchSize`. Workers remain the handler-concurrency
+  boundary; a batch changes only reservation/prefetch and keeps PubAck,
+  conditional delete, retry, and DLQ per-job.
+- Capacity artifact spec `1.2` recorded the exact value in JSON and Markdown so
+  batch runs cannot be compared as if they had the same topology.
+- The A/B held site topology at workers `2`, producer/relay pools `9 + 1`, and
+  consumer `1`. Short screening ran `1/16/32/64/100` for 30 seconds at
+  `500/650`; every size passed exact integrity with zero redelivery/DLQ. At
+  650, business p95 was 93.459-99.604 ms, maximum Outbox backlog was 61-68,
+  and drain was 0.369-0.432 seconds. The two lowest-p95 candidates, `64` and
+  `100`, advanced to confirmation.
+- Three two-minute confirmation repetitions used the scheduled
+  `500/650/800/1000` ladder and stopped each run at its first unsustainable
+  stage. The control passed 500 in all three and failed 650 in all three:
+  business p95 rose to 6.371-8.633 seconds and backlog to 5,609-7,189 while
+  throughput remained approximately 649.6 msg/s. `64` passed 500 once; its
+  other two repetitions dropped 2 and 246 scheduled iterations at 500, and
+  its first repetition dropped 7 at 650. `100` reached maxima of 500, 650,
+  and 500; its best repetition passed 650 at 649.967 msg/s, 120.933 ms p95,
+  backlog 189, and 0.604-second drain, then dropped 8 iterations at 800.
+- Every screening and confirmation stage reconciled exactly with zero broker
+  redelivery and zero DLQ. Neither candidate sustained a higher stage than the
+  control in all three repetitions, so the site default remains the minimum
+  `1`; larger batches remain an explicit opt-in rather than a capacity claim.
+  The durable reports are under ignored `tmp/capacity/batch-screen-*` and
+  `tmp/capacity/batch-confirm-*`.
+- Workspace-aware targeted Go tests passed against the local Outbox checkout.
+  The repository-wide `make check` intentionally uses `GOWORK=off` and still
+  resolves published Outbox `v0.11.0`, so it stops at the new option until a
+  later Outbox release is published and pinned. The capacity images therefore
+  used an isolated temporary source copy with local module replacements; the
+  checked-in module graph was not rewritten, and no tag or publication was
+  performed.
+
 ## 2026-08-28 — Producer to Outbox relay pre-batch optimization
 
 - Removed the per-message `UPDATE demo.envelope_measurements` from the relay
@@ -39,6 +109,21 @@
   control, and the complete pgx budget remained ten. This proves the intended
   fairness/isolation boundary, but the remaining 325 variability means no new
   capacity floor is claimed and batch reservation remains out of scope.
+- A direct clean-checkout verification then sustained both 250 and 325 msg/s
+  with the same one-worker `9 + 1` topology. At 325 it delivered 324.725 msg/s,
+  reached a 224-job maximum backlog, drained in 0.521 seconds, and retained
+  exact reconciliation with zero redelivery and DLQ.
+- The first pre-batch throughput change was host-only worker concurrency. Two
+  relay workers sharing the guaranteed relay connection sustained a direct
+  500 msg/s stage at 499.958 msg/s, with a 383-job maximum backlog, 182.292 ms
+  business p95, a 0.490-second drain, and exact reconciliation. ACK/delete and
+  reservation remain individual; the library worker default is unchanged.
+- A same-budget `8 + 2` A/B run removed relay-pool acquisition wait but shifted
+  contention into the producer pool: producer acquire wait rose to 3.411
+  seconds, maximum backlog reached 1,941, and business p95 reached 2.412
+  seconds, failing the site SLO. The site profile therefore defaults to two
+  relay workers with the proven `9 + 1` pool split. This targeted run selects a
+  benchmark topology; it is not a general 500 msg/s capacity-floor claim.
 
 ## 2026-08-27 — PostgreSQL Inbox fresh-success optimization
 
