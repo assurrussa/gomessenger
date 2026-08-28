@@ -22,10 +22,13 @@
   boundaries.
 - Relay pool high-water measurement now uses `pgxpool` prepare/release hooks at
   the actual acquisition boundary instead of relying on one-second HTTP
-  snapshots. A short PostgreSQL 17 + NATS smoke with pools `8 + 2` completed
-  exact reconciliation and recorded relay `maxAcquiredConnections=2`; its
-  deliberately short 100 msg/s stage is connectivity/measurement evidence,
-  not a capacity result.
+  snapshots. Producer and relay pools are both constructed from the parsed
+  `pgxpool.Config`, so adding their distinct `application_name` values preserves
+  URL, keyword/value, and Unix-socket PostgreSQL connection strings. A short
+  PostgreSQL 17 + NATS smoke with pools `8 + 2` completed exact reconciliation,
+  drained successfully, and recorded relay `maxAcquiredConnections=2`; its
+  deliberately short stage is connectivity/measurement evidence, not a
+  capacity result.
 - The published-graph branch passes `make check` with zero lint findings, 91.0%
   root coverage, race/checkptr, clean consumer, and durable E2E coverage. The
   real capacity smoke also proved that the observed relay pool preserves UUID

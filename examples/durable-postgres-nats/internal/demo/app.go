@@ -82,17 +82,16 @@ type Application struct {
 	observations *benchmarkObservationRecorder
 	publications *publicationRecorder
 
-	publicationRunner   *runner
-	outboxRunner        *runner
-	consumerRunner      *runner
-	runtimeStopped      <-chan struct{}
-	runtimeCause        func() error
-	cancelRuntime       context.CancelCauseFunc
-	draining            atomic.Bool
-	producerMaxAcquired atomic.Int32
-	drainOnce           sync.Once
-	closeOnce           sync.Once
-	closeErr            error
+	publicationRunner *runner
+	outboxRunner      *runner
+	consumerRunner    *runner
+	runtimeStopped    <-chan struct{}
+	runtimeCause      func() error
+	cancelRuntime     context.CancelCauseFunc
+	draining          atomic.Bool
+	drainOnce         sync.Once
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 // Open starts the complete producer, relay, broker, Inbox, and consumer path.
@@ -217,10 +216,6 @@ func (a *Application) StageOrder(
 	var receipt messenger.Receipt
 	registeredObservation := false
 	err = a.outbox.ProducerTransactor().RunInTx(ctx, func(txCtx context.Context) error {
-		observeMaxAcquired(
-			a.outbox.ProducerClient().DB().Pool(),
-			&a.producerMaxAcquired,
-		)
 		tx := outboxstorage.GetTx(txCtx)
 		if tx == nil {
 			return errors.New("missing Outbox business transaction")

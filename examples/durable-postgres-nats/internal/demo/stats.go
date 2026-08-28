@@ -111,7 +111,7 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 			WaitCount:          dbStats.WaitCount,
 			WaitDurationNanos:  dbStats.WaitDuration.Nanoseconds(),
 		},
-		ProducerDB:      poolStats(producerPool, &a.producerMaxAcquired),
+		ProducerDB:      poolStats(producerPool, a.outbox.ProducerMaxAcquired()),
 		RelayDB:         poolStats(relayPool, a.outbox.RelayMaxAcquired()),
 		Publications:    a.publications.Stats(),
 		InboxDuplicates: a.duplicates.Load(),

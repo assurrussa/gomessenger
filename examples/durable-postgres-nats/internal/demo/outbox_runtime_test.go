@@ -6,18 +6,32 @@ import (
 	"testing"
 )
 
-func TestWithApplicationName(t *testing.T) {
+func TestObservedPoolConfigPreservesDSNFormats(t *testing.T) {
 	t.Parallel()
-	got, err := withApplicationName(
-		"postgres://user:pass@db:5432/name?sslmode=disable&application_name=shared",
-		producerApplicationName,
-	)
-	if err != nil {
-		t.Fatalf("withApplicationName() error = %v", err)
+	tests := []struct {
+		name string
+		dsn  string
+	}{
+		{name: "URL", dsn: "postgres://user:pass@db:5432/name?sslmode=disable&application_name=shared"},
+		{name: "keyword", dsn: "host=/var/run/postgresql dbname=gomessenger user=gomessenger"},
+		{name: "Unix socket URL", dsn: "postgres://gomessenger@/gomessenger?host=/var/run/postgresql"},
 	}
-	want := "postgres://user:pass@db:5432/name?application_name=gomessenger-outbox-producer&sslmode=disable"
-	if got != want {
-		t.Fatalf("withApplicationName() = %q, want %q", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config, err := observedPoolConfig(
+				test.dsn, producerApplicationName, 3, &poolAcquireObserver{},
+			)
+			if err != nil {
+				t.Fatalf("observedPoolConfig() error = %v", err)
+			}
+			if got := config.ConnConfig.RuntimeParams["application_name"]; got != producerApplicationName {
+				t.Fatalf("application_name = %q, want %q", got, producerApplicationName)
+			}
+			if config.MaxConns != 3 || config.PrepareConn == nil || config.AfterRelease == nil {
+				t.Fatalf("pool instrumentation is incomplete: %#v", config)
+			}
+		})
 	}
 }
 

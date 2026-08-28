@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +13,6 @@ import (
 	"github.com/assurrussa/outbox/backends/pgsql/repositories/jobsrepo"
 	pgsqlstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
 	"github.com/assurrussa/outbox/backends/pgsql/storage/pgsqlclient"
-	"github.com/assurrussa/outbox/backends/pgsql/storage/pgsqlinit"
 	pgsqltx "github.com/assurrussa/outbox/backends/pgsql/storage/transaction"
 	coreoutbox "github.com/assurrussa/outbox/outbox"
 	"github.com/assurrussa/outbox/outbox/logger"
@@ -32,13 +29,14 @@ const (
 // different pools. Repositories remain bound to the relay client, but honor a
 // pgx transaction carried in context by the producer transactor.
 type splitOutboxRuntime struct {
-	producerClient     *pgsqlclient.Client
-	relayClient        pgsql.Client
-	producerTransactor *pgsqltx.Manager
-	service            *coreoutbox.Service
-	relayAcquisitions  *poolAcquireObserver
-	capabilitiesMu     sync.RWMutex
-	capabilities       map[coreoutbox.JobCapability]struct{}
+	producerClient       pgsql.Client
+	relayClient          pgsql.Client
+	producerTransactor   *pgsqltx.Manager
+	service              *coreoutbox.Service
+	producerAcquisitions *poolAcquireObserver
+	relayAcquisitions    *poolAcquireObserver
+	capabilitiesMu       sync.RWMutex
+	capabilities         map[coreoutbox.JobCapability]struct{}
 
 	closeRelayOnce    sync.Once
 	closeProducerOnce sync.Once
@@ -47,32 +45,23 @@ type splitOutboxRuntime struct {
 }
 
 func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRuntime, error) {
-	producerDSN, err := withApplicationName(config.PostgresDSN, producerApplicationName)
-	if err != nil {
-		return nil, fmt.Errorf("build Outbox producer DSN: %w", err)
-	}
-	relayDSN, err := withApplicationName(config.PostgresDSN, relayApplicationName)
-	if err != nil {
-		return nil, fmt.Errorf("build Outbox relay DSN: %w", err)
-	}
-
-	producerClient, err := pgsqlinit.Create(
+	producerClient, producerAcquisitions, err := openObservedPoolClient(
 		ctx,
-		producerDSN,
-		pgsqlclient.WithMinConnectionsCount(1),
+		config.PostgresDSN,
+		producerApplicationName,
 		// normalizeConfig caps the host setting at 1,024 before this constructor runs.
 		//nolint:gosec // The validated value cannot overflow int32.
-		pgsqlclient.WithMaxConnectionsCount(int32(config.OutboxProducerMaxConns)),
-		pgsqlclient.WithLogger(logger.Discard()),
+		int32(config.OutboxProducerMaxConns),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("open Outbox producer pool: %w", err)
 	}
 	closeProducer := func() { _ = producerClient.Close() }
 
-	relayClient, relayAcquisitions, err := openObservedRelayClient(
+	relayClient, relayAcquisitions, err := openObservedPoolClient(
 		ctx,
-		relayDSN,
+		config.PostgresDSN,
+		relayApplicationName,
 		// normalizeConfig caps the host setting at 1,024 before this constructor runs.
 		//nolint:gosec // The validated value cannot overflow int32.
 		int32(config.OutboxRelayMaxConns),
@@ -113,12 +102,13 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 	}
 
 	return &splitOutboxRuntime{
-		producerClient:     producerClient,
-		relayClient:        relayClient,
-		producerTransactor: pgsqltx.New(producerClient.DB()),
-		service:            service,
-		relayAcquisitions:  relayAcquisitions,
-		capabilities:       make(map[coreoutbox.JobCapability]struct{}),
+		producerClient:       producerClient,
+		relayClient:          relayClient,
+		producerTransactor:   pgsqltx.New(producerClient.DB()),
+		service:              service,
+		producerAcquisitions: producerAcquisitions,
+		relayAcquisitions:    relayAcquisitions,
+		capabilities:         make(map[coreoutbox.JobCapability]struct{}),
 	}, nil
 }
 
@@ -176,6 +166,10 @@ func (r *splitOutboxRuntime) ProducerClient() pgsql.Client { return r.producerCl
 
 func (r *splitOutboxRuntime) RelayClient() pgsql.Client { return r.relayClient }
 
+func (r *splitOutboxRuntime) ProducerMaxAcquired() *atomic.Int32 {
+	return &r.producerAcquisitions.maximum
+}
+
 func (r *splitOutboxRuntime) RelayMaxAcquired() *atomic.Int32 {
 	return &r.relayAcquisitions.maximum
 }
@@ -229,16 +223,41 @@ func (o *poolAcquireObserver) afterRelease(*pgx.Conn) bool {
 	return true
 }
 
-func openObservedRelayClient(
+func openObservedPoolClient(
 	ctx context.Context,
 	dsn string,
+	applicationName string,
 	maxConnections int32,
 ) (pgsql.Client, *poolAcquireObserver, error) {
+	observer := &poolAcquireObserver{}
+	config, err := observedPoolConfig(dsn, applicationName, maxConnections, observer)
+	if err != nil {
+		return nil, nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open PostgreSQL connection pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("ping PostgreSQL connection pool: %w", err)
+	}
+	return &observedPoolClient{
+		db: pgsqlclient.NewDBEngine(pool, "prod", logger.Discard()),
+	}, observer, nil
+}
+
+func observedPoolConfig(
+	dsn string,
+	applicationName string,
+	maxConnections int32,
+	observer *poolAcquireObserver,
+) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse relay connection string: %w", err)
+		return nil, fmt.Errorf("parse PostgreSQL connection string: %w", err)
 	}
-	observer := &poolAcquireObserver{}
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
 	config.MinConns = 1
 	config.MaxConns = maxConnections
 	config.MaxConnIdleTime = 5 * time.Minute
@@ -248,29 +267,5 @@ func openObservedRelayClient(
 	config.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
 		return connection.Ping(ctx)
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open relay connection pool: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, nil, fmt.Errorf("ping relay connection pool: %w", err)
-	}
-	return &observedPoolClient{
-		db: pgsqlclient.NewDBEngine(pool, "prod", logger.Discard()),
-	}, observer, nil
-}
-
-func withApplicationName(dsn, applicationName string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(dsn))
-	if err != nil {
-		return "", err
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("PostgreSQL DSN must include scheme and host")
-	}
-	query := parsed.Query()
-	query.Set("application_name", applicationName)
-	parsed.RawQuery = query.Encode()
-	return parsed.String(), nil
+	return config, nil
 }
