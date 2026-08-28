@@ -9,7 +9,7 @@ require (
 	github.com/assurrussa/gomessenger/adapters/nats v0.2.1
 	github.com/assurrussa/gomessenger/adapters/outbox v0.2.1
 	github.com/assurrussa/gomessenger/observability v0.2.1
-	github.com/assurrussa/outbox v0.11.0
+	github.com/assurrussa/outbox v0.12.0
 	github.com/prometheus/client_golang v1.24.1
 )
 

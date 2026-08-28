@@ -8,8 +8,8 @@ require (
 	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
-	github.com/assurrussa/outbox v0.11.0
-	github.com/assurrussa/outbox/backends/sqlite v0.11.0
+	github.com/assurrussa/outbox v0.12.0
+	github.com/assurrussa/outbox/backends/sqlite v0.12.0
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
 	github.com/twmb/franz-go v1.21.6

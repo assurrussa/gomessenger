@@ -74,7 +74,7 @@ fuzz, lifecycle, redelivery, and clean-consumer coverage when changing public or
 concurrent behavior. Preserve immutable release tags and never publish, push,
 or create a remote without explicit authorization.
 
-Pin Outbox root and backend dependencies together at `v0.11.0`. Local Outbox
+Pin Outbox root and backend dependencies together at `v0.12.0`. Local Outbox
 overrides belong only in `go.work`; clean consumer and E2E modules must resolve
 the published tags with `GOWORK=off`.
 

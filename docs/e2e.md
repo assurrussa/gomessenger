@@ -48,7 +48,7 @@ before `DoubleAck` without interrupting the producer path.
 
 The module lives under `testdata/e2e`, runs with `GOWORK=off`, and uses explicit
 local replacements only for the GoMessenger modules under test. Its Outbox root
-and SQLite backend resolve as published `v0.11.0` modules. It is not a published
+and SQLite backend resolve as published `v0.12.0` modules. It is not a published
 module. `make test-e2e` proves the local checkout;
 `make test-consumer-release VERSION=vX.Y.Z` remains the separate proof that all
 public GoMessenger tags resolve without local replacements.

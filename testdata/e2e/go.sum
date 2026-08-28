@@ -2,10 +2,10 @@ github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
-github.com/assurrussa/outbox v0.11.0 h1:qfGjbZ5CoFYiCbK/55OJ2LB68BhAPJj2TQwRxcW52ME=
-github.com/assurrussa/outbox v0.11.0/go.mod h1:fzNmhtaNHltUtnUsj5KMQPNlnEB9tY/Z5MfsxJYvBgg=
-github.com/assurrussa/outbox/backends/sqlite v0.11.0 h1:v+AtjAsiLKx3IEB6TCgC3liZJwNlIfMk1oHKPIXXckk=
-github.com/assurrussa/outbox/backends/sqlite v0.11.0/go.mod h1:kcYIvZjL/KE/4NfnqPqgDjThcDaooNH/UjIEYrrpBMU=
+github.com/assurrussa/outbox v0.12.0 h1:ChnUueyc0rWPpLU9RS5Xcgq1xHPQdiGq6m7T6hY9mWc=
+github.com/assurrussa/outbox v0.12.0/go.mod h1:fzNmhtaNHltUtnUsj5KMQPNlnEB9tY/Z5MfsxJYvBgg=
+github.com/assurrussa/outbox/backends/sqlite v0.12.0 h1:w5mwdFYiyBRleYjHjL/uIfqOOD5g/MYJIXjbz423Iqk=
+github.com/assurrussa/outbox/backends/sqlite v0.12.0/go.mod h1:S2TLY6ycSZfPObRTA6iYQiONQoWaLc4XWX5zUXTyRBg=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

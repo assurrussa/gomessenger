@@ -1,5 +1,20 @@
 # Implementation notes
 
+## 2026-08-29 — Published Outbox v0.12.0 integration
+
+- Pinned the Outbox adapter, durable PostgreSQL example, clean consumer, and
+  SQLite E2E module to the published Outbox root and matching backend
+  `v0.12.0` tags. Local joint-development replacements remain confined to
+  `go.work`; source and release gates use `GOWORK=off`.
+- The durable example now resolves the same unified version-aware fenced batch
+  contract used during capacity development without local Outbox replacements.
+  Reservation batch size remains a host option in `1..1000`, with the site
+  default still `1` because the confirmation A/B did not establish a higher
+  repeatable capacity floor.
+- `release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0` resolved the published
+  root, PostgreSQL, and SQLite tags and refreshed the four affected module
+  graphs. Repository-wide verification follows on that published graph.
+
 ## 2026-08-28 — Capacity publication-recorder batch boundary
 
 - Fixed the asynchronous broker-confirmation recorder so a size-trigger writes

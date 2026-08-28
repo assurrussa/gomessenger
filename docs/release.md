@@ -45,13 +45,13 @@ Passing local gates proves the checkout, not the published module graph.
 
 ## Prepare exact module requirements
 
-The GoMessenger outbox adapter depends on the additive outbox v0.11 contract. Outbox root and backend `v0.11.0` tags are
+The GoMessenger outbox adapter depends on the unified outbox v0.12 contract. Outbox root and backend `v0.12.0` tags are
 already published. Prepare all GoMessenger module requirements in one reviewable commit:
 
 ```sh
 make check
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.11.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
 ```
 
 `release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements

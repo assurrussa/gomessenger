@@ -31,7 +31,7 @@ the draft-to-published transition. Updates and unpublishing do not emit it. The 
 
 Implementation belongs in a separate `site` project task and branch after every used GoMessenger module is published
 as `v0.1.0` and passes the clean release-consumer gate. Local `replace` directives are forbidden. The host must upgrade
-Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.11.0`, own the NATS connection/topology and
+Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.12.0`, own the NATS connection/topology and
 migrations, and preserve existing required-runner supervision.
 
 ## Compatibility constraints
