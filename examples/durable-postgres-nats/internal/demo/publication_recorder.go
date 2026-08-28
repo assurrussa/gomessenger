@@ -240,6 +240,9 @@ func (r *publicationRecorder) writeBatch(
 		return err
 	}
 	r.mu.Lock()
+	for _, confirmation := range batch {
+		delete(r.seen, confirmation.MessageID)
+	}
 	r.flushed += int64(len(batch))
 	r.batches++
 	r.mu.Unlock()

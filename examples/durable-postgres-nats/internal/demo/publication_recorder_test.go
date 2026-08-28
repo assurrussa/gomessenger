@@ -49,6 +49,12 @@ func TestPublicationRecorderBatchesAndDeduplicates(t *testing.T) {
 		return stats.Recorded == 2 && stats.Duplicates == 1 && stats.Flushed == 2 &&
 			stats.Batches == 1 && stats.Pending == 0
 	})
+	recorder.mu.Lock()
+	retainedConfirmations := len(recorder.seen)
+	recorder.mu.Unlock()
+	if retainedConfirmations != 0 {
+		t.Fatalf("retained flushed confirmations = %d, want 0", retainedConfirmations)
+	}
 
 	cancel()
 	if err := <-runErr; !errors.Is(err, context.Canceled) {
@@ -144,6 +150,9 @@ func TestPublicationRecorderFinalFlushUsesBoundedBatches(t *testing.T) {
 	stats := recorder.Stats()
 	if stats.Flushed != 257 || stats.Pending != 0 {
 		t.Fatalf("Stats() = %#v", stats)
+	}
+	if retainedConfirmations := len(recorder.seen); retainedConfirmations != 0 {
+		t.Fatalf("retained flushed confirmations = %d, want 0", retainedConfirmations)
 	}
 }
 

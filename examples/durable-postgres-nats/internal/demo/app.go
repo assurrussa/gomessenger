@@ -158,6 +158,7 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 	// Open's context bounds startup only. Once ready, the host owns the runtime
 	// until Close, even if it releases or cancels that startup context.
 	application.publicationRunner = startRunner(runtimeCtx, publications.Run)
+	application.superviseRunner("publication recorder", application.publicationRunner)
 	if err := waitReady(
 		ctx, "publication recorder", publications.Readiness, application.publicationRunner,
 		application.runtimeDone(), application.runtimeFailure,
