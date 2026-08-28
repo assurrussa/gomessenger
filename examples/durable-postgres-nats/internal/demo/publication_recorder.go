@@ -41,15 +41,15 @@ type publicationRecorder struct {
 	flushReady chan struct{}
 	running    atomic.Bool
 
-	flushMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[string]publicationConfirmation
-	seen     map[string]publicationConfirmation
-	failure  error
-	recorded int64
-	dupes    int64
-	flushed  int64
-	batches  int64
+	flushGate chan struct{}
+	mu        sync.Mutex
+	pending   map[string]publicationConfirmation
+	seen      map[string]publicationConfirmation
+	failure   error
+	recorded  int64
+	dupes     int64
+	flushed   int64
+	batches   int64
 }
 
 func newPublicationRecorder(db *sql.DB) (*publicationRecorder, error) {
@@ -73,9 +73,12 @@ func newPublicationRecorderWithWriter(
 	if batchSize < 1 || interval <= 0 || write == nil {
 		return nil, errors.New("publication recorder requires a positive batch size, interval, and writer")
 	}
+	flushGate := make(chan struct{}, 1)
+	flushGate <- struct{}{}
 	return &publicationRecorder{
 		write: write, batchSize: batchSize, interval: interval,
 		flushReady: make(chan struct{}, 1),
+		flushGate:  flushGate,
 		pending:    make(map[string]publicationConfirmation),
 		seen:       make(map[string]publicationConfirmation),
 	}, nil
@@ -195,8 +198,10 @@ func (r *publicationRecorder) Stats() PublicationRecorderStats {
 // arrive while a database write is in flight. A partial tail remains pending
 // for the interval tick or the final bounded Flush.
 func (r *publicationRecorder) flushFullBatches(ctx context.Context) error {
-	r.flushMu.Lock()
-	defer r.flushMu.Unlock()
+	if err := r.acquireFlush(ctx); err != nil {
+		return err
+	}
+	defer r.releaseFlush()
 	for {
 		batch := r.takeFullBatch()
 		if len(batch) == 0 {
@@ -212,8 +217,10 @@ func (r *publicationRecorder) flushFullBatches(ctx context.Context) error {
 // began. New arrivals are deliberately left for the next full-batch trigger or
 // interval so a busy relay cannot turn one flush into continuous tiny writes.
 func (r *publicationRecorder) flushPending(ctx context.Context) error {
-	r.flushMu.Lock()
-	defer r.flushMu.Unlock()
+	if err := r.acquireFlush(ctx); err != nil {
+		return err
+	}
+	defer r.releaseFlush()
 
 	remaining := r.pendingCount()
 	for remaining > 0 {
@@ -227,6 +234,22 @@ func (r *publicationRecorder) flushPending(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (r *publicationRecorder) acquireFlush(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.flushGate:
+		return nil
+	}
+}
+
+func (r *publicationRecorder) releaseFlush() {
+	r.flushGate <- struct{}{}
 }
 
 func (r *publicationRecorder) writeBatch(

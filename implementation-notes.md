@@ -17,7 +17,9 @@
 - Review follow-up made the publication recorder a required supervised runtime,
   evicts confirmations after a successful flush, and keeps an in-flight batch
   retryable without recording normal runner cancellation as a telemetry
-  failure. Deterministic tests cover the shutdown retry boundary.
+  failure. Flush ownership is context-aware so a final flush cannot outlive an
+  already-expired shutdown deadline. Deterministic tests cover both shutdown
+  boundaries.
 - Relay pool high-water measurement now uses `pgxpool` prepare/release hooks at
   the actual acquisition boundary instead of relying on one-second HTTP
   snapshots. A short PostgreSQL 17 + NATS smoke with pools `8 + 2` completed

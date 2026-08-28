@@ -158,6 +158,46 @@ func TestPublicationRecorderCancellationRetainsBatchWithoutFailure(t *testing.T)
 	}
 }
 
+func TestPublicationRecorderFlushWaitHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	recorder, err := newPublicationRecorderWithWriter(1, time.Hour, func(
+		context.Context,
+		[]publicationConfirmation,
+	) error {
+		close(writeStarted)
+		<-releaseWrite
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("newPublicationRecorderWithWriter() error = %v", err)
+	}
+	runContext, cancelRun := context.WithCancel(t.Context())
+	runErr := make(chan error, 1)
+	go func() { runErr <- recorder.Run(runContext) }()
+	waitRecorderReady(t, recorder)
+	recorder.Record(testPublication(1))
+	<-writeStarted
+
+	flushContext, cancelFlush := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancelFlush()
+	startedAt := time.Now()
+	if err := recorder.Flush(flushContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("Flush() waited %s after its context deadline", elapsed)
+	}
+
+	close(releaseWrite)
+	cancelRun()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+}
+
 func TestPublicationRecorderFinalFlushUsesBoundedBatches(t *testing.T) {
 	t.Parallel()
 
