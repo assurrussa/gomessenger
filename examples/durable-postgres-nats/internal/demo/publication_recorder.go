@@ -236,7 +236,9 @@ func (r *publicationRecorder) writeBatch(
 	if err := r.write(ctx, batch); err != nil {
 		r.restoreBatch(batch)
 		err = fmt.Errorf("flush broker-confirmed envelope measurements: %w", err)
-		r.fail(err)
+		if ctx.Err() == nil {
+			r.fail(err)
+		}
 		return err
 	}
 	r.mu.Lock()

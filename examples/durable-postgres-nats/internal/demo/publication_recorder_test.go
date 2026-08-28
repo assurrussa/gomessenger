@@ -117,6 +117,47 @@ func TestPublicationRecorderFailureIsUnhealthyAndRetainsBatch(t *testing.T) {
 	}
 }
 
+func TestPublicationRecorderCancellationRetainsBatchWithoutFailure(t *testing.T) {
+	t.Parallel()
+
+	writeStarted := make(chan struct{})
+	writes := 0
+	recorder, err := newPublicationRecorderWithWriter(1, time.Hour, func(
+		ctx context.Context,
+		_ []publicationConfirmation,
+	) error {
+		writes++
+		if writes == 1 {
+			close(writeStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("newPublicationRecorderWithWriter() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	runErr := make(chan error, 1)
+	go func() { runErr <- recorder.Run(ctx) }()
+	waitRecorderReady(t, recorder)
+	recorder.Record(testPublication(1))
+	<-writeStarted
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+	if stats := recorder.Stats(); stats.Pending != 1 || stats.Error != "" {
+		t.Fatalf("Stats() after cancellation = %#v, want retained healthy batch", stats)
+	}
+	if err := recorder.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if stats := recorder.Stats(); stats.Pending != 0 || stats.Flushed != 1 || stats.Error != "" {
+		t.Fatalf("Stats() after retry = %#v, want successful retry", stats)
+	}
+}
+
 func TestPublicationRecorderFinalFlushUsesBoundedBatches(t *testing.T) {
 	t.Parallel()
 
