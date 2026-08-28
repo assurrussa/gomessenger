@@ -134,10 +134,13 @@ func (r *publicationRecorder) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			if err := r.flushPending(ctx); err != nil {
+				return err
+			}
 		case <-r.flushReady:
-		}
-		if err := r.flushAvailable(ctx); err != nil {
-			return err
+			if err := r.flushFullBatches(ctx); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -165,7 +168,7 @@ func (r *publicationRecorder) Flush(ctx context.Context) error {
 	if r == nil {
 		return errors.New("publication recorder is not initialized")
 	}
-	flushErr := r.flushAvailable(ctx)
+	flushErr := r.flushPending(ctx)
 	r.mu.Lock()
 	failure := r.failure
 	r.mu.Unlock()
@@ -188,38 +191,91 @@ func (r *publicationRecorder) Stats() PublicationRecorderStats {
 	return result
 }
 
-func (r *publicationRecorder) flushAvailable(ctx context.Context) error {
+// flushFullBatches services a size-trigger without chasing confirmations that
+// arrive while a database write is in flight. A partial tail remains pending
+// for the interval tick or the final bounded Flush.
+func (r *publicationRecorder) flushFullBatches(ctx context.Context) error {
 	r.flushMu.Lock()
 	defer r.flushMu.Unlock()
 	for {
-		batch := r.takeBatch()
+		batch := r.takeFullBatch()
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := r.write(ctx, batch); err != nil {
-			r.restoreBatch(batch)
-			err = fmt.Errorf("flush broker-confirmed envelope measurements: %w", err)
-			r.fail(err)
+		if err := r.writeBatch(ctx, batch); err != nil {
 			return err
 		}
-		r.mu.Lock()
-		r.flushed += int64(len(batch))
-		r.batches++
-		r.mu.Unlock()
 	}
 }
 
-func (r *publicationRecorder) takeBatch() []publicationConfirmation {
+// flushPending persists the confirmations that were pending when the flush
+// began. New arrivals are deliberately left for the next full-batch trigger or
+// interval so a busy relay cannot turn one flush into continuous tiny writes.
+func (r *publicationRecorder) flushPending(ctx context.Context) error {
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
+
+	remaining := r.pendingCount()
+	for remaining > 0 {
+		batch := r.takeBatch(min(r.batchSize, remaining))
+		if len(batch) == 0 {
+			return nil
+		}
+		remaining -= len(batch)
+		if err := r.writeBatch(ctx, batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *publicationRecorder) writeBatch(
+	ctx context.Context,
+	batch []publicationConfirmation,
+) error {
+	if err := r.write(ctx, batch); err != nil {
+		r.restoreBatch(batch)
+		err = fmt.Errorf("flush broker-confirmed envelope measurements: %w", err)
+		r.fail(err)
+		return err
+	}
+	r.mu.Lock()
+	r.flushed += int64(len(batch))
+	r.batches++
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *publicationRecorder) pendingCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pending) == 0 {
+	return len(r.pending)
+}
+
+func (r *publicationRecorder) takeFullBatch() []publicationConfirmation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pending) < r.batchSize {
 		return nil
 	}
-	batch := make([]publicationConfirmation, 0, min(r.batchSize, len(r.pending)))
+	return r.takeBatchLocked(r.batchSize)
+}
+
+func (r *publicationRecorder) takeBatch(limit int) []publicationConfirmation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.takeBatchLocked(limit)
+}
+
+func (r *publicationRecorder) takeBatchLocked(limit int) []publicationConfirmation {
+	if len(r.pending) == 0 || limit < 1 {
+		return nil
+	}
+	batch := make([]publicationConfirmation, 0, min(limit, len(r.pending)))
 	for messageID, confirmation := range r.pending {
 		batch = append(batch, confirmation)
 		delete(r.pending, messageID)
-		if len(batch) == r.batchSize {
+		if len(batch) == limit {
 			break
 		}
 	}

@@ -1,5 +1,31 @@
 # Implementation notes
 
+## 2026-08-28 — Capacity publication-recorder batch boundary
+
+- Fixed the asynchronous broker-confirmation recorder so a size-trigger writes
+  only complete batches. Confirmations that arrive while that SQL is running
+  remain queued for the next complete batch or 50 ms interval instead of being
+  chased immediately as a stream of small `UPDATE ... FROM unnest(...)`
+  statements. Interval and final flushes persist a snapshot of the pending
+  tail in bounded batches.
+- Added deterministic concurrency coverage that blocks the first batch write,
+  records a partial tail during that write, and proves the size-trigger leaves
+  the tail pending until an explicit flush. The capacity report contract and
+  production relay behavior are unchanged; this narrows observer interference
+  before repeating the 2,000 msg/s batch-16/consumer-2 profile.
+- The first 60-second AC screening repetition after the fix used Outbox workers
+  `2`, reservation batch `16`, consumer concurrency `2`, and pools `9 + 1`.
+  Relay/consumer throughput reached `1998.583/1998.383 msg/s`, Outbox/consumer
+  lag ended at `85/12`, business p95 was `1275.932 ms`, drain was `0.625 s`,
+  and reconciliation passed without drops, redelivery, or DLQ. Publication
+  measurement writes fell from `5,180` calls at `22.3` rows/call and `17.155 s`
+  total execution in the preceding failed C2 run to `1,196` calls at `100.2`
+  rows/call and `0.546 s`. This is checkout-local screening evidence, not the
+  required three published-Outbox confirmation repetitions.
+- Recorder unit tests, targeted demo/capacity tests, the recorder race test,
+  targeted `go vet`, and new-diff `golangci-lint` pass. The patched isolated
+  capacity checkout also passes its `GOWORK=off` recorder tests.
+
 ## 2026-08-28 — Queue snapshot and capacity pipeline boundaries
 
 - Replaced the capacity-only `/benchmark/stats` Outbox age query with the

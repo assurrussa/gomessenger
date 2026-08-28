@@ -147,6 +147,88 @@ func TestPublicationRecorderFinalFlushUsesBoundedBatches(t *testing.T) {
 	}
 }
 
+func TestPublicationRecorderSizeFlushLeavesConcurrentPartialBatchPending(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		batchSize int
+		extra     int
+	}{
+		{name: "one extra confirmation", batchSize: 2, extra: 1},
+		{name: "partial tail", batchSize: 4, extra: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			testPublicationRecorderPartialTail(t, test.batchSize, test.extra)
+		})
+	}
+}
+
+func testPublicationRecorderPartialTail(t *testing.T, batchSize, extra int) {
+	t.Helper()
+	firstWriteStarted := make(chan struct{})
+	releaseFirstWrite := make(chan struct{})
+	var (
+		mu    sync.Mutex
+		sizes []int
+	)
+	recorder, err := newPublicationRecorderWithWriter(
+		batchSize,
+		time.Hour,
+		func(_ context.Context, batch []publicationConfirmation) error {
+			mu.Lock()
+			call := len(sizes)
+			sizes = append(sizes, len(batch))
+			mu.Unlock()
+			if call == 0 {
+				close(firstWriteStarted)
+				<-releaseFirstWrite
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("newPublicationRecorderWithWriter() error = %v", err)
+	}
+
+	for index := 0; index < batchSize; index++ {
+		recorder.Record(testPublication(index))
+	}
+	flushErr := make(chan error, 1)
+	go func() { flushErr <- recorder.flushFullBatches(t.Context()) }()
+	<-firstWriteStarted
+	for index := 0; index < extra; index++ {
+		recorder.Record(testPublication(batchSize + index))
+	}
+	close(releaseFirstWrite)
+	if err := <-flushErr; err != nil {
+		t.Fatalf("flushFullBatches() error = %v", err)
+	}
+
+	stats := recorder.Stats()
+	if stats.Flushed != int64(batchSize) || stats.Pending != extra || stats.Batches != 1 {
+		t.Fatalf("Stats() = %#v, want one full batch and %d pending", stats, extra)
+	}
+	mu.Lock()
+	gotSizes := append([]int(nil), sizes...)
+	mu.Unlock()
+	if len(gotSizes) != 1 || gotSizes[0] != batchSize {
+		t.Fatalf("batch sizes after size flush = %v, want [%d]", gotSizes, batchSize)
+	}
+
+	if err := recorder.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	mu.Lock()
+	gotSizes = append(gotSizes[:0], sizes...)
+	mu.Unlock()
+	if len(gotSizes) != 2 || gotSizes[1] != extra {
+		t.Fatalf("batch sizes after final flush = %v, want [%d %d]", gotSizes, batchSize, extra)
+	}
+}
+
 func TestPublicationRecorderRejectsConflictingDuplicate(t *testing.T) {
 	t.Parallel()
 
