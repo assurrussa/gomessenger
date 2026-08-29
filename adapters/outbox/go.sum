@@ -1,5 +1,7 @@
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
+github.com/assurrussa/gomessenger v0.2.1 h1:lBmDc45ltyXutW3eLVsFP2pe79qIwX/QGRj1gU20Yl4=
+github.com/assurrussa/gomessenger v0.2.1/go.mod h1:3E05IoMdeDrF8MTtdApOi0bZc5ROjEmUTCMkgl6MDpU=
 github.com/assurrussa/outbox v0.12.0 h1:ChnUueyc0rWPpLU9RS5Xcgq1xHPQdiGq6m7T6hY9mWc=
 github.com/assurrussa/outbox v0.12.0/go.mod h1:fzNmhtaNHltUtnUsj5KMQPNlnEB9tY/Z5MfsxJYvBgg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
