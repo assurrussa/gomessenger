@@ -2,6 +2,12 @@
 
 ## 2026-08-29 — v0.2.2 release preparation
 
+- Published the complete synchronized `v0.2.2` module graph and GitHub Release.
+  The clean external consumer downloaded every module and installed
+  `gomessengerctl@v0.2.2` without local replacements, then passed its compile
+  and test probe. The public release keeps the checkout-local batch-100 result
+  separate from production readiness; the raw archive was verified locally but
+  not uploaded because it contains environment, resource, and Compose logs.
 - Published the reviewed root `v0.2.2` tag at merge commit `757a995` after the
   local and hosted source gates passed. Nested modules are promoted in reviewed
   dependency layers so every exact `GOWORK=off` requirement resolves before
