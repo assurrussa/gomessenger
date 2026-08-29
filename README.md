@@ -156,6 +156,9 @@ published envelopes, consumer throughput and MiB/s from committed projections,
 and separates `staged - published` Outbox lag from `published - committed`
 consumer lag. Warm-up and drain remain outside every throughput denominator.
 
+Versioned capacity baselines, raw-evidence rules, and defensible claim
+boundaries are recorded in the [performance evidence registry](docs/performance/README.md).
+
 ## Guarantees
 
 The durable contract is **at-least-once**:
