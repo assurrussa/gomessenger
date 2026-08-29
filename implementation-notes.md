@@ -2,6 +2,11 @@
 
 ## 2026-08-29 — v0.2.2 release preparation
 
+- Published the reviewed root `v0.2.2` tag at merge commit `757a995` after the
+  local and hosted source gates passed. Nested modules are promoted in reviewed
+  dependency layers so every exact `GOWORK=off` requirement resolves before
+  its dependent module is tagged; the previous one-shot preparation attempted
+  to pin transports before Inbox existed and could not pass the clean build.
 - Prepared the root `v0.2.2` release while retaining the published nested
   GoMessenger graph at `v0.2.1` and the Outbox root, PostgreSQL, and SQLite
   modules at `v0.12.0`. The release changes no public Go API and keeps the site

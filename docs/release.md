@@ -46,34 +46,48 @@ Passing local gates proves the checkout, not the published module graph.
 ## Prepare exact module requirements
 
 The GoMessenger outbox adapter depends on the unified outbox v0.12 contract. Outbox root and backend `v0.12.0` tags are
-already published. Prepare all GoMessenger module requirements in one reviewable commit:
+already published. The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
+able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
+is pinned.
+
+Before the root tag, keep nested modules on the last published GoMessenger graph and run:
 
 ```sh
 make check
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
 ```
 
-`release-ready` replaces development `v0.0.0` requirements with exact versions, removes development path replacements
-from nested `go.mod` files, adds matching local pre-tag replacements to `go.work`, and uses a temporary local root
-replacement only while tidying the Outbox adapter before its requested GoMessenger tag exists. It then tidies the
-durable example, clean consumer, and SQLite E2E modules with `GOWORK=off`, and formats source. Run it only after the
-selected Outbox root and backend tags resolve from the Go proxy.
+After the reviewed root tag resolves through the Go proxy, prepare and review the root-dependent modules
+(`adapters/inbox`, `adapters/outbox`, and `observability`), then publish their tags. After the Inbox tag resolves,
+prepare and review `adapters/nats` and `adapters/kafka`, then publish those tags. Only after the transport tags resolve,
+run the final graph preparation:
+
+```sh
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make check
+```
+
+`release-ready` finalizes every remaining exact requirement, removes development path replacements from published
+module files, adds matching local replacements to `go.work`, tidies the durable example and test modules with
+`GOWORK=off`, and formats source. It is a final-layer command, not a pre-root-tag command. Run it only after the
+requested root, Inbox, NATS, and Kafka tags and the selected Outbox root/backend tags resolve from the Go proxy.
 `release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus
 the Outbox root/SQLite pair used by clean consumer/E2E modules and the Outbox root/PostgreSQL pair used by the durable
 example. It rejects remaining `replace` directives in published module files and any Outbox replacement in these
 consumer/example modules. The unpublished local
 E2E module deliberately keeps GoMessenger path replacements to test the checkout itself; it is not a published-module
-resolution probe. The gate does not resolve or test the not-yet-published GoMessenger tags. The full source gate must
-pass before release preparation; published resolution is proved separately after the dependency-ordered tags exist.
+resolution probe. The gate verifies the committed version graph but does not replace clean published resolution. The
+full source gate must pass for every reviewed dependency-layer commit; published resolution is proved separately after
+all dependency-ordered tags exist.
 Published modules in the checkout use development replacements only before release preparation; no published module
 may depend on them.
 
-Commit the exact-version module files before creating any GoMessenger tag.
+Commit each exact-version dependency layer before creating tags for that layer. Never pin a module to a GoMessenger
+tag that is not yet resolvable through the configured Go proxy.
 
 ## Dependency-ordered tags
 
-For release `vX.Y.Z`, create and push tags in dependency order:
+For release `vX.Y.Z`, create reviewed commits and push tags in dependency order:
 
 ```text
 vX.Y.Z
@@ -86,13 +100,11 @@ tools/gomessengerctl/vX.Y.Z
 ```
 
 The root must resolve before any nested module can resolve its root requirement. `adapters/inbox`, `adapters/outbox`,
-and
-`observability` depend only on the root and their external dependencies, so prepare and verify each after the root tag
-is
-published. `adapters/nats` and `adapters/kafka` additionally depend on the published inbox tag and may be tagged in
-either order after it. The CLI additionally depends on the published NATS, Kafka, and inbox tags. For each nested
-module, run the following after its dependencies resolve, inspect and commit any `go.sum` update, and only then create
-its tag:
+and `observability` depend only on the root and their external dependencies, so prepare and verify them after the root
+tag is published. `adapters/nats` and `adapters/kafka` additionally depend on the published Inbox tag and may be tagged
+in either order after it. The CLI additionally depends on the published NATS, Kafka, and Inbox tags. For each nested
+module, run the following after its dependencies resolve, inspect and commit any `go.sum` update in a reviewed layer,
+and only then create its tag:
 
 ```sh
 cd MODULE_DIRECTORY

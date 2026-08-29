@@ -592,22 +592,25 @@ make bench-all
 `make check` covers every module, static lint, race and checkptr builds, a 90% root coverage gate, an isolated
 clean-consumer module, and the Docker-free durable pipeline E2E. `make test-e2e` reruns only that full
 Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the local Docker entry point against official Kafka 4.1.2
-and 4.3.1 images; hosted CI runs each version in an independent matrix job. Release requirements are prepared and
-checked explicitly:
+and 4.3.1 images; hosted CI runs each version in an independent matrix job. Run the full source gate before publishing
+the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
+Inbox-dependent transports, and finally the CLI and checkout fixtures. After the root, Inbox, NATS, and Kafka tags
+resolve through the Go proxy, finalize and check the complete graph:
 
 ```sh
 make check
-make release-ready VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0
-make release-readiness VERSION=v0.2.1 OUTBOX_VERSION=v0.12.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make check
 ```
 
-Run the full source gate before `release-ready` removes development replacements. `release-readiness` then checks the
-exact tag declarations without trying to download GoMessenger tags that do not exist yet.
+`release-ready` is the final-layer command; do not run it before the dependency tags exist. The complete staged tagging
+and per-layer verification procedure is in the [release guide](docs/release.md).
 
 A published release is verified separately, after all dependency-ordered module tags exist:
 
 ```sh
-make test-consumer-release VERSION=v0.2.1
+make test-consumer-release VERSION=vX.Y.Z
 ```
 
 GitHub Actions runs static, race, checkptr, PostgreSQL, and Kafka integration shards; the aggregate `Full gate`
