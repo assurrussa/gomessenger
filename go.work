@@ -28,10 +28,12 @@ replace (
 	github.com/assurrussa/gomessenger/adapters/kafka v0.1.0 => ./adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/kafka v0.2.0 => ./adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/kafka v0.2.1 => ./adapters/kafka
+	github.com/assurrussa/gomessenger/adapters/kafka v0.2.2 => ./adapters/kafka
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0 => ./adapters/nats
 	github.com/assurrussa/gomessenger/adapters/nats v0.1.0 => ./adapters/nats
 	github.com/assurrussa/gomessenger/adapters/nats v0.2.0 => ./adapters/nats
 	github.com/assurrussa/gomessenger/adapters/nats v0.2.1 => ./adapters/nats
+	github.com/assurrussa/gomessenger/adapters/nats v0.2.2 => ./adapters/nats
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0 => ./adapters/outbox
 	github.com/assurrussa/gomessenger/adapters/outbox v0.1.0 => ./adapters/outbox
 	github.com/assurrussa/gomessenger/adapters/outbox v0.2.0 => ./adapters/outbox
