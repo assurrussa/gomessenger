@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-29
+
+### Added
+
+- a reproducible checkout-local PostgreSQL-to-Outbox-to-JetStream-to-Inbox capacity experiment with open-loop load,
+  bounded drain, exact reconciliation, PostgreSQL/WAL/I/O telemetry, and retained JSON, Markdown, sample, resource, and
+  Compose artifacts;
+- a PostgreSQL-only Inbox benchmark that exercises the real transactional `ProcessAttempt` path at controlled
+  concurrency and records statement, latency, WAL, I/O, integrity, and resource evidence.
+
+### Changed
+
+- PostgreSQL Inbox fresh-success handling now creates the initial durable attempt with the message identity and commits
+  successful handler work without an explicit savepoint release, reducing sequential database interactions without
+  changing schema, migration, transaction ownership, retry, duplicate, or acknowledgement contracts;
+- the Outbox adapter and durable fixtures now resolve the published Outbox root and matching PostgreSQL/SQLite backend
+  modules at `v0.12.0`; reservation batch size remains a bounded host option and defaults to `1`;
+- capacity report spec `1.3` records the exact Outbox module version and reports relay throughput, consumer throughput,
+  Outbox lag, and consumer lag separately instead of one ambiguous effective-rate metric.
+
+### Fixed
+
+- capacity runtime failures now supervise the publication recorder, retain retryable confirmations across interrupted
+  flushes, bound final flush shutdown, preserve PostgreSQL URL, keyword/value, and Unix-socket connection strings, and
+  measure producer/relay pool acquisition at the actual pgx boundary;
+- capacity artifacts can be written by the unprivileged container user, load-end evidence is anchored to the exact
+  half-open load window, and drain timing includes the complete post-window tail.
+
 ## [0.2.1] - 2026-08-26
 
 ### Changed

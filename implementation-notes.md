@@ -1,5 +1,24 @@
 # Implementation notes
 
+## 2026-08-29 — v0.2.2 release preparation
+
+- Prepared the root `v0.2.2` release while retaining the published nested
+  GoMessenger graph at `v0.2.1` and the Outbox root, PostgreSQL, and SQLite
+  modules at `v0.12.0`. The release changes no public Go API and keeps the site
+  capacity defaults at reservation batch `1` and consumer concurrency `1`.
+- Added the evidence-scoped changelog entry for the PostgreSQL Inbox
+  fresh-success optimization, the checkout-local capacity harness, report spec
+  `1.3`, and the supervised publication recorder. It deliberately makes no
+  sustainable `2000 msg/s` or production-readiness claim.
+- `make prepare`, `make check`, `make test-integration`, the PostgreSQL 18
+  integration gate, the official Kafka 4.1.2/4.3.1 compatibility gate, and
+  `make bench-all` passed. A local `release-ready VERSION=v0.2.2
+  OUTBOX_VERSION=v0.12.0` probe and the matching `release-readiness` gate
+  verified the intended exact-version graph, but PR CI correctly rejected that
+  graph before the root tag existed. The committed release therefore follows
+  the real dependency order: root first, then nested module pins and tags only
+  after each dependency resolves through the Go proxy.
+
 ## 2026-08-29 — Published Outbox v0.12.0 integration
 
 - Pinned the Outbox adapter, durable PostgreSQL example, clean consumer, and
