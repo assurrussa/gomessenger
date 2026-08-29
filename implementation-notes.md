@@ -1,5 +1,22 @@
 # Implementation notes
 
+## 2026-08-29 — v0.2.2 release preparation
+
+- Prepared the synchronized `v0.2.2` module graph while retaining the published
+  Outbox root, PostgreSQL, and SQLite modules at `v0.12.0`. The release changes
+  no public Go API and keeps the site capacity defaults at reservation batch
+  `1` and consumer concurrency `1`.
+- Added the evidence-scoped changelog entry for the PostgreSQL Inbox
+  fresh-success optimization, the checkout-local capacity harness, report spec
+  `1.3`, and the supervised publication recorder. It deliberately makes no
+  sustainable `2000 msg/s` or production-readiness claim.
+- `make prepare`, `make check`, `make test-integration`, the PostgreSQL 18
+  integration gate, the official Kafka 4.1.2/4.3.1 compatibility gate, and
+  `make bench-all` passed before release preparation. `make release-ready
+  VERSION=v0.2.2 OUTBOX_VERSION=v0.12.0` and the matching
+  `release-readiness` gate then produced and verified the expected exact-version
+  graph. Published-module resolution remains a post-tag gate.
+
 ## 2026-08-29 — Published Outbox v0.12.0 integration
 
 - Pinned the Outbox adapter, durable PostgreSQL example, clean consumer, and
