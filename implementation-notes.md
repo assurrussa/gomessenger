@@ -7,6 +7,10 @@
   dependency layers so every exact `GOWORK=off` requirement resolves before
   its dependent module is tagged; the previous one-shot preparation attempted
   to pin transports before Inbox existed and could not pass the clean build.
+- Final-layer preparation now fails before mutation unless root, Inbox, NATS,
+  and Kafka resolve at the requested version. It tidies the Outbox adapter and
+  CLI against those published modules instead of a temporary root replacement,
+  preserving the exact published checksums in their release graphs.
 - Prepared the root `v0.2.2` release while retaining the published nested
   GoMessenger graph at `v0.2.1` and the Outbox root, PostgreSQL, and SQLite
   modules at `v0.12.0`. The release changes no public Go API and keeps the site
