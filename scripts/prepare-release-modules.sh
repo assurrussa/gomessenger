@@ -31,22 +31,6 @@ workspace_replace() {
 	go work edit -replace="${dependency}@${wanted}=${local_path}"
 }
 
-tidy_with_local_root() {
-	module="$1"
-	(
-		cd "$module"
-		cleanup_local_root() {
-			go mod edit -dropreplace="github.com/assurrussa/gomessenger@${version}" >/dev/null 2>&1 || true
-		}
-		trap cleanup_local_root EXIT HUP INT TERM
-		go mod edit -dropreplace=github.com/assurrussa/gomessenger
-		go mod edit -replace="github.com/assurrussa/gomessenger@${version}=../.."
-		GOWORK=off go mod tidy
-		cleanup_local_root
-		trap - EXIT HUP INT TERM
-	)
-}
-
 require_resolvable_module() {
 	dependency="$1"
 	wanted="$2"
@@ -59,7 +43,12 @@ require_resolvable_module() {
 validate_version "$version" VERSION
 validate_version "$outbox_version" OUTBOX_VERSION
 
-# Resolve the complete external Outbox graph before mutating any go.mod file.
+# Resolve every dependency required by the final layer before mutating any
+# go.mod file. Dependency-layer publication is documented in docs/release.md.
+require_resolvable_module github.com/assurrussa/gomessenger "$version"
+require_resolvable_module github.com/assurrussa/gomessenger/adapters/inbox "$version"
+require_resolvable_module github.com/assurrussa/gomessenger/adapters/kafka "$version"
+require_resolvable_module github.com/assurrussa/gomessenger/adapters/nats "$version"
 require_resolvable_module github.com/assurrussa/outbox "$outbox_version"
 require_resolvable_module github.com/assurrussa/outbox/backends/pgsql "$outbox_version"
 require_resolvable_module github.com/assurrussa/outbox/backends/sqlite "$outbox_version"
@@ -109,8 +98,7 @@ workspace_replace github.com/assurrussa/gomessenger/adapters/nats "$version" ./a
 workspace_replace github.com/assurrussa/gomessenger/adapters/outbox "$version" ./adapters/outbox
 workspace_replace github.com/assurrussa/gomessenger/observability "$version" ./observability
 
-tidy_with_local_root adapters/outbox
-for module in examples/durable-postgres-nats testdata/consumer testdata/e2e; do
+for module in adapters/outbox tools/gomessengerctl examples/durable-postgres-nats testdata/consumer testdata/e2e; do
 	(cd "$module" && GOWORK=off go mod tidy)
 done
 
