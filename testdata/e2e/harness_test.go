@@ -99,6 +99,23 @@ func (b *observingInboxBackend) ForgetAttempt(
 	return b.delegate.ForgetAttempt(ctx, key, fingerprint)
 }
 
+func (b *observingInboxBackend) ProcessBatchAttempt(
+	ctx context.Context,
+	items []inbox.BatchItem,
+	maxAttempts uint64,
+	handler inbox.BatchHandler,
+) (inbox.BatchProcessResult, error) {
+	result, err := b.delegate.ProcessBatchAttempt(ctx, items, maxAttempts, handler)
+	if err == nil {
+		for _, item := range result.Items {
+			if item.Duplicate {
+				b.duplicates.Add(1)
+			}
+		}
+	}
+	return result, err
+}
+
 func (b *observingInboxBackend) Prune(ctx context.Context, before time.Time, limit int) (int64, error) {
 	return b.delegate.Prune(ctx, before, limit)
 }
@@ -313,6 +330,35 @@ func (h *testHarness) newConsumer(
 	consumer, err := natsadapter.NewCommandConsumer(connection, h.inbox, h.command, handler, config)
 	if err != nil {
 		t.Fatalf("create consumer: %v", err)
+	}
+	return consumer
+}
+
+func (h *testHarness) newBatchConsumer(
+	t *testing.T,
+	connection *natsio.Conn,
+	consumerID string,
+	handler messenger.BatchHandler[processPayload],
+	batchConfig messenger.BatchConfig,
+) *natsadapter.Consumer {
+	t.Helper()
+	config := natsadapter.HandlerConfig{
+		Stream: testStream, Namespace: testNamespace, ConsumerID: consumerID,
+		WireMode: natsadapter.WireNative, Concurrency: 1, Timeout: 2 * time.Second,
+		MaxAttempts: 3, BaseRetry: 25 * time.Millisecond, MaxRetry: 250 * time.Millisecond,
+		AckWait: 300 * time.Millisecond, DLQSubject: testDLQ, Replicas: 1, MemoryStorage: true,
+		Propagator: e2eTracePropagator{},
+	}
+	consumer, err := natsadapter.NewBatchCommandConsumer(
+		connection,
+		h.inbox,
+		h.command,
+		handler,
+		config,
+		batchConfig,
+	)
+	if err != nil {
+		t.Fatalf("create batch consumer: %v", err)
 	}
 	return consumer
 }

@@ -13,6 +13,7 @@ import (
 const (
 	publicationBatchSize     = 256
 	publicationFlushInterval = 50 * time.Millisecond
+	measurementQueueCapacity = 100_000
 )
 
 type publicationConfirmation struct {
@@ -26,43 +27,58 @@ type publicationBatchWriter func(context.Context, []publicationConfirmation) err
 // broker-confirmation telemetry. A recorder error invalidates benchmark
 // integrity but is deliberately not returned through the relay handler.
 type PublicationRecorderStats struct {
-	Recorded   int64  `json:"recorded"`
-	Duplicates int64  `json:"duplicates"`
-	Flushed    int64  `json:"flushed"`
-	Batches    int64  `json:"batches"`
-	Pending    int    `json:"pending"`
-	Error      string `json:"error,omitempty"`
+	Recorded             int64  `json:"recorded"`
+	Duplicates           int64  `json:"duplicates"`
+	Flushed              int64  `json:"flushed"`
+	Batches              int64  `json:"batches"`
+	Pending              int    `json:"pending"`
+	Error                string `json:"error,omitempty"`
+	MeasurementsRecorded int64  `json:"measurementsRecorded"`
+	MeasurementsFlushed  int64  `json:"measurementsFlushed"`
+	MeasurementOverflow  int64  `json:"measurementOverflow"`
 }
 
 type publicationRecorder struct {
-	write      publicationBatchWriter
-	batchSize  int
-	interval   time.Duration
-	flushReady chan struct{}
-	running    atomic.Bool
+	write             publicationBatchWriter
+	batchSize         int
+	interval          time.Duration
+	flushReady        chan struct{}
+	running           atomic.Bool
+	measurements      chan envelopeMeasurement
+	writeMeasurements func(context.Context, []envelopeMeasurement) error
 
-	flushGate chan struct{}
-	mu        sync.Mutex
-	pending   map[string]publicationConfirmation
-	seen      map[string]publicationConfirmation
-	failure   error
-	recorded  int64
-	dupes     int64
-	flushed   int64
-	batches   int64
+	flushGate            chan struct{}
+	mu                   sync.Mutex
+	pending              map[string]publicationConfirmation
+	seen                 map[string]publicationConfirmation
+	failure              error
+	recorded             int64
+	dupes                int64
+	flushed              int64
+	batches              int64
+	measurementsRecorded int64
+	measurementsFlushed  int64
+	measurementOverflow  int64
 }
 
 func newPublicationRecorder(db *sql.DB) (*publicationRecorder, error) {
 	if db == nil {
 		return nil, errors.New("publication recorder database is required")
 	}
-	return newPublicationRecorderWithWriter(
+	recorder, err := newPublicationRecorderWithWriter(
 		publicationBatchSize,
 		publicationFlushInterval,
 		func(ctx context.Context, batch []publicationConfirmation) error {
 			return updatePublishedMeasurements(ctx, db, batch)
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+	recorder.writeMeasurements = func(ctx context.Context, batch []envelopeMeasurement) error {
+		return insertEnvelopeMeasurements(ctx, db, batch)
+	}
+	return recorder, nil
 }
 
 func newPublicationRecorderWithWriter(
@@ -77,11 +93,36 @@ func newPublicationRecorderWithWriter(
 	flushGate <- struct{}{}
 	return &publicationRecorder{
 		write: write, batchSize: batchSize, interval: interval,
-		flushReady: make(chan struct{}, 1),
-		flushGate:  flushGate,
-		pending:    make(map[string]publicationConfirmation),
-		seen:       make(map[string]publicationConfirmation),
+		flushReady:        make(chan struct{}, 1),
+		flushGate:         flushGate,
+		pending:           make(map[string]publicationConfirmation),
+		seen:              make(map[string]publicationConfirmation),
+		measurements:      make(chan envelopeMeasurement, measurementQueueCapacity),
+		writeMeasurements: func(context.Context, []envelopeMeasurement) error { return nil },
 	}, nil
+}
+
+// RecordMeasurement admits one staging observation to a bounded asynchronous
+// recorder. Overflow invalidates the run but never changes delivery outcome.
+func (r *publicationRecorder) RecordMeasurement(measurement envelopeMeasurement) {
+	if r == nil {
+		return
+	}
+	if measurement.MessageID == "" || measurement.EnvelopeBytes <= 0 || measurement.SHA256 == "" {
+		r.fail(errors.New("envelope measurement is incomplete"))
+		return
+	}
+	r.mu.Lock()
+	r.measurementsRecorded++
+	r.mu.Unlock()
+	select {
+	case r.measurements <- measurement:
+	default:
+		r.mu.Lock()
+		r.measurementOverflow++
+		r.setFailureLocked(errors.New("envelope measurement recorder overflow"))
+		r.mu.Unlock()
+	}
 }
 
 func (r *publicationRecorder) Record(confirmation publicationConfirmation) {
@@ -144,6 +185,10 @@ func (r *publicationRecorder) Run(ctx context.Context) error {
 			if err := r.flushFullBatches(ctx); err != nil {
 				return err
 			}
+		case measurement := <-r.measurements:
+			if err := r.flushMeasurements(ctx, measurement); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -171,11 +216,12 @@ func (r *publicationRecorder) Flush(ctx context.Context) error {
 	if r == nil {
 		return errors.New("publication recorder is not initialized")
 	}
+	measurementErr := r.flushAllMeasurements(ctx)
 	flushErr := r.flushPending(ctx)
 	r.mu.Lock()
 	failure := r.failure
 	r.mu.Unlock()
-	return errors.Join(flushErr, failure)
+	return errors.Join(measurementErr, flushErr, failure)
 }
 
 func (r *publicationRecorder) Stats() PublicationRecorderStats {
@@ -187,11 +233,55 @@ func (r *publicationRecorder) Stats() PublicationRecorderStats {
 	result := PublicationRecorderStats{
 		Recorded: r.recorded, Duplicates: r.dupes, Flushed: r.flushed,
 		Batches: r.batches, Pending: len(r.pending),
+		MeasurementsRecorded: r.measurementsRecorded,
+		MeasurementsFlushed:  r.measurementsFlushed,
+		MeasurementOverflow:  r.measurementOverflow,
 	}
 	if r.failure != nil {
 		result.Error = r.failure.Error()
 	}
 	return result
+}
+
+func (r *publicationRecorder) flushMeasurements(ctx context.Context, first envelopeMeasurement) error {
+	batch := make([]envelopeMeasurement, 0, r.batchSize)
+	batch = append(batch, first)
+	for len(batch) < r.batchSize {
+		select {
+		case measurement := <-r.measurements:
+			batch = append(batch, measurement)
+		default:
+			if err := r.writeMeasurements(ctx, batch); err != nil {
+				r.fail(fmt.Errorf("write envelope measurements: %w", err))
+				return err
+			}
+			r.mu.Lock()
+			r.measurementsFlushed += int64(len(batch))
+			r.mu.Unlock()
+			return nil
+		}
+	}
+	if err := r.writeMeasurements(ctx, batch); err != nil {
+		r.fail(fmt.Errorf("write envelope measurements: %w", err))
+		return err
+	}
+	r.mu.Lock()
+	r.measurementsFlushed += int64(len(batch))
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *publicationRecorder) flushAllMeasurements(ctx context.Context) error {
+	for {
+		select {
+		case measurement := <-r.measurements:
+			if err := r.flushMeasurements(ctx, measurement); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
 }
 
 // flushFullBatches services a size-trigger without chasing confirmations that
@@ -358,16 +448,18 @@ func updatePublishedMeasurements(
 		digests[index] = confirmation.SHA256
 		publishedAt[index] = confirmation.PublishedAt
 	}
-	tag, err := db.ExecContext(ctx, `UPDATE demo.envelope_measurements AS measurement
-		SET published_at = COALESCE(measurement.published_at, confirmed.published_at)
-		FROM unnest(
+	tag, err := db.ExecContext(ctx, `INSERT INTO demo.envelope_measurements (
+		message_id, run_id, stage_id, envelope_bytes, envelope_sha256, published_at
+	)
+	SELECT * FROM unnest(
 			$1::uuid[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::timestamptz[]
-		) AS confirmed(message_id, run_id, stage_id, envelope_bytes, envelope_sha256, published_at)
-		WHERE measurement.message_id = confirmed.message_id
-		  AND measurement.run_id = confirmed.run_id
-		  AND measurement.stage_id = confirmed.stage_id
-		  AND measurement.envelope_bytes = confirmed.envelope_bytes
-		  AND measurement.envelope_sha256 = confirmed.envelope_sha256`,
+		)
+	ON CONFLICT (message_id) DO UPDATE SET
+		published_at = COALESCE(demo.envelope_measurements.published_at, EXCLUDED.published_at)
+	WHERE demo.envelope_measurements.run_id = EXCLUDED.run_id
+	  AND demo.envelope_measurements.stage_id = EXCLUDED.stage_id
+	  AND demo.envelope_measurements.envelope_bytes = EXCLUDED.envelope_bytes
+	  AND demo.envelope_measurements.envelope_sha256 = EXCLUDED.envelope_sha256`,
 		messageIDs, runIDs, stageIDs, envelopeBytes, digests, publishedAt,
 	)
 	if err != nil {
@@ -379,6 +471,47 @@ func updatePublishedMeasurements(
 	}
 	if rows != int64(len(batch)) {
 		return fmt.Errorf("publication batch matched %d of %d staged measurements", rows, len(batch))
+	}
+	return nil
+}
+
+func insertEnvelopeMeasurements(
+	ctx context.Context,
+	db *sql.DB,
+	batch []envelopeMeasurement,
+) error {
+	messageIDs := make([]string, len(batch))
+	runIDs := make([]string, len(batch))
+	stageIDs := make([]string, len(batch))
+	bytes := make([]int64, len(batch))
+	digests := make([]string, len(batch))
+	for index, measurement := range batch {
+		messageIDs[index] = measurement.MessageID
+		runIDs[index] = measurement.Labels.RunID
+		stageIDs[index] = measurement.Labels.StageID
+		bytes[index] = measurement.EnvelopeBytes
+		digests[index] = measurement.SHA256
+	}
+	tag, err := db.ExecContext(ctx, `INSERT INTO demo.envelope_measurements (
+		message_id, run_id, stage_id, envelope_bytes, envelope_sha256
+	)
+	SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::bigint[], $5::text[])
+	ON CONFLICT (message_id) DO UPDATE SET message_id = EXCLUDED.message_id
+	WHERE demo.envelope_measurements.run_id = EXCLUDED.run_id
+	  AND demo.envelope_measurements.stage_id = EXCLUDED.stage_id
+	  AND demo.envelope_measurements.envelope_bytes = EXCLUDED.envelope_bytes
+	  AND demo.envelope_measurements.envelope_sha256 = EXCLUDED.envelope_sha256`,
+		messageIDs, runIDs, stageIDs, bytes, digests,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := tag.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != int64(len(batch)) {
+		return fmt.Errorf("measurement batch matched %d of %d rows", rows, len(batch))
 	}
 	return nil
 }

@@ -17,12 +17,16 @@ import (
 	coreoutbox "github.com/assurrussa/outbox/outbox"
 	"github.com/assurrussa/outbox/outbox/logger"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/multitracer"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	producerApplicationName = "gomessenger-outbox-producer"
-	relayApplicationName    = "gomessenger-outbox-relay"
+	producerApplicationName            = "gomessenger-outbox-producer"
+	relayApplicationName               = "gomessenger-outbox-relay"
+	postgresCancelRequestDeadlineDelay = 5 * time.Second
 )
 
 // splitOutboxRuntime deliberately gives producer staging and relay execution
@@ -37,6 +41,7 @@ type splitOutboxRuntime struct {
 	relayAcquisitions    *poolAcquireObserver
 	capabilitiesMu       sync.RWMutex
 	capabilities         map[coreoutbox.JobCapability]struct{}
+	observations         *outboxObservationRecorder
 
 	closeRelayOnce    sync.Once
 	closeProducerOnce sync.Once
@@ -84,13 +89,15 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 		closeProducer()
 		return nil, fmt.Errorf("create Outbox failed jobs repository: %w", err)
 	}
+	observations := newOutboxObservationRecorder()
+	observedJobs := &observedOutboxJobsRepository{Repo: jobs, observations: observations}
 	relayTransactor := pgsqltx.New(relayClient.DB())
 	service, err := coreoutbox.New(
 		coreoutbox.WithWorkers(config.OutboxWorkers),
 		coreoutbox.WithReservationBatchSize(config.OutboxReservationBatchSize),
 		coreoutbox.WithIdleTime(100*time.Millisecond),
 		coreoutbox.WithReserveFor(5*time.Second),
-		coreoutbox.WithJobsRepo(jobs),
+		coreoutbox.WithJobsRepo(observedJobs),
 		coreoutbox.WithJobsFailedRepo(failed),
 		coreoutbox.WithTransactor(relayTransactor),
 		coreoutbox.WithLogger(logger.Discard()),
@@ -109,6 +116,7 @@ func openSplitOutboxRuntime(ctx context.Context, config Config) (*splitOutboxRun
 		producerAcquisitions: producerAcquisitions,
 		relayAcquisitions:    relayAcquisitions,
 		capabilities:         make(map[coreoutbox.JobCapability]struct{}),
+		observations:         observations,
 	}, nil
 }
 
@@ -152,6 +160,20 @@ func (r *splitOutboxRuntime) registerJob(job coreoutbox.Job) error {
 	return nil
 }
 
+func (r *splitOutboxRuntime) registerBatchJob(job coreoutbox.BatchJob, config coreoutbox.BatchConfig) error {
+	if err := r.service.RegisterBatchJob(job, config); err != nil {
+		return err
+	}
+	capability := coreoutbox.JobCapability{Name: job.Name(), SchemaVersion: coreoutbox.DefaultSchemaVersion}
+	if versioned, ok := job.(coreoutbox.VersionedBatchJob); ok {
+		capability.SchemaVersion = versioned.SchemaVersion()
+	}
+	r.capabilitiesMu.Lock()
+	r.capabilities[capability] = struct{}{}
+	r.capabilitiesMu.Unlock()
+	return nil
+}
+
 func (r *splitOutboxRuntime) supportsCapability(name string, schemaVersion coreoutbox.SchemaVersion) bool {
 	if r == nil {
 		return false
@@ -166,15 +188,14 @@ func (r *splitOutboxRuntime) ProducerClient() pgsql.Client { return r.producerCl
 
 func (r *splitOutboxRuntime) RelayClient() pgsql.Client { return r.relayClient }
 
-func (r *splitOutboxRuntime) ProducerMaxAcquired() *atomic.Int32 {
-	return &r.producerAcquisitions.maximum
-}
-
-func (r *splitOutboxRuntime) RelayMaxAcquired() *atomic.Int32 {
-	return &r.relayAcquisitions.maximum
-}
-
 func (r *splitOutboxRuntime) ProducerTransactor() *pgsqltx.Manager { return r.producerTransactor }
+
+func (r *splitOutboxRuntime) ObservationStats(labels BenchmarkLabels) OutboxExecutionStats {
+	if r == nil {
+		return OutboxExecutionStats{}
+	}
+	return r.observations.stats(labels)
+}
 
 func (r *splitOutboxRuntime) CloseRelay() error {
 	if r == nil || r.relayClient == nil {
@@ -204,23 +225,61 @@ func (c *observedPoolClient) Close() error {
 }
 
 type poolAcquireObserver struct {
-	current atomic.Int32
-	maximum atomic.Int32
+	current          atomic.Int32
+	maximum          atomic.Int32
+	unusableReleases atomic.Int64
 }
 
-func (o *poolAcquireObserver) prepareConn(context.Context, *pgx.Conn) (bool, error) {
+var (
+	_ pgx.QueryTracer       = (*poolAcquireObserver)(nil)
+	_ pgxpool.AcquireTracer = (*poolAcquireObserver)(nil)
+	_ pgxpool.ReleaseTracer = (*poolAcquireObserver)(nil)
+)
+
+func (*poolAcquireObserver) TraceQueryStart(
+	ctx context.Context,
+	_ *pgx.Conn,
+	_ pgx.TraceQueryStartData,
+) context.Context {
+	return ctx
+}
+
+func (*poolAcquireObserver) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*poolAcquireObserver) TraceAcquireStart(
+	ctx context.Context,
+	_ *pgxpool.Pool,
+	_ pgxpool.TraceAcquireStartData,
+) context.Context {
+	return ctx
+}
+
+func (o *poolAcquireObserver) TraceAcquireEnd(
+	_ context.Context,
+	_ *pgxpool.Pool,
+	data pgxpool.TraceAcquireEndData,
+) {
+	if data.Err != nil || data.Conn == nil {
+		return
+	}
 	current := o.current.Add(1)
 	for {
 		previous := o.maximum.Load()
 		if current <= previous || o.maximum.CompareAndSwap(previous, current) {
-			return true, nil
+			return
 		}
 	}
 }
 
-func (o *poolAcquireObserver) afterRelease(*pgx.Conn) bool {
+func (o *poolAcquireObserver) TraceRelease(
+	_ *pgxpool.Pool,
+	data pgxpool.TraceReleaseData,
+) {
 	o.current.Add(-1)
-	return true
+	connection := data.Conn
+	if connection.IsClosed() || connection.PgConn().IsBusy() || connection.PgConn().TxStatus() != 'I' {
+		o.unusableReleases.Add(1)
+	}
 }
 
 func openObservedPoolClient(
@@ -262,8 +321,20 @@ func observedPoolConfig(
 	config.MaxConns = maxConnections
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.MaxConnLifetime = time.Hour
-	config.PrepareConn = observer.prepareConn
-	config.AfterRelease = observer.afterRelease
+	// Supplemental batch claims are intentionally deadline-bounded. pgx's
+	// default watcher closes the connection when such a deadline wins; ask
+	// PostgreSQL to cancel the statement and retain the synchronized connection.
+	config.ConnConfig.BuildContextWatcherHandler = func(connection *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{
+			Conn:          connection,
+			DeadlineDelay: postgresCancelRequestDeadlineDelay,
+		}
+	}
+	if config.ConnConfig.Tracer == nil {
+		config.ConnConfig.Tracer = observer
+	} else {
+		config.ConnConfig.Tracer = multitracer.New(config.ConnConfig.Tracer, observer)
+	}
 	config.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
 		return connection.Ping(ctx)
 	}

@@ -40,6 +40,7 @@ type HandlerConfig struct {
 type decodedMessage struct {
 	metadata  messenger.Metadata
 	canonical []byte
+	value     any
 	handle    func(context.Context) error
 }
 
@@ -67,6 +68,7 @@ type Consumer struct {
 	descriptor messenger.DescriptorInfo
 	decode     decoder
 	clock      func() time.Time
+	batch      *kafkaBatchConsumer
 
 	sourceTopic string
 	groupID     string
@@ -76,17 +78,20 @@ type Consumer struct {
 	dlqTopic    string
 	topics      []string
 
-	mu           sync.Mutex
-	state        consumerState
-	runStarted   bool
-	forceCancel  context.CancelFunc
-	drain        chan struct{}
-	drainOnce    sync.Once
-	done         chan struct{}
-	doneOnce     sync.Once
-	readyWorkers int
-	workersReady bool
-	workerErr    error
+	mu                  sync.Mutex
+	state               consumerState
+	runStarted          bool
+	forceCancel         context.CancelFunc
+	drain               chan struct{}
+	drainOnce           sync.Once
+	done                chan struct{}
+	doneOnce            sync.Once
+	readyWorkers        int
+	workersReady        bool
+	workerErr           error
+	batchBackoffWorkers int
+	batchLastError      error
+	workerReady         map[int]bool
 
 	startupCheck func(context.Context) error
 	workerRun    func(context.Context, int, func()) error
@@ -119,7 +124,7 @@ func NewCommandConsumer[T any](
 		}
 		message := messenger.Message[T]{Metadata: metadata, Payload: payload}
 		return decodedMessage{
-			metadata: message.Metadata, canonical: canonical,
+			metadata: message.Metadata, canonical: canonical, value: message,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
 		}, nil
 	}
@@ -153,7 +158,7 @@ func NewEventConsumer[T any](
 		}
 		message := messenger.Message[T]{Metadata: metadata, Payload: payload}
 		return decodedMessage{
-			metadata: message.Metadata, canonical: canonical,
+			metadata: message.Metadata, canonical: canonical, value: message,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
 		}, nil
 	}
@@ -299,10 +304,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 		workers.Add(1)
 		go func(index int) {
 			defer workers.Done()
-			var readyOnce sync.Once
 			err := workerRun(runContext, index, func() {
-				readyOnce.Do(c.markWorkerReady)
+				c.setWorkerReady(index, true)
 			})
+			c.setWorkerReady(index, false)
 			c.recordWorkerError(runContext, err)
 			results <- err
 		}(worker)
@@ -330,6 +335,8 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 	state := c.state
 	workersReady := c.workersReady
 	workerErr := c.workerErr
+	backoffWorkers := c.batchBackoffWorkers
+	batchErr := c.batchLastError
 	c.mu.Unlock()
 	if state != consumerRunning {
 		return messenger.ErrRuntimeNotRunning
@@ -337,11 +344,16 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 	if workerErr != nil {
 		return fmt.Errorf("messenger/kafka: consumer worker failed: %w", workerErr)
 	}
-	if !workersReady {
+	if !workersReady || backoffWorkers != 0 {
+		if batchErr != nil {
+			return fmt.Errorf("%w: Kafka consumer workers are backing off: %w", messenger.ErrRuntimeNotRunning, batchErr)
+		}
 		return fmt.Errorf("%w: Kafka consumer workers are not ready", messenger.ErrRuntimeNotRunning)
 	}
-	if err := c.transport.client.Ping(ctx); err != nil {
-		return fmt.Errorf("messenger/kafka: consumer readiness: %w", err)
+	if c.transport != nil && c.transport.client != nil {
+		if err := c.transport.client.Ping(ctx); err != nil {
+			return fmt.Errorf("messenger/kafka: consumer readiness: %w", err)
+		}
 	}
 	return nil
 }
@@ -350,6 +362,13 @@ func (c *Consumer) Readiness(ctx context.Context) error {
 func (c *Consumer) DeepHealth(ctx context.Context) error {
 	if err := c.Readiness(ctx); err != nil {
 		return err
+	}
+	c.mu.Lock()
+	backoffWorkers, batchErr := c.batchBackoffWorkers, c.batchLastError
+	c.mu.Unlock()
+	if backoffWorkers != 0 {
+		return fmt.Errorf("messenger/kafka: %d batch workers are recreating or backing off: %w",
+			backoffWorkers, batchErr)
 	}
 	return c.ensureTopics(ctx)
 }
@@ -393,6 +412,9 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 }
 
 func (c *Consumer) runWorker(ctx context.Context, index int, ready func()) error {
+	if c.batch != nil {
+		return c.runKafkaBatchWorkerSupervisor(ctx, index, ready)
+	}
 	transactionID, err := transactionalID(c.groupID, c.transport.config.InstanceID, index+1)
 	if err != nil {
 		return err
@@ -638,10 +660,33 @@ func (c *Consumer) markWorkerReady() {
 	if c.state != consumerRunning || c.workersReady {
 		return
 	}
+	if c.workerReady == nil {
+		c.workerReady = make(map[int]bool)
+	}
 	c.readyWorkers++
-	if c.readyWorkers == c.config.Concurrency {
+	c.workerReady[c.readyWorkers-1] = true
+	if (c.readyWorkers == c.config.Concurrency || len(c.workerReady) == c.config.Concurrency) &&
+		c.batchBackoffWorkers == 0 {
 		c.workersReady = true
 	}
+}
+
+func (c *Consumer) setWorkerReady(index int, ready bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.workerReady == nil {
+		c.workerReady = make(map[int]bool)
+	}
+	if ready {
+		c.workerReady[index] = true
+	} else {
+		delete(c.workerReady, index)
+	}
+	if c.state != consumerRunning || c.batchBackoffWorkers != 0 {
+		c.workersReady = false
+		return
+	}
+	c.workersReady = len(c.workerReady) == c.config.Concurrency
 }
 
 func (c *Consumer) recordWorkerError(ctx context.Context, err error) {
@@ -838,7 +883,10 @@ func (c *Consumer) processPreparedRecord(
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return commitErr
 	}
-	delay, ok := messenger.RetryDelay(processErr)
+	delay, ok := messenger.DeferDelay(processErr)
+	if !ok {
+		delay, ok = messenger.RetryDelay(processErr)
+	}
 	if !ok {
 		delay = retryDelay(c.config.BaseRetry, c.config.MaxRetry, attempt)
 	}

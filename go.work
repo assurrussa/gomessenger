@@ -44,7 +44,4 @@ replace (
 	github.com/assurrussa/gomessenger/observability v0.2.0 => ./observability
 	github.com/assurrussa/gomessenger/observability v0.2.1 => ./observability
 	github.com/assurrussa/gomessenger/observability v0.2.2 => ./observability
-	github.com/assurrussa/outbox => ../outbox
-	github.com/assurrussa/outbox/backends/pgsql => ../outbox/backends/pgsql
-	github.com/assurrussa/outbox/backends/sqlite => ../outbox/backends/sqlite
 )

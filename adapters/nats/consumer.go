@@ -51,6 +51,7 @@ type HandlerConfig struct {
 type decodedMessage struct {
 	metadata  messenger.Metadata
 	canonical []byte
+	value     any
 	handle    func(context.Context) error
 }
 
@@ -81,16 +82,18 @@ type Consumer struct {
 	subject     string
 	decode      decoder
 	clock       func() time.Time
+	batch       *batchConsumer
 
-	mu            sync.Mutex
-	state         consumerState
-	runStarted    bool
-	pullLoopReady bool
-	runDone       <-chan struct{}
-	forceCancel   context.CancelFunc
-	iterator      jetstream.MessagesContext
-	done          chan struct{}
-	doneOnce      sync.Once
+	mu              sync.Mutex
+	state           consumerState
+	runStarted      bool
+	pullLoopReady   bool
+	runDone         <-chan struct{}
+	forceCancel     context.CancelFunc
+	admissionCancel context.CancelFunc
+	iterator        jetstream.MessagesContext
+	done            chan struct{}
+	doneOnce        sync.Once
 
 	// beforePullLoopReady synchronizes the startup window in package tests.
 	beforePullLoopReady func()
@@ -125,7 +128,7 @@ func NewCommandConsumer[T any](
 			return decodedMessage{}, err
 		}
 		return decodedMessage{
-			metadata: message.Metadata, canonical: canonical,
+			metadata: message.Metadata, canonical: canonical, value: message,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
 		}, nil
 	}
@@ -157,7 +160,7 @@ func NewEventConsumer[T any](
 				return decodedMessage{}, err
 			}
 			return decodedMessage{
-				metadata: message.Metadata, canonical: canonical,
+				metadata: message.Metadata, canonical: canonical, value: message,
 				handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
 			}, nil
 		}
@@ -192,7 +195,7 @@ func NewEventConsumer[T any](
 		}
 		message := messenger.Message[T]{Metadata: cloudEnvelope.metadata, Payload: payload}
 		return decodedMessage{
-			metadata: message.Metadata, canonical: canonical,
+			metadata: message.Metadata, canonical: canonical, value: message,
 			handle: func(ctx context.Context) error { return callHandler(ctx, handler, message) },
 		}, nil
 	}
@@ -308,6 +311,9 @@ func (c *Consumer) Run(ctx context.Context) error {
 	c.forceCancel = cancel
 	c.mu.Unlock()
 	defer cancel()
+	if c.batch != nil {
+		return c.runBatch(runContext)
+	}
 	if err := c.ensureDLQStream(runContext); err != nil {
 		c.markClosed()
 		return err
@@ -491,6 +497,9 @@ func (c *Consumer) beginDrainLocked() jetstream.MessagesContext {
 		c.state = consumerDraining
 	}
 	c.pullLoopReady = false
+	if c.admissionCancel != nil {
+		c.admissionCancel()
+	}
 	return c.iterator
 }
 
@@ -568,10 +577,14 @@ func (c *Consumer) ensureDLQStream(ctx context.Context) error {
 }
 
 func (c *Consumer) consumerSpec() ConsumerSpec {
+	maxAckPending := c.config.Concurrency
+	if c.batch != nil {
+		maxAckPending *= c.batch.config.MaxMessages
+	}
 	return ConsumerSpec{
 		Stream: c.config.Stream, Name: c.config.ConsumerID, Description: c.config.Description,
 		FilterSubject: c.subject, AckWait: c.config.AckWait, MaxDeliver: -1,
-		MaxAckPending: c.config.Concurrency, Replicas: c.config.Replicas, MemoryStorage: c.config.MemoryStorage,
+		MaxAckPending: maxAckPending, Replicas: c.config.Replicas, MemoryStorage: c.config.MemoryStorage,
 	}
 }
 
@@ -694,7 +707,10 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return
 	}
-	delay, ok := messenger.RetryDelay(processErr)
+	delay, ok := messenger.DeferDelay(processErr)
+	if !ok {
+		delay, ok = messenger.RetryDelay(processErr)
+	}
 	if !ok {
 		delay = c.retryDelay(attempt)
 	}

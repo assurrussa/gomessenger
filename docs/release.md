@@ -24,7 +24,7 @@ pass the published clean-consumer gate.
    the completed result, and resolve every actionable conversation. A new push
    invalidates the earlier review gate for that pull request.
 2. Run `make prepare` and inspect generated module sums and formatting changes.
-3. Run `make check`; it includes the Docker-free transactional
+3. Run `make check-workspace`; it includes the Docker-free transactional
    Outbox-to-JetStream-to-Inbox E2E under the race detector.
 4. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
    `make test-integration` separately reruns embedded JetStream/SQLite adapters and the durable pipeline.
@@ -41,7 +41,10 @@ pass the published clean-consumer gate.
    tagging. Request a missing review with `@codex review`; a later push requires
    a new completed result.
 
-Passing local gates proves the checkout, not the published module graph.
+`make check-workspace` proves the local checkout graph, including the sibling
+Outbox checkout selected by `go.work`. It does not prove the published module
+graph. `make check` keeps `GOWORK=off` and is expected to remain blocked until
+the required dependency tag wave is published and pinned.
 
 ## Prepare exact module requirements
 
@@ -50,10 +53,15 @@ already published. The GoMessenger graph cannot be prepared in one pre-tag commi
 able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
 is pinned.
 
+Features that consume a newer Outbox public contract must first publish and
+verify a compatible Outbox core/backend version, then pass that exact version
+as `OUTBOX_VERSION`. Outbox path overrides remain in `go.work` only and are
+never a substitute for this release boundary.
+
 Before the root tag, keep nested modules on the last published GoMessenger graph and run:
 
 ```sh
-make check
+make check-workspace
 ```
 
 After the reviewed root tag resolves through the Go proxy, prepare and review the root-dependent modules
@@ -62,8 +70,8 @@ prepare and review `adapters/nats` and `adapters/kafka`, then publish those tags
 run the final graph preparation:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
 make check
 ```
 

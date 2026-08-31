@@ -23,6 +23,9 @@ var (
 	ErrAttemptTerminal = errors.New("inbox: handler attempt is terminal")
 	// ErrAttemptTrackingUnsupported reports a backend without durable attempt support.
 	ErrAttemptTrackingUnsupported = errors.New("inbox: durable attempt tracking is unsupported")
+	// ErrBatchAttemptTrackingUnsupported reports a backend without the atomic
+	// partial-outcome batch capability.
+	ErrBatchAttemptTrackingUnsupported = errors.New("inbox: durable batch attempt tracking is unsupported")
 )
 
 // Key is the durable consumer-scoped message identity.
@@ -47,6 +50,61 @@ type Result struct {
 // Handler performs business writes inside the inbox transaction context.
 type Handler func(context.Context) error
 
+// BatchItem is one broker delivery admitted to an atomic batch attempt. Items
+// with the same logical identity and fingerprint may be coalesced before the
+// handler is invoked.
+type BatchItem struct {
+	Key         Key
+	Fingerprint Fingerprint
+}
+
+// BatchHandler receives only unique active logical items in broker order. Its
+// context contains the SQL transaction used for Inbox and business writes.
+type BatchHandler func(context.Context, []BatchItem) (messenger.BatchResult, error)
+
+// BatchOutcome identifies the broker action selected by a committed Inbox
+// transaction.
+type BatchOutcome string
+
+const (
+	// BatchACK acknowledges a successful or already-completed delivery.
+	BatchACK BatchOutcome = "ack"
+	// BatchRetry schedules a retry that consumed an attempt.
+	BatchRetry BatchOutcome = "retry"
+	// BatchDefer schedules a retry without consuming an attempt.
+	BatchDefer BatchOutcome = "defer"
+	// BatchDLQ performs a terminal dead-letter handoff.
+	BatchDLQ BatchOutcome = "dlq"
+)
+
+const (
+	// FailureIdentityConflict is a terminal identity/fingerprint mismatch.
+	FailureIdentityConflict = "identity_conflict"
+	// FailureAttemptsExhausted is a terminal bounded-attempt outcome.
+	FailureAttemptsExhausted = "attempts_exhausted"
+	// FailurePermanent is an explicitly permanent handler outcome.
+	FailurePermanent = "permanent"
+)
+
+// BatchItemOutcome is the committed decision for one input BatchItem.
+type BatchItemOutcome struct {
+	Key         Key
+	Fingerprint Fingerprint
+	Outcome     BatchOutcome
+	Attempt     uint64
+	Duplicate   bool
+	Delay       time.Duration
+	FailureKind string
+	Err         error
+}
+
+// BatchProcessResult preserves input order and records the number of unique
+// active messages passed to the handler.
+type BatchProcessResult struct {
+	Items           []BatchItemOutcome
+	HandlerMessages int
+}
+
 // Backend owns the atomic backend-specific transaction algorithm.
 type Backend interface {
 	Process(ctx context.Context, key Key, fingerprint Fingerprint, handler Handler) (Result, error)
@@ -68,6 +126,18 @@ type AttemptBackend interface {
 		handler Handler,
 	) (Result, error)
 	ForgetAttempt(ctx context.Context, key Key, fingerprint Fingerprint) error
+}
+
+// BatchAttemptBackend extends Backend with one shared transaction for partial
+// batch outcomes. A top-level handler error rolls the transaction back and is
+// returned directly without consuming any item attempts.
+type BatchAttemptBackend interface {
+	ProcessBatchAttempt(
+		ctx context.Context,
+		items []BatchItem,
+		maxAttempts uint64,
+		handler BatchHandler,
+	) (BatchProcessResult, error)
 }
 
 // Store validates common inputs and delegates atomic work to one backend.
@@ -102,6 +172,49 @@ func (s *Store) Process(
 func (s *Store) SupportsAttempts() bool {
 	_, ok := s.backend.(AttemptBackend)
 	return ok
+}
+
+// SupportsBatchAttempts reports whether ProcessBatchAttempt has atomic backend
+// support.
+func (s *Store) SupportsBatchAttempts() bool {
+	_, ok := s.backend.(BatchAttemptBackend)
+	return ok
+}
+
+// ProcessBatchAttempt runs one shared Inbox/business transaction and returns
+// per-delivery outcomes only after commit.
+func (s *Store) ProcessBatchAttempt(
+	ctx context.Context,
+	items []BatchItem,
+	maxAttempts uint64,
+	handler BatchHandler,
+) (BatchProcessResult, error) {
+	if ctx == nil {
+		return BatchProcessResult{}, errors.New("inbox: nil batch context")
+	}
+	if len(items) == 0 {
+		return BatchProcessResult{}, errors.New("inbox: empty batch")
+	}
+	if maxAttempts == 0 {
+		return BatchProcessResult{}, errors.New("inbox: invalid batch handler attempt limit")
+	}
+	if handler == nil {
+		return BatchProcessResult{}, errors.New("inbox: nil batch handler")
+	}
+	consumerID := items[0].Key.ConsumerID
+	for index, item := range items {
+		if err := ValidateKey(item.Key); err != nil {
+			return BatchProcessResult{}, fmt.Errorf("inbox: batch item %d: %w", index, err)
+		}
+		if item.Key.ConsumerID != consumerID {
+			return BatchProcessResult{}, fmt.Errorf("%w: mixed consumer IDs", ErrInvalidKey)
+		}
+	}
+	backend, ok := s.backend.(BatchAttemptBackend)
+	if !ok {
+		return BatchProcessResult{}, ErrBatchAttemptTrackingUnsupported
+	}
+	return backend.ProcessBatchAttempt(ctx, items, maxAttempts, handler)
 }
 
 // ProcessAttempt executes one bounded handler attempt and durably records a

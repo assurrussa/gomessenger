@@ -32,11 +32,18 @@ type RouteConfig struct {
 
 // Route synchronously publishes and waits for a JetStream PubAck.
 type Route struct {
-	name      string
-	namespace string
-	mode      WireMode
-	js        jetstream.JetStream
-	clock     func() time.Time
+	name       string
+	namespace  string
+	mode       WireMode
+	connection *natsio.Conn
+	js         jetstream.JetStream
+	clock      func() time.Time
+}
+
+type preparedBatchMessage struct {
+	index    int
+	metadata messenger.Metadata
+	message  *natsio.Msg
 }
 
 // NewRoute constructs a producer from a host-owned NATS connection.
@@ -55,7 +62,7 @@ func NewRoute(connection *natsio.Conn, config RouteConfig) (*Route, error) {
 	}
 	return &Route{
 		name: config.Name, namespace: config.Namespace, mode: config.WireMode,
-		js: js, clock: time.Now,
+		connection: connection, js: js, clock: time.Now,
 	}, nil
 }
 
@@ -101,21 +108,44 @@ func (r *Route) publishEnvelope(
 	if ctx == nil {
 		return messenger.Receipt{}, fmt.Errorf("%w: nil publish context", ErrInvalidConfig)
 	}
+	message, err := r.preparePublishMessage(metadata, native)
+	if err != nil {
+		return messenger.Receipt{}, err
+	}
+	ack, err := r.js.PublishMsg(ctx, message, jetstream.WithMsgID(metadata.ID.String()))
+	if err != nil {
+		return messenger.Receipt{}, fmt.Errorf("messenger/nats: publish %s: %w", message.Subject, err)
+	}
+	if ack == nil || ack.Stream == "" {
+		return messenger.Receipt{}, errors.New("messenger/nats: broker returned an empty publish acknowledgement")
+	}
+	return messenger.Receipt{
+		MessageID: metadata.ID,
+		Route:     r.name,
+		State:     messenger.ReceiptBrokerConfirmed,
+		At:        r.clock().UTC(),
+	}, nil
+}
+
+func (r *Route) preparePublishMessage(
+	metadata messenger.Metadata,
+	native []byte,
+) (*natsio.Msg, error) {
 	now := r.clock().UTC()
 	if !metadata.ExpiresAt.IsZero() && !metadata.ExpiresAt.After(now) {
-		return messenger.Receipt{}, messenger.Permanent(ErrMessageExpired)
+		return nil, messenger.Permanent(ErrMessageExpired)
 	}
 	if !metadata.NotBefore.IsZero() && metadata.NotBefore.After(now) {
-		return messenger.Receipt{}, messenger.RetryAfter(ErrMessageNotReady, metadata.NotBefore.Sub(now))
+		return nil, messenger.RetryAfter(ErrMessageNotReady, metadata.NotBefore.Sub(now))
 	}
 	if r.mode != WireNative && metadata.Kind != messenger.KindEvent {
-		return messenger.Receipt{}, fmt.Errorf("%w: CloudEvents mode only supports events", ErrInvalidConfig)
+		return nil, fmt.Errorf("%w: CloudEvents mode only supports events", ErrInvalidConfig)
 	}
 	subject, err := Subject(r.namespace, messenger.DescriptorInfo{
 		Kind: metadata.Kind, Name: metadata.Name, SchemaVersion: metadata.SchemaVersion,
 	})
 	if err != nil {
-		return messenger.Receipt{}, err
+		return nil, err
 	}
 	message := &natsio.Msg{Subject: subject, Header: make(natsio.Header)}
 	switch r.mode {
@@ -131,21 +161,103 @@ func (r *Route) publishEnvelope(
 		err = fmt.Errorf("%w: wire mode %q", ErrInvalidConfig, r.mode)
 	}
 	if err != nil {
-		return messenger.Receipt{}, err
+		return nil, err
 	}
-	ack, err := r.js.PublishMsg(ctx, message, jetstream.WithMsgID(metadata.ID.String()))
+	return message, nil
+}
+
+// PublishEnvelopeBatch publishes valid items concurrently with one bounded
+// JetStream async publisher and returns one PubAck outcome per input item.
+func (r *Route) PublishEnvelopeBatch(
+	ctx context.Context,
+	payloads [][]byte,
+) ([]messenger.Receipt, []error, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("%w: nil publish context", ErrInvalidConfig)
+	}
+	if len(payloads) == 0 {
+		return nil, nil, fmt.Errorf("%w: empty publish batch", ErrInvalidConfig)
+	}
+	receipts, errs, valid := r.prepareEnvelopeBatch(payloads)
+	if len(valid) == 0 {
+		return receipts, errs, nil
+	}
+	async, err := jetstream.New(
+		r.connection,
+		jetstream.WithPublishAsyncMaxPending(min(len(valid), 100)),
+		jetstream.WithPublishAsyncTimeout(30*time.Second),
+	)
 	if err != nil {
-		return messenger.Receipt{}, fmt.Errorf("messenger/nats: publish %s: %w", subject, err)
+		return nil, nil, fmt.Errorf("messenger/nats: create batch publisher: %w", err)
 	}
-	if ack == nil || ack.Stream == "" {
-		return messenger.Receipt{}, errors.New("messenger/nats: broker returned an empty publish acknowledgement")
+	defer async.CleanupPublisher()
+	futures := make([]jetstream.PubAckFuture, len(valid))
+	for index, item := range valid {
+		future, publishErr := async.PublishMsgAsync(item.message, jetstream.WithMsgID(item.metadata.ID.String()))
+		if publishErr != nil {
+			errs[item.index] = fmt.Errorf("messenger/nats: enqueue %s: %w", item.message.Subject, publishErr)
+			continue
+		}
+		futures[index] = future
 	}
-	return messenger.Receipt{
-		MessageID: metadata.ID,
-		Route:     r.name,
-		State:     messenger.ReceiptBrokerConfirmed,
-		At:        r.clock().UTC(),
-	}, nil
+	for index, future := range futures {
+		if future == nil {
+			continue
+		}
+		item := valid[index]
+		select {
+		case <-ctx.Done():
+			async.CleanupPublisher()
+			for pendingIndex := index; pendingIndex < len(futures); pendingIndex++ {
+				if futures[pendingIndex] != nil && errs[valid[pendingIndex].index] == nil {
+					errs[valid[pendingIndex].index] = ctx.Err()
+				}
+			}
+			return receipts, errs, nil
+		case ack := <-future.Ok():
+			if ack == nil || ack.Stream == "" {
+				errs[item.index] = errors.New("messenger/nats: broker returned an empty publish acknowledgement")
+				continue
+			}
+			receipts[item.index] = messenger.Receipt{
+				MessageID: item.metadata.ID,
+				Route:     r.name,
+				State:     messenger.ReceiptBrokerConfirmed,
+				At:        r.clock().UTC(),
+			}
+		case publishErr := <-future.Err():
+			errs[item.index] = fmt.Errorf("messenger/nats: publish %s: %w", item.message.Subject, publishErr)
+		}
+	}
+	return receipts, errs, nil
+}
+
+func (r *Route) prepareEnvelopeBatch(
+	payloads [][]byte,
+) ([]messenger.Receipt, []error, []preparedBatchMessage) {
+	receipts := make([]messenger.Receipt, len(payloads))
+	errs := make([]error, len(payloads))
+	valid := make([]preparedBatchMessage, 0, len(payloads))
+	for index, payload := range payloads {
+		canonical, err := messenger.CanonicalizeEnvelope(payload)
+		if err != nil {
+			errs[index] = err
+			continue
+		}
+		envelope, err := messenger.UnmarshalEnvelope(canonical)
+		if err != nil {
+			errs[index] = err
+			continue
+		}
+		metadata := envelope.Metadata()
+		message, err := r.preparePublishMessage(metadata, canonical)
+		if err != nil {
+			errs[index] = err
+			continue
+		}
+		valid = append(valid, preparedBatchMessage{index: index, metadata: metadata, message: message})
+	}
+	return receipts, errs, valid
 }
 
 func (mode WireMode) valid() bool {

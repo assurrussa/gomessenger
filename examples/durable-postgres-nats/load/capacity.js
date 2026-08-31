@@ -12,9 +12,15 @@ const preAllocatedVUs = positiveInteger('CAPACITY_PREALLOCATED_VUS');
 const maxVUs = positiveInteger('CAPACITY_MAX_VUS');
 const summaryPath = requiredEnv('CAPACITY_K6_SUMMARY');
 const payloadProfile = requiredEnv('CAPACITY_PAYLOAD_PROFILE');
+const ingressMode = requiredEnv('CAPACITY_INGRESS_MODE');
+const ingressBatchSize = positiveInteger('CAPACITY_INGRESS_BATCH_SIZE');
 
 if (payloadProfile !== 'small' && payloadProfile !== 'mixed') {
   throw new Error(`unsupported CAPACITY_PAYLOAD_PROFILE ${payloadProfile}`);
+}
+if ((ingressMode !== 'single' && ingressMode !== 'batch') ||
+    (ingressMode === 'single' && ingressBatchSize !== 1) || ingressBatchSize > 100) {
+  throw new Error(`invalid ingress mode/batch size ${ingressMode}/${ingressBatchSize}`);
 }
 
 const siteNote = 'n'.repeat(64);
@@ -23,6 +29,7 @@ const mediumNote = 'n'.repeat(4 * 1024);
 const largeNote = 'n'.repeat(64 * 1024);
 
 const acceptedOrders = new Counter('accepted_orders');
+const offeredOrders = new Counter('offered_orders');
 const orderAccepted = new Rate('order_accepted');
 
 export const options = {
@@ -32,7 +39,7 @@ export const options = {
     orders: {
       executor: 'constant-arrival-rate',
       rate,
-      timeUnit: '1s',
+      timeUnit: `${ingressBatchSize}s`,
       duration,
       preAllocatedVUs,
       maxVUs,
@@ -47,11 +54,17 @@ export const options = {
 };
 
 export default function () {
-  const sequence = exec.scenario.iterationInTest;
+  const firstSequence = exec.scenario.iterationInTest * ingressBatchSize;
   const offeredAt = new Date().toISOString();
+  const orders = [];
+  for (let index = 0; index < ingressBatchSize; index += 1) {
+    orders.push(orderFor(firstSequence + index));
+  }
+  offeredOrders.add(orders.length);
+  const batch = ingressMode === 'batch';
   const response = http.post(
-    `${appURL}/orders`,
-    JSON.stringify(orderFor(sequence)),
+    `${appURL}${batch ? '/orders/batch' : '/orders'}`,
+    JSON.stringify(batch ? { orders } : orders[0]),
     {
       headers: {
         'Content-Type': 'application/json',
@@ -59,12 +72,12 @@ export default function () {
         'X-GoMessenger-Capacity-Stage': stageID,
         'X-GoMessenger-Capacity-Offered-At': offeredAt,
       },
-      tags: { name: 'POST /orders' },
+      tags: { name: batch ? 'POST /orders/batch' : 'POST /orders' },
       timeout: '10s',
     },
   );
   const accepted = response.status === 202;
-  acceptedOrders.add(accepted ? 1 : 0);
+  acceptedOrders.add(accepted ? orders.length : 0);
   orderAccepted.add(accepted);
   check(response, { 'order transaction committed and Outbox staged': (result) => result.status === 202 });
 }

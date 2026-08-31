@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	messenger "github.com/assurrussa/gomessenger"
+
 	"example.com/gomessenger-durable-postgres-nats/internal/demo"
 )
 
@@ -35,6 +37,7 @@ type Config struct {
 	SampleInterval             time.Duration
 	ReadyTimeout               time.Duration
 	E2EP95SLO                  time.Duration
+	CheckpointTimeout          time.Duration
 	MinimumRate                int
 	AppURL                     string
 	PostgresDSN                string
@@ -47,7 +50,16 @@ type Config struct {
 	OutboxReservationBatchSize int
 	OutboxProducerMaxConns     int
 	OutboxRelayMaxConns        int
+	OutboxIngressMode          demo.OutboxMode
+	OutboxRelayMode            demo.OutboxMode
+	OutboxBatchMaxMessages     int
+	OutboxBatchMaxBytes        int
+	OutboxBatchMaxWait         time.Duration
 	ConsumerConcurrency        int
+	ConsumerMode               demo.ConsumerMode
+	ConsumerBatchMaxMessages   int
+	ConsumerBatchMaxBytes      int
+	ConsumerBatchMaxWait       time.Duration
 	DBMaxOpenConns             int
 	PayloadProfile             string
 	HostOS                     string
@@ -55,6 +67,13 @@ type Config struct {
 	HostCPUs                   string
 	GitCommit                  string
 	GitDirty                   string
+	OutboxGitCommit            string
+	OutboxGitDirty             string
+	PostgresProfile            string
+	PostgresImage              string
+	PostgresImageDigest        string
+	NATSImage                  string
+	NATSImageDigest            string
 }
 
 // ResultDir returns the isolated artifact directory for this run.
@@ -100,6 +119,7 @@ func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 		SampleInterval:             time.Second,
 		ReadyTimeout:               60 * time.Second,
 		E2EP95SLO:                  2 * time.Second,
+		CheckpointTimeout:          0,
 		AppURL:                     strings.TrimRight(envValue(lookup, "CAPACITY_APP_URL", "http://127.0.0.1:8080"), "/"),
 		PostgresDSN:                envValue(lookup, "POSTGRES_DSN", defaultPostgresDSN),
 		NATSURL:                    envValue(lookup, "NATS_URL", "nats://127.0.0.1:4222"),
@@ -110,7 +130,16 @@ func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 		OutboxReservationBatchSize: 1,
 		OutboxProducerMaxConns:     9,
 		OutboxRelayMaxConns:        1,
+		OutboxIngressMode:          demo.OutboxModeSingle,
+		OutboxRelayMode:            demo.OutboxModeSingle,
+		OutboxBatchMaxMessages:     100,
+		OutboxBatchMaxBytes:        4 << 20,
+		OutboxBatchMaxWait:         25 * time.Millisecond,
 		ConsumerConcurrency:        4,
+		ConsumerMode:               demo.ConsumerModeSingle,
+		ConsumerBatchMaxMessages:   messenger.DefaultBatchMaxMessages,
+		ConsumerBatchMaxBytes:      messenger.DefaultBatchMaxBytes,
+		ConsumerBatchMaxWait:       messenger.DefaultBatchMaxWait,
 		DBMaxOpenConns:             32,
 		PayloadProfile:             demo.CapacityPayloadMixed,
 		HostOS:                     envValue(lookup, "CAPACITY_HOST_OS", unknownValue),
@@ -118,6 +147,13 @@ func defaultConfig(profile string, lookup func(string) (string, bool)) Config {
 		HostCPUs:                   envValue(lookup, "CAPACITY_HOST_CPUS", unknownValue),
 		GitCommit:                  envValue(lookup, "CAPACITY_GIT_COMMIT", unknownValue),
 		GitDirty:                   envValue(lookup, "CAPACITY_GIT_DIRTY", unknownValue),
+		OutboxGitCommit:            envValue(lookup, "CAPACITY_OUTBOX_GIT_COMMIT", unknownValue),
+		OutboxGitDirty:             envValue(lookup, "CAPACITY_OUTBOX_GIT_DIRTY", unknownValue),
+		PostgresProfile:            envValue(lookup, "CAPACITY_POSTGRES_PROFILE", "stock"),
+		PostgresImage:              envValue(lookup, "CAPACITY_POSTGRES_IMAGE", unknownValue),
+		PostgresImageDigest:        envValue(lookup, "CAPACITY_POSTGRES_IMAGE_DIGEST", unknownValue),
+		NATSImage:                  envValue(lookup, "CAPACITY_NATS_IMAGE", unknownValue),
+		NATSImageDigest:            envValue(lookup, "CAPACITY_NATS_IMAGE_DIGEST", unknownValue),
 	}
 	if profile == ProfileFull {
 		config.Rates = []int{50, 100, 250, 500, 1_000, 2_000}
@@ -156,6 +192,9 @@ func applyOverrides(config *Config, lookup func(string) (string, bool)) error {
 		{name: "CAPACITY_SAMPLE_INTERVAL", target: &config.SampleInterval},
 		{name: "CAPACITY_READY_TIMEOUT", target: &config.ReadyTimeout},
 		{name: "CAPACITY_E2E_P95_SLO", target: &config.E2EP95SLO},
+		{name: "CAPACITY_CHECKPOINT_TIMEOUT", target: &config.CheckpointTimeout},
+		{name: "CONSUMER_BATCH_MAX_WAIT", target: &config.ConsumerBatchMaxWait},
+		{name: "OUTBOX_BATCH_MAX_WAIT", target: &config.OutboxBatchMaxWait},
 	}
 	for _, duration := range durations {
 		value, err := envDuration(lookup, duration.name, *duration.target)
@@ -174,7 +213,11 @@ func applyOverrides(config *Config, lookup func(string) (string, bool)) error {
 		{name: "OUTBOX_RESERVATION_BATCH_SIZE", target: &config.OutboxReservationBatchSize},
 		{name: "OUTBOX_PRODUCER_MAX_CONNS", target: &config.OutboxProducerMaxConns},
 		{name: "OUTBOX_RELAY_MAX_CONNS", target: &config.OutboxRelayMaxConns},
+		{name: "OUTBOX_BATCH_MAX_MESSAGES", target: &config.OutboxBatchMaxMessages},
+		{name: "OUTBOX_BATCH_MAX_BYTES", target: &config.OutboxBatchMaxBytes},
 		{name: "NATS_CONSUMER_CONCURRENCY", target: &config.ConsumerConcurrency},
+		{name: "CONSUMER_BATCH_MAX_MESSAGES", target: &config.ConsumerBatchMaxMessages},
+		{name: "CONSUMER_BATCH_MAX_BYTES", target: &config.ConsumerBatchMaxBytes},
 		{name: "DB_MAX_OPEN_CONNS", target: &config.DBMaxOpenConns},
 	}
 	for _, integer := range integers {
@@ -194,6 +237,9 @@ func applyOverrides(config *Config, lookup func(string) (string, bool)) error {
 	}
 	config.RunID = envValue(lookup, "CAPACITY_RUN_ID", "")
 	config.PayloadProfile = envValue(lookup, "CAPACITY_PAYLOAD_PROFILE", config.PayloadProfile)
+	config.ConsumerMode = demo.ConsumerMode(envValue(lookup, "CONSUMER_MODE", string(config.ConsumerMode)))
+	config.OutboxIngressMode = demo.OutboxMode(envValue(lookup, "OUTBOX_INGRESS_MODE", string(config.OutboxIngressMode)))
+	config.OutboxRelayMode = demo.OutboxMode(envValue(lookup, "OUTBOX_RELAY_MODE", string(config.OutboxRelayMode)))
 	return nil
 }
 
@@ -201,6 +247,26 @@ func validateConfig(config Config) error {
 	if err := (demo.BenchmarkLabels{RunID: config.RunID, StageID: "warmup"}).Validate(); err != nil {
 		return fmt.Errorf("validate CAPACITY_RUN_ID: %w", err)
 	}
+	if err := validateCapacityDurations(config); err != nil {
+		return err
+	}
+	if err := validateCapacityModes(config); err != nil {
+		return err
+	}
+	if err := validateCapacityLimits(config); err != nil {
+		return err
+	}
+	if err := validateCapacityProfiles(config); err != nil {
+		return err
+	}
+	if config.AppURL == "" || config.PostgresDSN == "" || config.NATSURL == "" ||
+		config.ResultsRoot == "" || config.K6Binary == "" || config.K6Script == "" {
+		return errors.New("capacity connection and artifact settings must not be empty")
+	}
+	return nil
+}
+
+func validateCapacityDurations(config Config) error {
 	if config.StageDuration < time.Second || config.WarmupDuration < time.Second ||
 		config.DrainTimeout < time.Second || config.ReadyTimeout < time.Second {
 		return errors.New("capacity durations must be at least one second")
@@ -211,8 +277,43 @@ func validateConfig(config Config) error {
 	if config.E2EP95SLO <= 0 {
 		return errors.New("CAPACITY_E2E_P95_SLO must be positive")
 	}
+	if config.CheckpointTimeout < 0 {
+		return errors.New("CAPACITY_CHECKPOINT_TIMEOUT must not be negative")
+	}
+	return nil
+}
+
+func validateCapacityModes(config Config) error {
+	if config.ConsumerMode != demo.ConsumerModeSingle && config.ConsumerMode != demo.ConsumerModeBatch {
+		return fmt.Errorf("CONSUMER_MODE must be %q or %q", demo.ConsumerModeSingle, demo.ConsumerModeBatch)
+	}
+	if config.OutboxIngressMode != demo.OutboxModeSingle && config.OutboxIngressMode != demo.OutboxModeBatch {
+		return errors.New("OUTBOX_INGRESS_MODE must be single or batch")
+	}
+	if config.OutboxRelayMode != demo.OutboxModeSingle && config.OutboxRelayMode != demo.OutboxModeBatch {
+		return errors.New("OUTBOX_RELAY_MODE must be single or batch")
+	}
+	return nil
+}
+
+func validateCapacityLimits(config Config) error {
 	if config.DBMaxOpenConns < config.ConsumerConcurrency+2 {
 		return errors.New("DB_MAX_OPEN_CONNS must cover consumer concurrency plus two")
+	}
+	if config.OutboxBatchMaxMessages < 1 || config.OutboxBatchMaxMessages > 100 ||
+		config.OutboxBatchMaxBytes < 1 || config.OutboxBatchMaxWait <= 0 {
+		return errors.New("outbox batch limits are invalid")
+	}
+	if config.ConsumerBatchMaxWait <= 0 {
+		return errors.New("CONSUMER_BATCH_MAX_WAIT must be positive")
+	}
+	_, err := (messenger.BatchConfig{
+		MaxMessages: config.ConsumerBatchMaxMessages,
+		MaxBytes:    config.ConsumerBatchMaxBytes,
+		MaxWait:     config.ConsumerBatchMaxWait,
+	}).Normalize(config.ConsumerConcurrency)
+	if err != nil {
+		return fmt.Errorf("validate consumer batch limits: %w", err)
 	}
 	if config.Profile == ProfileSite && config.OutboxProducerMaxConns+config.OutboxRelayMaxConns != 10 {
 		return errors.New("site profile Outbox producer and relay connection budget must equal 10")
@@ -220,13 +321,17 @@ func validateConfig(config Config) error {
 	if config.OutboxReservationBatchSize < 1 || config.OutboxReservationBatchSize > 1_000 {
 		return errors.New("OUTBOX_RESERVATION_BATCH_SIZE must be in 1..1000")
 	}
+	return nil
+}
+
+func validateCapacityProfiles(config Config) error {
 	if config.PayloadProfile != demo.CapacityPayloadSmall && config.PayloadProfile != demo.CapacityPayloadMixed {
 		return fmt.Errorf("CAPACITY_PAYLOAD_PROFILE must be %q or %q",
 			demo.CapacityPayloadSmall, demo.CapacityPayloadMixed)
 	}
-	if config.AppURL == "" || config.PostgresDSN == "" || config.NATSURL == "" ||
-		config.ResultsRoot == "" || config.K6Binary == "" || config.K6Script == "" {
-		return errors.New("capacity connection and artifact settings must not be empty")
+	if config.PostgresProfile != "stock" && config.PostgresProfile != "checkpoint" &&
+		config.PostgresProfile != "memory-wal" && config.PostgresProfile != "combined" {
+		return errors.New("CAPACITY_POSTGRES_PROFILE must be stock, checkpoint, memory-wal, or combined")
 	}
 	return nil
 }

@@ -1,5 +1,297 @@
 # Implementation notes
 
+## 2026-09-03 — PR #24 review fixes (batch consumer, lifecycle readiness, retry accounting, and workspace graph)
+
+- [P1 - Makefile]: Defaulted `CHECK_GOWORK ?= $(abspath go.work)` so standard branch gates and CI use the workspace graph while nested modules import unpublished packages (`internal/batchruntime`), adding `check-published` (`GOWORK=off`) to verify the published graph separately.
+- [P1 - batchruntime]: Context cancellation and timeouts now clear non-empty handler results and propagate context errors directly instead of wrapping in `ErrInvalidBatchResult`, preserving consumer rollback/retry semantics per ADR-0005.
+- [P2 - outbox]: Restored `RetryAt` on single `RelayJob` (reserving `DeferAt` for batch relay) so single relay continues consuming attempts and respects `MaxAttempts`/DLQ progression per ADR-0006:73.
+- [P2 - batchruntime]: Replaced plain boolean next-once guard with `atomic.Bool.CompareAndSwap(false, true)` in batch middleware invocation.
+- [P1 - kafka batch rewind]: In `runKafkaBatchSession`, when all messages are deferred, `rewindKafkaBatch(session, batch, batch.firstDeferred)` now rewinds all polled partitions in `batch.all` before pausing the deferred partition.
+- [P1 - kafka batch readiness]: Dynamic per-worker readiness tracking clears consumer readiness when batch workers encounter recoverable session failures and enter backoff, and re-establishes readiness once workers rejoin the consumer group.
+- [P1 - nats batch readiness]: Worker pull loop readiness in `runNATSBatchConsumer` now requires explicit signals from inside established pull loops, blocks until all workers are established, and immediately propagates fatal startup errors without reporting ready.
+- [P1 - attempt generation batch splitting]:
+  - In `adapters/kafka/batch_consumer.go`: record selection stops and leaves subsequent records unprocessed if a record for the same `(Source, MessageID)` arrives with a differing attempt generation.
+  - In `adapters/nats/batch_consumer.go`: `collectNATSBatch` calls `NakWithDelay` on messages for the same `(Source, MessageID)` with differing attempt generations, keeping them out of the active batch.
+  - In `adapters/inbox/pgsql` and `adapters/inbox/sqlite`: `ProcessBatchAttempt` partitions items into sub-batches by attempt generation, executing them sequentially without returning `ErrInvalidBatchResult` or failing closed.
+- Verified with `make check-workspace` (all modules build, vet, lint with 0 issues, race, checkptr, coverage, consumer, and E2E) and `make test-batch-integration`.
+
+## 2026-09-03 — published Outbox v0.13.0 integration and workspace gate verification
+
+- Pinned published Outbox `v0.13.0` across `adapters/outbox`, `testdata/consumer`,
+  `testdata/e2e`, and `examples/durable-postgres-nats`, including `backends/pgsql v0.13.0`
+  and `backends/sqlite v0.13.0`.
+- Verified that clean consumer and E2E modules resolve and pass tests under `GOWORK=off`
+  against published Outbox `v0.13.0`.
+- Confirmed that `make check-workspace` passes completely with zero lint issues, all unit,
+  race, and checkptr tests, and 91.1% root statement coverage.
+- Restored development `replace` directives in nested module `go.mod` files (as documented
+  in `docs/release.md`), allowing `make`, `make prepare`, and `make check` to run cleanly
+  during feature development before the release-wave `make release-ready` drops them.
+- Confirmed `make`, `make prepare`, `make check`, and `make check-workspace` all pass cleanly.
+
+## 2026-09-02 — bounded Outbox claims and connection-health evidence
+
+- Adopted the checkout-local Outbox byte-bounded claim capability in the
+  observed PostgreSQL repository wrapper, preserving claim-to-handler stage
+  attribution while reducing a true batch to one claim round trip.
+- Replaced `PrepareConn`/`AfterRelease` accounting with the balanced pgxpool
+  acquire/release tracer. Capacity report spec `2.1` records pool expansion,
+  replacement connections, cancelled acquires, unusable releases, and the
+  acquired-connection high-water mark for producer and relay pools. Any pool
+  churn makes a stage unsustainable and the proof verifier rejects missing
+  connection-health data.
+- The short Outbox screen now defaults to 1,500 msg/s, counts PostgreSQL
+  cancellation and broken/reset/lost-connection signatures in `compose.log`,
+  requires zero log and pool churn for both roles, and requires the candidate
+  to be sustainable with an average Outbox batch of at least 10. The control
+  remains a baseline and may be unsustainable; the result remains
+  `SCREEN_ONLY` and cannot support a `>=1.3x` claim.
+- Frontier and proof launchers now compact overlong generated capacity run IDs
+  to 64 characters with a stable hash suffix. The human-facing proof/frontier
+  IDs and paths remain unchanged while every container run satisfies the
+  capacity service's fail-closed ID bound.
+
+## 2026-09-02 — fail-closed true-batch capacity proof
+
+- Added a fixed PostgreSQL 18/NATS `o2-c2` proof workflow for `small` and
+  `mixed` payloads. It compares all four pipeline variants, requires three
+  fresh-volume frontier confirmations, and follows with three interleaved
+  matched common-rate repetitions.
+- Split Outbox and consumer maximum batch sizes in the frontier launcher so the
+  isolated `consumer-batch` to `relay-batch` comparison changes only the relay
+  path. One reusable cell launcher now owns variant, topology, and PostgreSQL
+  profile wiring.
+- Added a tested Go verdict aggregator. It rejects incomplete or dirty evidence,
+  provenance/configuration drift, less than 1.3x isolated or end-to-end
+  frontier improvement, missing actual batches, p95/PostgreSQL cost regression,
+  memory pressure or growth, and repeated WAL waits. It always writes compact
+  `proof.json` and `proof.md` artifacts before returning a failed verdict.
+- The multi-hour capacity workflow remains opt-in and local. Existing hosted
+  tests compile and exercise the aggregator without starting Docker capacity
+  runs.
+- The launcher owns the required pre-measurement gates: Outbox `make check-all`
+  and GoMessenger `make check-workspace` plus `make test-batch-integration`.
+  The proof manifest and both verdict formats explicitly identify the result as
+  `checkout-workspace` evidence and retain both clean checkout commits.
+- `make check-workspace` passed with zero lint findings, all module/race/checkptr
+  tests, 91.1% root coverage, and the durable E2E. The unchanged `make check`
+  still stops at the expected unpublished `internal/batchruntime` boundary.
+- Added a short Outbox-only development screen at a default 1,500 msg/s: one
+  30-second warm-up plus 60-second measured cell for singleton ingress/relay
+  and one for full-batch ingress/relay, with the consumer fixed in batch mode.
+  It permits dirty checkout iteration but records both commit/dirty identities,
+  verifies exact runtime modes, reconciliation, and an exercised candidate
+  batch, and emits only `SCREEN_ONLY` artifacts rather than a performance verdict.
+
+## 2026-09-01 — transactional producer/relay batches and capacity frontier
+
+- Added the transactional-Outbox-only `BatchRoute` facade with typed command
+  and event batch methods, bound DI interfaces, full metadata validation,
+  duplicate-ID rejection, one atomic unique staging call, and receipts in input
+  order. Existing local, NATS, Kafka, and Outbox single routes retain their
+  prior behavior; unsupported direct batch calls fail explicitly.
+- Added Outbox true-batch registration and execution. One homogeneous ordered
+  batch has count/payload/wait limits, one handler call, an exact keyed result,
+  top-level no-attempt backoff, capability-wide defer, one fenced atomic outcome
+  transaction, heartbeat coverage, and bounded drain-tail release. PostgreSQL,
+  MySQL, and SQLite implement atomic staging/finalization; Picodata supports the
+  singleton control and rejects a larger batch.
+- Added batch relay composition. NATS uses bounded async publication with one
+  deterministic message ID and PubAck future per item. Kafka publishes the
+  valid subset in one multi-record transaction and retries the subset after an
+  abort or commit failure. Retry delays from brokers map to no-attempt Outbox
+  defer.
+- Reworked the durable capacity demo to generate message IDs in the initial
+  business insert, bulk-stage up to 100 orders in one transaction, batch-insert
+  successful projections, and persist envelope measurements through a bounded
+  asynchronous UNLOGGED recorder whose failure invalidates the run without
+  changing delivery outcomes.
+- Capacity report spec 2.1 records runtime-confirmed ingress/relay/consumer
+  modes, actual handler/publish/finalization calls and batch sizes, outcomes,
+  normalized SQL/transaction/WAL/checkpoint costs, resource and image
+  provenance, pprof, and PostgreSQL `EXPLAIN (ANALYZE, BUFFERS, WAL)` evidence.
+  Frontier scripts compare the three fixed 2-vCPU/2-GiB topologies, four
+  pipeline variants, two payload profiles, and separately labelled stock/tuned
+  PostgreSQL 18 runs using ladder, bisection, and three fresh-volume
+  confirmations.
+- A five-second full-batch smoke exercised one producer, relay, and consumer
+  invocation per five messages and reconciled 105 business effects with no
+  retries, redeliveries, or DLQ. It is plumbing evidence only, not a frontier
+  or production-capacity claim. No commit, push, tag, release, or deployment was
+  performed.
+- Fixed the first normalized frontier run's measurement failure at 1,750 msg/s.
+  Live samples now use stage-local accepted, durable relay-success, and
+  committed-consumer counters instead of rescanning all business tables every
+  second. Exact load-window and post-drain SQL remains authoritative, while all
+  controller sessions set `max_parallel_workers_per_gather=0` so verifier
+  queries cannot exhaust Docker shared memory or occupy both SUT CPUs. Failed
+  incomplete reports now set `integrityPassed=false`; a completed exact run
+  that only misses an explicit minimum-rate gate preserves its integrity result.
+- A fresh-volume O1/C1, stock PostgreSQL 18, mixed-payload, full-batch diagnostic
+  repeated the formerly invalid 1,750 msg/s cell successfully: 210,100 accepted
+  and exactly reconciled messages, 1,748.33 relay/consumer msg/s, 227.22 ms
+  business p95, 0.846 s drain, zero drops/retries/redeliveries/DLQ, and batch
+  size 100 throughout. The growing business snapshot fell from 121 calls and
+  12.6 s aggregate execution in the failed warm-up to boundary-only queries;
+  the exact final integrity query completed serially. This is one dirty-checkout
+  diagnostic proving the harness fix, not the required clean 3/3 frontier claim.
+
+## 2026-09-01 — capacity single versus true consumer-batch A/B
+
+- Added an explicit capacity-demo selector: `CONSUMER_MODE=single` preserves
+  `NewEventConsumer`; `CONSUMER_MODE=batch` uses `NewBatchEventConsumer` with
+  configurable message, canonical-byte, and wait limits. No automatic handler
+  adapter or implicit migration was introduced.
+- `batch + MaxMessages=1` is the same-path control and `batch + 100` is the
+  real-batch candidate. Outbox reservation width remains an independent axis.
+- The batch handler classifies every item before executing projection SQL and
+  writes only the successful subset in the shared Inbox/business transaction.
+  The observing Inbox wrapper now forwards the optional batch capability.
+- Capacity report spec `1.4` records consumer mode and limits. The controller
+  verifies `/benchmark/stats` runtime configuration against its own environment
+  before starting load, preventing mislabeled A/B artifacts. Stage reports also
+  record actual batch-handler calls, average/maximum batch size, and handler
+  duration so configured and exercised batching are independently visible.
+- Three isolated 50 msg/s route-smokes reconciled exactly. Legacy `single`
+  reported zero batch calls; `batch + MaxMessages=1` handled 150 messages in
+  150 calls; `batch + MaxMessages=100` handled 151 messages in 29 calls with
+  average 5.21 and maximum 6. The two-second warm-up and three-second measured
+  window are deliberately too short for a capacity claim; these runs prove
+  routing, runtime labeling, actual batching, and reconciliation only.
+- Targeted demo/capacity tests, their race variants, example-module lint, and
+  all-module tests through the local workspace passed. The maximal local gate
+  is now `make check-workspace`; it resolves the unreleased root, Inbox, and
+  Outbox contracts through `go.work` and is the proof launcher's source
+  precondition. The original `make check` remains `GOWORK=off` and correctly
+  stops at the unpublished module boundary. An exact compatible Outbox release
+  and dependency-ordered GoMessenger tags are still required before that gate
+  and the clean release-consumer probe can establish published compatibility.
+
+## 2026-09-01 — Supported end-to-end batch consumers
+
+- Accepted ADR-0005 and added a separate consumer-only batch API. Existing
+  single-message handlers, constructors, producers, Outbox staging, and relay
+  behavior remain source-compatible.
+- The root contract now includes exact keyed results, batch-only middleware,
+  zero-value batch bounds, `DeferAfter`, and bounded batch observations.
+- Inbox exposes an optional `BatchAttemptBackend` without expanding the older
+  backend interfaces. PostgreSQL uses deterministic locks plus set-based
+  `unnest`; SQLite uses one serializable transaction with bounded multi-row
+  statements. Both implement coalescing, completed/terminal prefiltering,
+  individual attempts, partial outcomes, and full rollback for top-level
+  failures. Singleton `ProcessAttempt` now also preserves attempts on defer.
+- NATS batches commands and native/structured/binary events by count, canonical
+  bytes, or wait. One heartbeat owns a batch, drain flushes partial work, ACK
+  confirmation is bounded to 16 parallel operations, and deterministic
+  publish-confirmed DLQ handoff remains per slot.
+- Kafka batches only an ascending contiguous range from one topic-partition.
+  Other polled records are rewound, rebalances remain blocked through the
+  outcome boundary, and one Kafka transaction publishes retry/DLQ records with
+  the processed offset. Top-level failures rewind without consuming attempts;
+  unusable sessions are recreated by the worker supervisor.
+- Added root, Inbox, NATS, Kafka, clean-consumer, and full
+  Outbox-to-NATS-to-SQLite batch coverage, including a batch-1 versus real-batch
+  invocation control. The supported gate is `make test-batch-integration`.
+- Removed the checkout-local `batchexperiment` implementation and its capacity
+  runner so there is one maintained engine. The old performance report remains
+  explicitly historical and its earlier throughput/WAL/RSS thresholds are not
+  an API completion gate.
+
+## 2026-08-31 — Experimental NATS/PostgreSQL batch consumer
+
+Superseded by the supported implementation above. This section records the
+prototype work as history.
+
+- Started the Proposed ADR-0005 experiment without changing the public facade,
+  `HandlerConfig`, supported adapters, migrations, release tags, or hosted CI.
+- The implementation lives only under the durable example's `internal` tree
+  and tests one native `orders.created` descriptor. It uses the existing
+  namespaced PostgreSQL Inbox tables with a distinct consumer identity.
+- The key correctness boundary is explicit: successful members may commit in
+  one transaction, but the handler must leave no business writes for failed or
+  deferred members. Batch-wide failures roll back the handler savepoint.
+- The JetStream collector uses bounded pull requests rather than iterator
+  prefetch: one message starts `MaxWait`, then the remaining request carries
+  both message and byte limits. One heartbeat loop is owned by each active
+  batch slot.
+- Inbox identity insert, deterministic lock/read, attempt increments, completed
+  markers, and terminal markers are set-based PostgreSQL statements. Handler
+  input is restored to broker order after the sorted lock phase; the benchmark
+  handler uses one `INSERT ... SELECT FROM unnest` for its successful subset.
+- Added opt-in `make test-batch-experiment`, `make capacity-batch-postgres`, and
+  `make capacity-batch-nats` paths. `make capacity-batch-experiment` now runs
+  the complete resumable control/candidate/mixed workflow, while
+  `make capacity-batch-verdict` re-evaluates retained evidence. Their Docker
+  stacks exclude Outbox and keep raw provenance, reports, Compose logs,
+  resource samples, and aggregate verdicts only under ignored
+  `tmp/capacity/<run-id>`.
+- Live PostgreSQL/NATS correctness covers exact and middleware result
+  validation, broker-order restoration, lost-ACK duplicate suppression,
+  interrupted-DLQ terminal replay, identity conflicts, mixed
+  ACK/retry/defer/DLQ, batch-wide rollback, attempt exhaustion, all three
+  collector limits, singleton oversize dispatch, startup failure, partial
+  drain, forced-cancellation rollback/redelivery, heartbeat, concurrency
+  bounds, and trace links. The isolated Compose gate passes. Its canonical-byte
+  test also exposed and fixed legacy NATS `FetchBatch` returning the normal
+  `MaxBytes` boundary as an immediate error. The live Docker correctness binary
+  is built and run with the race detector.
+- Added an internal broker-finalization seam used only by live tests. The gate
+  now loses the first ACK and observes real broker redelivery with one handler
+  call, interrupts source ACK after confirmed DLQ publication and verifies
+  deterministic JetStream deduplication after restart, and blocks one DLQ slot
+  while the second slot commits. Atomic active-worker and active-heartbeat
+  gauges are asserted at zero after normal and forced shutdown.
+- Direct NATS artifact spec 1.2 persists every case, including partial failure,
+  with exact measurement timestamps, ACK/handler reconciliation, and explicit
+  sustainability reasons. PostgreSQL and NATS reports include a checkout-state
+  SHA-256 covering tracked diff plus untracked source. The verdict aggregator
+  rejects provenance drift, incomplete repetitions, missing boundary brackets,
+  latency/RSS gaps, and duplicate case evidence instead of inferring success.
+- A full-matrix rehearsal exposed that an expected overloaded control case at
+  the candidate target stopped the process before later batch sizes ran. The
+  NATS runner now persists that failed case, continues every remaining matrix
+  cell and repetition, then returns the joined case errors only after the
+  report is complete. A deterministic unit test fixes the continuation and
+  alternating-order contract.
+- The first complete direct-NATS matrix then correctly failed closed on its
+  evidence harness: ambient `CAPACITY_GIT_*` values labeled NATS reports with
+  an earlier checkout, and the verdict case key treated required
+  screening/candidate/common repetitions as duplicates. Batch launchers now
+  overwrite provenance from the actual checkout and host, reports carry an
+  explicit evidence phase, and every gate selects only its phase. A poisoned
+  ambient-environment live probe proved the recorded commit, dirty-state hash,
+  host, and phase match the checkout rather than the caller environment.
+- The final checkout-local PostgreSQL matrix completed 24/24 exactly reconciled
+  cells with one provenance tuple. Median throughput for batch 16 was 25.64x
+  the batch-1 control at concurrency 1 and 9.69x at concurrency 4; batch 16 is
+  the smallest size that clears the PostgreSQL 2x gate.
+- Direct-NATS control screening completed the concurrency-1 bracket at 690
+  msg/s sustainable 3/3 and 750 msg/s failing 1/3. Concurrency 4 was sustainable
+  3/3 at 1,000 msg/s, but its upper bracket was not refined to 10%. At the
+  user's request the remaining long candidate/common/mixed run was stopped;
+  its raw partial artifacts remain ignored under `tmp/capacity`, and the
+  aggregator correctly reports `deferred` with the missing evidence listed.
+  ADR-0005 stays Proposed and the public API remains absent.
+- Closed the batch measurement gap by reusing the existing `pgtelemetry`
+  snapshotter through a separate one-connection probe pool. Both PostgreSQL-only
+  and direct-NATS cells now record `before/loadEnd/afterDrain` statement,
+  database, WAL and I/O deltas; workload-scoped statement WAL bytes/message,
+  MiB/s and records/message; cluster write/sync cost; and bounded aggregated
+  wait samples. This split avoids the publication lag of global `pg_stat_wal`
+  counters on short cells while keeping global WAL pressure visible.
+  PostgreSQL-only sampling uses 100 ms and direct-NATS load/drain sampling uses
+  one second. The verdict fails closed on missing spec-1.2 telemetry, WAL
+  amplification, write+sync wall fraction at or above 80%, or three consecutive
+  `WALWrite`/`WALSync` samples. Direct-NATS drain duration now covers the whole
+  post-load catch-up plus consumer shutdown instead of shutdown alone.
+- Live PostgreSQL 17 smoke cells verified report spec 1.2 and non-zero
+  workload-scoped WAL: 32 messages produced 1,462 B/message for batch 1 and
+  1,411 B/message for batch 16 with exact reconciliation. A direct JetStream
+  smoke at 100 msg/s reconciled 120/120 for batch 1 and batch 4, recorded all
+  three telemetry boundaries, load/drain wait samples, and non-zero WAL and
+  write/sync metrics. These tiny runs validate instrumentation only and are not
+  performance evidence.
+
 ## 2026-08-29 — v0.2.2 release preparation
 
 - Published the complete synchronized `v0.2.2` module graph and GitHub Release.

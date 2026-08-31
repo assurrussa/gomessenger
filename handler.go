@@ -107,6 +107,18 @@ type Publisher[T any] interface {
 	PublishMessage(ctx context.Context, outgoing Outgoing[T]) (Receipt, error)
 }
 
+// BatchSender is the narrow typed DI surface for atomic command batches.
+type BatchSender[T any] interface {
+	SendBatch(ctx context.Context, payloads []T) ([]Receipt, error)
+	SendMessageBatch(ctx context.Context, outgoing []Outgoing[T]) ([]Receipt, error)
+}
+
+// BatchPublisher is the narrow typed DI surface for atomic event batches.
+type BatchPublisher[T any] interface {
+	PublishBatch(ctx context.Context, payloads []T) ([]Receipt, error)
+	PublishMessageBatch(ctx context.Context, outgoing []Outgoing[T]) ([]Receipt, error)
+}
+
 // Querier is the ordinary generic DI interface for a bound query descriptor.
 type Querier[Q, R any] interface {
 	Query(ctx context.Context, payload Q) (R, error)

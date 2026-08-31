@@ -59,20 +59,22 @@ type WaitEvent struct {
 
 // Snapshot is one cumulative PostgreSQL statistics boundary.
 type Snapshot struct {
-	ObservedAt time.Time    `json:"observedAt"`
-	Statements []Statement  `json:"statements"`
-	Database   Counters     `json:"database"`
-	WAL        Counters     `json:"wal"`
-	IO         []IOCounters `json:"io"`
-	Waits      []WaitEvent  `json:"waits"`
+	ObservedAt   time.Time    `json:"observedAt"`
+	Statements   []Statement  `json:"statements"`
+	Database     Counters     `json:"database"`
+	WAL          Counters     `json:"wal"`
+	Checkpointer Counters     `json:"checkpointer"`
+	IO           []IOCounters `json:"io"`
+	Waits        []WaitEvent  `json:"waits"`
 }
 
 // Delta is the numeric difference between two cumulative snapshots.
 type Delta struct {
-	Statements []Statement  `json:"statements"`
-	Database   Counters     `json:"database"`
-	WAL        Counters     `json:"wal"`
-	IO         []IOCounters `json:"io"`
+	Statements   []Statement  `json:"statements"`
+	Database     Counters     `json:"database"`
+	WAL          Counters     `json:"wal"`
+	Checkpointer Counters     `json:"checkpointer"`
+	IO           []IOCounters `json:"io"`
 }
 
 // Timeline stores the three required capacity boundaries and their deltas.
@@ -95,7 +97,9 @@ func New(db *sql.DB) (*Snapshotter, error) {
 	return &Snapshotter{db: db}, nil
 }
 
-// ProbeDSN adds the stable application_name used to exclude controller waits.
+// ProbeDSN adds the stable application_name used to exclude controller waits
+// and keeps verifier queries serial so measurement cannot consume SUT parallel
+// workers or Docker shared memory.
 func ProbeDSN(dsn string) (string, error) {
 	parsed, err := url.Parse(dsn)
 	if err != nil {
@@ -103,6 +107,7 @@ func ProbeDSN(dsn string) (string, error) {
 	}
 	query := parsed.Query()
 	query.Set("application_name", ProbeApplicationName)
+	query.Set("max_parallel_workers_per_gather", "0")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
@@ -118,6 +123,9 @@ func (s *Snapshotter) Ensure(ctx context.Context) (map[string]string, error) {
 		ORDER BY name`, []string{
 		"compute_query_id", "pg_stat_statements.track", "pg_stat_statements.track_utility",
 		"shared_preload_libraries", "track_io_timing", "track_wal_io_timing",
+		"checkpoint_timeout", "max_wal_size", "shared_buffers", "wal_buffers",
+		"max_parallel_workers_per_gather",
+		"fsync", "synchronous_commit", "full_page_writes",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read PostgreSQL telemetry settings: %w", err)
@@ -137,6 +145,7 @@ func (s *Snapshotter) Ensure(ctx context.Context) (map[string]string, error) {
 	required := map[string]string{
 		"compute_query_id": "on", "pg_stat_statements.track": "all",
 		"pg_stat_statements.track_utility": "on", "track_io_timing": "on", "track_wal_io_timing": "on",
+		"fsync": "on", "synchronous_commit": "on", "full_page_writes": "on",
 	}
 	for name, want := range required {
 		if settings[name] != want {
@@ -167,6 +176,12 @@ func (s *Snapshotter) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("snapshot pg_stat_wal: %w", err)
 	}
+	checkpointer, err := s.singleCounters(ctx, `/* gomessenger-capacity-probe */
+		SELECT to_jsonb(checkpointer_stats) - 'stats_reset'
+		FROM pg_stat_checkpointer AS checkpointer_stats`)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("snapshot pg_stat_checkpointer: %w", err)
+	}
 	ioCounters, err := s.io(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -177,7 +192,7 @@ func (s *Snapshotter) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	return Snapshot{
 		ObservedAt: time.Now().UTC(), Statements: statements, Database: database,
-		WAL: wal, IO: ioCounters, Waits: waits,
+		WAL: wal, Checkpointer: checkpointer, IO: ioCounters, Waits: waits,
 	}, nil
 }
 
@@ -190,7 +205,7 @@ func (s *Snapshotter) Waits(ctx context.Context) ([]WaitEvent, error) {
 		WHERE pid <> pg_backend_pid()
 		  AND application_name <> $1
 		  AND wait_event IS NOT NULL
-		  AND (wait_event_type IN ('Lock', 'LWLock', 'IO', 'BufferPin') OR wait_event ILIKE '%WAL%')
+		  AND (wait_event_type IN ('Lock', 'LWLock', 'IO', 'BufferPin') OR wait_event IN ('WALWrite', 'WALSync'))
 		GROUP BY application_name, backend_type, state, wait_event_type, wait_event
 		ORDER BY application_name, backend_type, wait_event_type, wait_event`, ProbeApplicationName)
 	if err != nil {
@@ -298,10 +313,11 @@ func BuildTimeline(before, loadEnd, afterDrain Snapshot) Timeline {
 // DeltaSnapshots subtracts cumulative counters without allowing negative reset artifacts.
 func DeltaSnapshots(before, after Snapshot) Delta {
 	return Delta{
-		Statements: deltaStatements(before.Statements, after.Statements),
-		Database:   deltaCounters(before.Database, after.Database),
-		WAL:        deltaCounters(before.WAL, after.WAL),
-		IO:         deltaIO(before.IO, after.IO),
+		Statements:   deltaStatements(before.Statements, after.Statements),
+		Database:     deltaCounters(before.Database, after.Database),
+		WAL:          deltaCounters(before.WAL, after.WAL),
+		Checkpointer: deltaCounters(before.Checkpointer, after.Checkpointer),
+		IO:           deltaIO(before.IO, after.IO),
 	}
 }
 
@@ -321,7 +337,8 @@ func ClassifyStatement(query string) string {
 		return "inbox"
 	case strings.Contains(normalized, "demo.orders"),
 		strings.Contains(normalized, "demo.order_projection"),
-		strings.Contains(normalized, "inbox_capacity.business_effects"):
+		strings.Contains(normalized, "inbox_capacity.business_effects"),
+		strings.Contains(normalized, "batch_capacity.business_effects"):
 		return "business"
 	case strings.Contains(normalized, "envelope_measurements"):
 		return "measurement"

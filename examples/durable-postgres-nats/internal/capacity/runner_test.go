@@ -3,6 +3,7 @@ package capacity
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -55,6 +56,48 @@ func TestPostgresSnapshotStartsAtLoadBoundary(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("PostgreSQL boundary snapshot did not complete")
+	}
+}
+
+func TestFailReportMarksIncompleteRunIntegrityInvalid(t *testing.T) {
+	t.Parallel()
+	artifacts, err := newArtifacts(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := artifacts.close(); err != nil {
+			t.Errorf("close artifacts: %v", err)
+		}
+	})
+	report := RunReport{IntegrityPassed: true}
+	wantErr := errors.New("reconciliation query failed")
+	if gotErr := failReport(artifacts, &report, wantErr); !errors.Is(gotErr, wantErr) {
+		t.Fatalf("failReport() error = %v", gotErr)
+	}
+	if report.IntegrityPassed || report.Failure != wantErr.Error() || report.CompletedAt.IsZero() {
+		t.Fatalf("failed report = %#v", report)
+	}
+}
+
+func TestFailReportPreservesVerifiedIntegrityForMinimumRateFailure(t *testing.T) {
+	t.Parallel()
+	artifacts, err := newArtifacts(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := artifacts.close(); err != nil {
+			t.Errorf("close artifacts: %v", err)
+		}
+	})
+	report := RunReport{IntegrityPassed: true}
+	wantErr := &MinimumRateError{Minimum: 2_000, Actual: 1_500}
+	if gotErr := failReport(artifacts, &report, wantErr); !errors.Is(gotErr, wantErr) {
+		t.Fatalf("failReport() error = %v", gotErr)
+	}
+	if !report.IntegrityPassed || report.Failure != wantErr.Error() {
+		t.Fatalf("minimum-rate report = %#v", report)
 	}
 }
 

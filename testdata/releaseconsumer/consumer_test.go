@@ -51,6 +51,20 @@ func TestImports(t *testing.T) {
 		t.Fatalf("query = %d, %v", value, err)
 	}
 	_ = inbox.Key{}
+	_ = messenger.BatchItemKey{}
+	_ = messenger.BatchItemResult{}
+	_ = messenger.BatchResult{}
+	_ = messenger.BatchConfig{}
+	_ = messenger.BatchHandler[string](nil)
+	_ = messenger.BatchHandlerMiddleware[string](nil)
+	_ = messenger.BatchMiddleware(nil)
+	_ = messenger.ChainBatchHandler[string]
+	_ = messenger.DeferAfter(errors.New("later"), time.Second)
+	_, _ = messenger.DeferDelay(nil)
+	_ = natsadapter.NewBatchCommandConsumer[string]
+	_ = natsadapter.NewBatchEventConsumer[string]
+	_ = kafkaadapter.NewBatchCommandConsumer[string]
+	_ = kafkaadapter.NewBatchEventConsumer[string]
 	_ = natsadapter.HandlerConfig{
 		Logger: logger, Propagator: observability.NewTraceContextPropagator(),
 		PanicReporter: panicReporter, FailureSanitizer: failureSanitizer,

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"example.com/gomessenger-durable-postgres-nats/internal/demo"
 )
 
 type artifacts struct {
@@ -106,18 +108,18 @@ func writeFileAtomic(path string, data []byte) error {
 
 func renderMarkdown(report RunReport) string {
 	var builder strings.Builder
-	builder.WriteString("# GoMessenger capacity report\n\n")
-	builder.WriteString("Run: `" + report.RunID + "`\n\n")
-	builder.WriteString("Report spec: `" + report.SpecVersion + "`\n\n")
+	_, _ = builder.WriteString("# GoMessenger capacity report\n\n")
+	_, _ = builder.WriteString("Run: `" + report.RunID + "`\n\n")
+	_, _ = builder.WriteString("Report spec: `" + report.SpecVersion + "`\n\n")
 	statement := report.CapacityStatement
 	if statement == "" {
 		statement = "run is incomplete"
 	}
-	builder.WriteString("**Result:** " + statement + ".\n\n")
+	_, _ = builder.WriteString("**Result:** " + statement + ".\n\n")
 	if report.Failure != "" {
-		builder.WriteString("**Failure:** " + report.Failure + "\n\n")
+		_, _ = builder.WriteString("**Failure:** " + report.Failure + "\n\n")
 	}
-	builder.WriteString(
+	_, _ = builder.WriteString(
 		"This is a checkout-local measurement on the recorded machine and topology;" +
 			" it is not a production-capacity claim.\n\n",
 	)
@@ -130,19 +132,20 @@ func renderMarkdown(report RunReport) string {
 			report.Warmup.Integrity.Passed,
 		)
 	}
-	builder.WriteString("## Measured stages\n\n")
-	builder.WriteString(
+	_, _ = builder.WriteString("## Measured stages\n\n")
+	_, _ = builder.WriteString(
 		"| Rate | Sustainable | Offered | HTTP 202 total | DB accepted | Staged | Published | Committed |" +
 			" Relay msg/s | Consumer msg/s | Consumer MiB/s | Outbox lag | Consumer lag |" +
-			" Business p95 | Inbox p95 | ACK p95 | Drain |\n",
+			" Business p95 | Inbox p95 | ACK p95 | Batch calls | Avg batch | Max batch |" +
+			" Batch handler p95 | Drain |\n",
 	)
-	builder.WriteString(
-		"|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+	_, _ = builder.WriteString(
+		"|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
 	)
 	for _, stage := range report.Stages {
 		_, _ = fmt.Fprintf(&builder,
 			"| %d | %t | %d | %d | %d | %d | %d | %d | %.2f | %.2f | %.3f | %d | %d |"+
-				" %.2f ms | %.2f ms | %.2f ms | %.2f s |\n",
+				" %.2f ms | %.2f ms | %.2f ms | %d | %.2f | %d | %.2f ms | %.2f s |\n",
 			stage.TargetRate,
 			stage.Sustainable,
 			stage.LoadWindow.Offered,
@@ -159,6 +162,10 @@ func renderMarkdown(report RunReport) string {
 			stage.Latency.P95Millis,
 			stage.InboxHandle.P95Millis,
 			stage.BrokerAck.P95Millis,
+			stage.ConsumerBatch.Invocations,
+			stage.ConsumerBatch.AverageMessages,
+			stage.ConsumerBatch.MaxMessages,
+			stage.ConsumerBatch.Handler.P95Millis,
 			stage.DrainSeconds,
 		)
 	}
@@ -176,46 +183,85 @@ func renderMarkdown(report RunReport) string {
 			stage.Integrity.Passed,
 		)
 		if len(stage.UnsustainableReasons) != 0 {
-			builder.WriteString("\nReasons for `" + stage.StageID + "`: " + strings.Join(stage.UnsustainableReasons, "; ") + ".\n")
+			_, _ = builder.WriteString(
+				"\nReasons for `" + stage.StageID + "`: " + strings.Join(stage.UnsustainableReasons, "; ") + ".\n",
+			)
 		}
 		if !stage.Integrity.Passed {
-			builder.WriteString("\nIntegrity failure for `" + stage.StageID + "`: " + strings.Join(stage.Integrity.Reasons, "; ") + ".\n")
+			_, _ = builder.WriteString(
+				"\nIntegrity failure for `" + stage.StageID + "`: " + strings.Join(stage.Integrity.Reasons, "; ") + ".\n",
+			)
 		}
-		builder.WriteString("\nPostgreSQL load-window statements for `" + stage.StageID + "`:\n\n")
-		builder.WriteString("| Class | Calls | Total time | WAL bytes | Query |\n")
-		builder.WriteString("|---|---:|---:|---:|---|\n")
+		_, _ = builder.WriteString("\nBatch execution and normalized PostgreSQL cost:\n\n")
+		_, _ = builder.WriteString("| Operation | Calls | Messages | Avg batch | Max batch | Errors | p95 |\n")
+		_, _ = builder.WriteString("|---|---:|---:|---:|---:|---:|---:|\n")
+		writeBatchExecutionRow(&builder, "Outbox handler", stage.OutboxExecution.Handler)
+		writeBatchExecutionRow(&builder, "Outbox publish", stage.OutboxExecution.Publish)
+		writeBatchExecutionRow(&builder, "Outbox finalization", stage.OutboxExecution.Finalization)
+		writeBatchExecutionRow(&builder, "Consumer handler", stage.ConsumerBatch)
+		_, _ = fmt.Fprintf(&builder,
+			"\nOutbox outcomes: success `%d`, retry `%d`, defer `%d`, DLQ `%d`. "+
+				"PostgreSQL: SQL calls `%d`, transactions/message `%.4f`, WAL/message `%.2f B`, checkpoints `%d`.\n"+
+				"\nOutbox pool health: producer new/replaced/canceled/unusable/max-acquired `%d/%d/%d/%d/%d`; "+
+				"relay `%d/%d/%d/%d/%d`.\n",
+			stage.OutboxExecution.Outcomes.Success,
+			stage.OutboxExecution.Outcomes.Retry,
+			stage.OutboxExecution.Outcomes.Defer,
+			stage.OutboxExecution.Outcomes.DLQ,
+			stage.PostgreSQLNormalized.SQLCalls,
+			stage.PostgreSQLNormalized.TransactionsPerMessage,
+			stage.PostgreSQLNormalized.WALBytesPerMessage,
+			stage.PostgreSQLNormalized.CompletedCheckpoints,
+			stage.OutboxDatabase.Producer.NewConnections,
+			stage.OutboxDatabase.Producer.ReplacementConnections,
+			stage.OutboxDatabase.Producer.CanceledAcquires,
+			stage.OutboxDatabase.Producer.UnusableReleases,
+			stage.OutboxDatabase.Producer.MaxAcquiredConnections,
+			stage.OutboxDatabase.Relay.NewConnections,
+			stage.OutboxDatabase.Relay.ReplacementConnections,
+			stage.OutboxDatabase.Relay.CanceledAcquires,
+			stage.OutboxDatabase.Relay.UnusableReleases,
+			stage.OutboxDatabase.Relay.MaxAcquiredConnections,
+		)
+		_, _ = builder.WriteString("\nPostgreSQL load-window statements for `" + stage.StageID + "`:\n\n")
+		_, _ = builder.WriteString("| Class | Calls | Total time | WAL bytes | Query |\n")
+		_, _ = builder.WriteString("|---|---:|---:|---:|---|\n")
 		for _, statement := range stage.PostgreSQL.LoadDelta.Statements {
 			_, _ = fmt.Fprintf(&builder, "| %s | %d | %.2f ms | %.0f | `%s` |\n",
 				statement.Classification, statement.Calls, statement.TotalExecTimeMillis,
 				statement.WALBytes, strings.ReplaceAll(statement.Query, "|", "\\|"))
 		}
 	}
-	builder.WriteString("\n## Metric boundary\n\n")
-	builder.WriteString("- `relay msg/s = published delta during the offered window / offered-window seconds`\n")
-	builder.WriteString("- `consumer msg/s = committed projection delta during the offered window / offered-window seconds`\n")
-	builder.WriteString("- `Outbox lag = staged delta - published delta`\n")
-	builder.WriteString("- `consumer lag = published delta - committed projection delta`\n")
-	builder.WriteString(
+	_, _ = builder.WriteString("\n## Metric boundary\n\n")
+	_, _ = builder.WriteString("- `relay msg/s = published delta during the offered window / offered-window seconds`\n")
+	_, _ = builder.WriteString(
+		"- `consumer msg/s = committed projection delta during the offered window / offered-window seconds`\n",
+	)
+	_, _ = builder.WriteString("- `Outbox lag = staged delta - published delta`\n")
+	_, _ = builder.WriteString("- `consumer lag = published delta - committed projection delta`\n")
+	_, _ = builder.WriteString(
 		"- `consumer MiB/s = exact canonical envelope bytes joined to those committed message IDs" +
 			" / offered-window seconds / 1,048,576`\n",
 	)
-	builder.WriteString(
+	_, _ = builder.WriteString(
 		"- Drain time and post-drain reconciliation are reported separately" +
 			" and never enter either throughput denominator.\n",
 	)
-	builder.WriteString("\n## Environment\n\n")
+	_, _ = builder.WriteString("\n## Environment\n\n")
 	_, _ = fmt.Fprintf(&builder,
 		"- Checkout: `%s` (dirty: `%s`)\n"+
 			"- Host: `%s/%s`, logical CPUs `%s`\n"+
 			"- Container: `%s/%s`, logical CPUs `%d`\n"+
 			"- Go: `%s`\n"+
-			"- Outbox module: `%s`\n"+
-			"- PostgreSQL: `%s`\n"+
-			"- NATS: `%s`\n"+
+			"- Outbox module: `%s`; checkout `%s` (dirty: `%s`)\n"+
+			"- PostgreSQL: `%s`, profile `%s`, image `%s`, digest `%s`\n"+
+			"- NATS: `%s`, image `%s`, digest `%s`\n"+
 			"- k6: `%s`\n"+
-			"- Topology: file-backed JetStream, Outbox workers `%d`, reservation batch `%d`, "+
-			"producer/relay pgx `%d + %d = %d`, consumer concurrency `%d`, "+
-			"business DB max-open `%d`\n"+
+			"- Topology: file-backed JetStream, Outbox ingress `%s`, relay `%s`, workers `%d`, reservation batch `%d`, "+
+			"producer/relay pgx `%d + %d = %d`, consumer mode `%s`, concurrency `%d`, "+
+			"Outbox batch max messages/bytes/wait `%d` / `%d` / `%.3f ms`, "+
+			"consumer batch max messages/bytes/wait `%d` / `%d` / `%.3f ms`, business DB max-open `%d`\n"+
+			"- Limits: shared cpuset `%s`; PostgreSQL/API/NATS memory `%d` / `%d` / `%d` bytes; swap disabled `%t`\n"+
 			"- PostgreSQL telemetry: compute_query_id `%s`, statement track `%s`, utility track `%s`,"+
 			" I/O timing `%s`, WAL I/O timing `%s`\n",
 		report.Environment.GitCommit,
@@ -228,16 +274,37 @@ func renderMarkdown(report RunReport) string {
 		report.Environment.ContainerCPUs,
 		report.Environment.GoVersion,
 		report.Environment.OutboxVersion,
+		report.Environment.OutboxGitCommit,
+		report.Environment.OutboxGitDirty,
 		report.Environment.PostgreSQLVersion,
+		report.Environment.PostgreSQLProfile,
+		report.Environment.PostgreSQLImage,
+		report.Environment.PostgreSQLImageDigest,
 		report.Environment.NATSServerVersion,
+		report.Environment.NATSImage,
+		report.Environment.NATSImageDigest,
 		report.Environment.K6Version,
+		report.Environment.OutboxIngressMode,
+		report.Environment.OutboxRelayMode,
 		report.Environment.OutboxWorkers,
 		report.Environment.OutboxReservationBatchSize,
 		report.Environment.OutboxProducerMaxConns,
 		report.Environment.OutboxRelayMaxConns,
 		report.Environment.OutboxPGXConnectionBudget,
+		report.Environment.ConsumerMode,
 		report.Environment.ConsumerConcurrency,
+		report.Environment.OutboxBatchMaxMessages,
+		report.Environment.OutboxBatchMaxBytes,
+		report.Environment.OutboxBatchMaxWaitMillis,
+		report.Environment.ConsumerBatchMaxMessages,
+		report.Environment.ConsumerBatchMaxBytes,
+		report.Environment.ConsumerBatchMaxWaitMillis,
 		report.Environment.DBMaxOpenConns,
+		report.Environment.SUTCPUSet,
+		report.Environment.PostgreSQLMemoryBytes,
+		report.Environment.APIMemoryBytes,
+		report.Environment.NATSMemoryBytes,
+		report.Environment.SwapDisabled,
 		report.Environment.PostgreSQLSettings["compute_query_id"],
 		report.Environment.PostgreSQLSettings["pg_stat_statements.track"],
 		report.Environment.PostgreSQLSettings["pg_stat_statements.track_utility"],
@@ -245,4 +312,16 @@ func renderMarkdown(report RunReport) string {
 		report.Environment.PostgreSQLSettings["track_wal_io_timing"],
 	)
 	return builder.String()
+}
+
+func writeBatchExecutionRow(builder *strings.Builder, name string, stats demo.BatchHandlerStats) {
+	_, _ = fmt.Fprintf(builder, "| %s | %d | %d | %.2f | %d | %d | %.2f ms |\n",
+		name,
+		stats.Invocations,
+		stats.Messages,
+		stats.AverageMessages,
+		stats.MaxMessages,
+		stats.Handler.Errors,
+		stats.Handler.P95Millis,
+	)
 }

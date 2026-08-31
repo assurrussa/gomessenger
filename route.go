@@ -49,6 +49,14 @@ type Route interface {
 	Deliver(ctx context.Context, delivery Delivery) (Receipt, error)
 }
 
+// BatchRoute atomically delivers an ordered set of command/event deliveries.
+// The durable Outbox route is the supported implementation; direct broker and
+// local routes intentionally do not implement this capability.
+type BatchRoute interface {
+	Route
+	DeliverBatch(ctx context.Context, deliveries []Delivery) ([]Receipt, error)
+}
+
 // LocalQueryRoute is the sealed local request/reply route contract. The built-in
 // LocalSyncRoute and LocalAsyncRoute are its only implementations.
 type LocalQueryRoute interface {

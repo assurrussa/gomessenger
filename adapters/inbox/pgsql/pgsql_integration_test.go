@@ -90,9 +90,90 @@ func TestPostgresInboxIntegration(t *testing.T) {
 	t.Run("attempt finalization failures roll back handler write", func(t *testing.T) {
 		testPostgresAttemptFinalizationFailures(t, database)
 	})
+	t.Run("batch mixed outcomes rollback and replay", func(t *testing.T) {
+		testPostgresBatchOutcomes(t, database)
+	})
 	t.Run("custom schema and prefix", func(t *testing.T) {
 		testPostgresCustomNamespace(t, database)
 	})
+}
+
+func testPostgresBatchOutcomes(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	items := []inbox.BatchItem{
+		postgresBatchItem(t, "018f4f2c-4a00-7000-8000-000000000071", "batch-success"),
+		postgresBatchItem(t, "018f4f2c-4a00-7000-8000-000000000072", "batch-retry"),
+		postgresBatchItem(t, "018f4f2c-4a00-7000-8000-000000000073", "batch-defer"),
+		postgresBatchItem(t, "018f4f2c-4a00-7000-8000-000000000074", "batch-permanent"),
+	}
+	report, err := store.ProcessBatchAttempt(t.Context(), items, 2, func(
+		ctx context.Context,
+		active []inbox.BatchItem,
+	) (messenger.BatchResult, error) {
+		if len(active) != 4 {
+			t.Fatalf("active batch items = %d, want 4", len(active))
+		}
+		if err := incrementPostgresBusiness(ctx, "batch-success"); err != nil {
+			return messenger.BatchResult{}, err
+		}
+		return messenger.BatchResult{Items: []messenger.BatchItemResult{
+			{Key: postgresBatchResultKey(active[2]), Err: messenger.DeferAfter(errors.New("later"), 3*time.Second)},
+			{Key: postgresBatchResultKey(active[0])},
+			{Key: postgresBatchResultKey(active[3]), Err: messenger.Permanent(errors.New("bad"))},
+			{Key: postgresBatchResultKey(active[1]), Err: messenger.RetryAfter(errors.New("busy"), 2*time.Second)},
+		}}, nil
+	})
+	if err != nil || report.HandlerMessages != 4 || postgresBusinessValue(t, database, "batch-success") != 1 {
+		t.Fatalf("mixed batch report=%#v value=%d error=%v", report,
+			postgresBusinessValue(t, database, "batch-success"), err)
+	}
+	wantOutcomes := []inbox.BatchOutcome{inbox.BatchACK, inbox.BatchRetry, inbox.BatchDefer, inbox.BatchDLQ}
+	wantAttempts := []uint64{1, 1, 0, 1}
+	for index, outcome := range report.Items {
+		if outcome.Outcome != wantOutcomes[index] || outcome.Attempt != wantAttempts[index] {
+			t.Fatalf("mixed outcome %d = %#v", index, outcome)
+		}
+	}
+
+	deferred := items[2]
+	topErr := errors.New("whole batch retry")
+	_, err = store.ProcessBatchAttempt(t.Context(), []inbox.BatchItem{deferred}, 2, func(
+		ctx context.Context,
+		_ []inbox.BatchItem,
+	) (messenger.BatchResult, error) {
+		if err := incrementPostgresBusiness(ctx, "batch-rollback"); err != nil {
+			return messenger.BatchResult{}, err
+		}
+		return messenger.BatchResult{}, topErr
+	})
+	if !errors.Is(err, topErr) || postgresBusinessValue(t, database, "batch-rollback") != 0 {
+		t.Fatalf("top-level batch error=%v value=%d", err,
+			postgresBusinessValue(t, database, "batch-rollback"))
+	}
+	report, err = store.ProcessBatchAttempt(t.Context(), []inbox.BatchItem{deferred}, 2, func(
+		_ context.Context,
+		active []inbox.BatchItem,
+	) (messenger.BatchResult, error) {
+		return messenger.BatchResult{Items: []messenger.BatchItemResult{{Key: postgresBatchResultKey(active[0])}}}, nil
+	})
+	if err != nil || report.Items[0].Attempt != 1 || report.Items[0].Outcome != inbox.BatchACK {
+		t.Fatalf("batch retry after rollback = %#v, %v", report, err)
+	}
+
+	var replayCalls atomic.Int32
+	report, err = store.ProcessBatchAttempt(t.Context(), []inbox.BatchItem{items[0], items[3]}, 2, func(
+		context.Context,
+		[]inbox.BatchItem,
+	) (messenger.BatchResult, error) {
+		replayCalls.Add(1)
+		return messenger.BatchResult{}, nil
+	})
+	if err != nil || replayCalls.Load() != 0 || !report.Items[0].Duplicate ||
+		report.Items[1].FailureKind != inbox.FailurePermanent {
+		t.Fatalf("batch replay report=%#v calls=%d error=%v", report, replayCalls.Load(), err)
+	}
 }
 
 func testPostgresCustomNamespace(t *testing.T, database *sql.DB) {
@@ -272,7 +353,7 @@ func testPostgresPermanentOutcome(t *testing.T, database *sql.DB) {
 	store := newPostgresStore(t, database)
 	result, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
 		calls.Add(1)
-		return messenger.Permanent(cause)
+		return messenger.Permanent(messenger.DeferAfter(cause, time.Second))
 	})
 	if !messenger.IsPermanent(err) || !errors.Is(err, cause) || result.Attempt != 1 || calls.Load() != 1 {
 		t.Fatalf("first permanent attempt = %#v, calls=%d, error=%v", result, calls.Load(), err)
@@ -732,6 +813,21 @@ func postgresKey(t *testing.T, suffix string) inbox.Key {
 
 func postgresFingerprint(value string) inbox.Fingerprint {
 	return inbox.Fingerprint(sha256.Sum256([]byte(value)))
+}
+
+func postgresBatchItem(t *testing.T, id, fingerprint string) inbox.BatchItem {
+	t.Helper()
+	messageID, err := messenger.ParseMessageID(id)
+	if err != nil {
+		t.Fatalf("parse batch message ID: %v", err)
+	}
+	return inbox.BatchItem{Key: inbox.Key{
+		ConsumerID: "postgres-batch", Source: "urn:service:test", MessageID: messageID,
+	}, Fingerprint: postgresFingerprint(fingerprint)}
+}
+
+func postgresBatchResultKey(item inbox.BatchItem) messenger.BatchItemKey {
+	return messenger.BatchItemKey{Source: item.Key.Source, MessageID: item.Key.MessageID}
 }
 
 func incrementPostgresBusiness(ctx context.Context, name string) error {

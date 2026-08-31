@@ -7,7 +7,7 @@ import (
 	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
-const reportSpecVersion = "1.3"
+const reportSpecVersion = "2.1"
 
 // BusinessSnapshot is the committed PostgreSQL truth for one run stage.
 type BusinessSnapshot struct {
@@ -70,6 +70,33 @@ type EnvelopeStats struct {
 	MaxBytes   int64   `json:"maxBytes"`
 }
 
+// PostgreSQLNormalizedStats makes resource cost comparable across ingress and
+// relay modes instead of leaving normalization to report consumers.
+type PostgreSQLNormalizedStats struct {
+	SQLCalls               int64   `json:"sqlCalls"`
+	Transactions           int64   `json:"transactions"`
+	TransactionsPerMessage float64 `json:"transactionsPerMessage"`
+	WALBytes               float64 `json:"walBytes"`
+	WALBytesPerMessage     float64 `json:"walBytesPerMessage"`
+	CompletedCheckpoints   int64   `json:"completedCheckpoints"`
+}
+
+// PGXPoolStageStats reports Outbox pool health over one complete load-and-drain stage.
+type PGXPoolStageStats struct {
+	MaxConnections         int32 `json:"maxConnections"`
+	MaxAcquiredConnections int32 `json:"maxAcquiredConnections"`
+	NewConnections         int64 `json:"newConnections"`
+	ReplacementConnections int64 `json:"replacementConnections"`
+	CanceledAcquires       int64 `json:"canceledAcquires"`
+	UnusableReleases       int64 `json:"unusableReleases"`
+}
+
+// OutboxDatabaseStats separates producer and relay pool health.
+type OutboxDatabaseStats struct {
+	Producer PGXPoolStageStats `json:"producer"`
+	Relay    PGXPoolStageStats `json:"relay"`
+}
+
 // StageCounts compares the offered boundary with each durable business boundary.
 type StageCounts struct {
 	Offered          int64 `json:"offered"`
@@ -99,40 +126,44 @@ type IntegrityResult struct {
 
 // StageReport is the durable result for one warm-up or measured rate.
 type StageReport struct {
-	StageID                 string               `json:"stageId"`
-	Warmup                  bool                 `json:"warmup"`
-	TargetRate              int                  `json:"targetRate"`
-	LoadStartedAt           time.Time            `json:"loadStartedAt"`
-	LoadEndedAt             time.Time            `json:"loadEndedAt"`
-	LoadWindowSeconds       float64              `json:"loadWindowSeconds"`
-	DrainSeconds            float64              `json:"drainSeconds"`
-	DrainCompleted          bool                 `json:"drainCompleted"`
-	LoadWindow              StageCounts          `json:"loadWindow"`
-	AfterDrain              StageCounts          `json:"afterDrain"`
-	RelayMessagesPerSec     float64              `json:"relayMessagesPerSecond"`
-	ConsumerMessagesPerSec  float64              `json:"consumerMessagesPerSecond"`
-	ConsumerMiBPerSec       float64              `json:"consumerMiBPerSecond"`
-	AcceptedMessagesPerSec  float64              `json:"acceptedMessagesPerSecond"`
-	OutboxLag               int64                `json:"outboxLag"`
-	ConsumerLag             int64                `json:"consumerLag"`
-	OutboxLagGrowthPerSec   float64              `json:"outboxLagGrowthPerSecond"`
-	ConsumerLagGrowthPerSec float64              `json:"consumerLagGrowthPerSecond"`
-	BacklogSlopePerSec      float64              `json:"backlogSlopePerSecond"`
-	MaxBusinessBacklog      int64                `json:"maxBusinessBacklog"`
-	MaxOutboxBacklog        int64                `json:"maxOutboxBacklog"`
-	MaxConsumerPending      uint64               `json:"maxConsumerPending"`
-	MaxBrokerRedelivered    int                  `json:"maxBrokerRedelivered"`
-	InboxDuplicates         int64                `json:"inboxDuplicates"`
-	DLQMessages             int64                `json:"dlqMessages"`
-	Latency                 LatencyStats         `json:"latency"`
-	InboxHandle             demo.OperationStats  `json:"inboxHandle"`
-	BrokerAck               demo.OperationStats  `json:"brokerAck"`
-	Envelopes               EnvelopeStats        `json:"envelopes"`
-	PostgreSQL              pgtelemetry.Timeline `json:"postgresql"`
-	K6                      K6Result             `json:"k6"`
-	Sustainable             bool                 `json:"sustainable"`
-	UnsustainableReasons    []string             `json:"unsustainableReasons,omitempty"`
-	Integrity               IntegrityResult      `json:"integrity"`
+	StageID                 string                    `json:"stageId"`
+	Warmup                  bool                      `json:"warmup"`
+	TargetRate              int                       `json:"targetRate"`
+	LoadStartedAt           time.Time                 `json:"loadStartedAt"`
+	LoadEndedAt             time.Time                 `json:"loadEndedAt"`
+	LoadWindowSeconds       float64                   `json:"loadWindowSeconds"`
+	DrainSeconds            float64                   `json:"drainSeconds"`
+	DrainCompleted          bool                      `json:"drainCompleted"`
+	LoadWindow              StageCounts               `json:"loadWindow"`
+	AfterDrain              StageCounts               `json:"afterDrain"`
+	RelayMessagesPerSec     float64                   `json:"relayMessagesPerSecond"`
+	ConsumerMessagesPerSec  float64                   `json:"consumerMessagesPerSecond"`
+	ConsumerMiBPerSec       float64                   `json:"consumerMiBPerSecond"`
+	AcceptedMessagesPerSec  float64                   `json:"acceptedMessagesPerSecond"`
+	OutboxLag               int64                     `json:"outboxLag"`
+	ConsumerLag             int64                     `json:"consumerLag"`
+	OutboxLagGrowthPerSec   float64                   `json:"outboxLagGrowthPerSecond"`
+	ConsumerLagGrowthPerSec float64                   `json:"consumerLagGrowthPerSecond"`
+	BacklogSlopePerSec      float64                   `json:"backlogSlopePerSecond"`
+	MaxBusinessBacklog      int64                     `json:"maxBusinessBacklog"`
+	MaxOutboxBacklog        int64                     `json:"maxOutboxBacklog"`
+	MaxConsumerPending      uint64                    `json:"maxConsumerPending"`
+	MaxBrokerRedelivered    int                       `json:"maxBrokerRedelivered"`
+	InboxDuplicates         int64                     `json:"inboxDuplicates"`
+	DLQMessages             int64                     `json:"dlqMessages"`
+	Latency                 LatencyStats              `json:"latency"`
+	InboxHandle             demo.OperationStats       `json:"inboxHandle"`
+	BrokerAck               demo.OperationStats       `json:"brokerAck"`
+	ConsumerBatch           demo.BatchHandlerStats    `json:"consumerBatch"`
+	OutboxExecution         demo.OutboxExecutionStats `json:"outboxExecution"`
+	Envelopes               EnvelopeStats             `json:"envelopes"`
+	PostgreSQL              pgtelemetry.Timeline      `json:"postgresql"`
+	PostgreSQLNormalized    PostgreSQLNormalizedStats `json:"postgresqlNormalized"`
+	OutboxDatabase          OutboxDatabaseStats       `json:"outboxDatabase"`
+	K6                      K6Result                  `json:"k6"`
+	Sustainable             bool                      `json:"sustainable"`
+	UnsustainableReasons    []string                  `json:"unsustainableReasons,omitempty"`
+	Integrity               IntegrityResult           `json:"integrity"`
 }
 
 // Environment records the exact checkout and local execution context.
@@ -147,18 +178,39 @@ type Environment struct {
 	HostCPUs                   string            `json:"hostLogicalCpus"`
 	GitCommit                  string            `json:"gitCommit"`
 	GitDirty                   string            `json:"gitDirty"`
+	OutboxGitCommit            string            `json:"outboxGitCommit"`
+	OutboxGitDirty             string            `json:"outboxGitDirty"`
 	PostgreSQLVersion          string            `json:"postgresqlVersion"`
+	PostgreSQLProfile          string            `json:"postgresqlProfile"`
+	PostgreSQLImage            string            `json:"postgresqlImage"`
+	PostgreSQLImageDigest      string            `json:"postgresqlImageDigest"`
 	NATSServerVersion          string            `json:"natsServerVersion"`
+	NATSImage                  string            `json:"natsImage"`
+	NATSImageDigest            string            `json:"natsImageDigest"`
 	K6Version                  string            `json:"k6Version"`
 	OutboxWorkers              int               `json:"outboxWorkers"`
 	OutboxReservationBatchSize int               `json:"outboxReservationBatchSize"`
 	OutboxProducerMaxConns     int               `json:"outboxProducerMaxConnections"`
 	OutboxRelayMaxConns        int               `json:"outboxRelayMaxConnections"`
+	OutboxIngressMode          string            `json:"outboxIngressMode"`
+	OutboxRelayMode            string            `json:"outboxRelayMode"`
+	OutboxBatchMaxMessages     int               `json:"outboxBatchMaxMessages"`
+	OutboxBatchMaxBytes        int               `json:"outboxBatchMaxBytes"`
+	OutboxBatchMaxWaitMillis   float64           `json:"outboxBatchMaxWaitMillis"`
 	OutboxPGXConnectionBudget  int               `json:"outboxPgxConnectionBudget"`
 	ConsumerConcurrency        int               `json:"consumerConcurrency"`
+	ConsumerMode               string            `json:"consumerMode"`
+	ConsumerBatchMaxMessages   int               `json:"consumerBatchMaxMessages"`
+	ConsumerBatchMaxBytes      int               `json:"consumerBatchMaxBytes"`
+	ConsumerBatchMaxWaitMillis float64           `json:"consumerBatchMaxWaitMillis"`
 	DBMaxOpenConns             int               `json:"dbMaxOpenConnections"`
 	JetStreamStorage           string            `json:"jetStreamStorage"`
 	PostgreSQLSettings         map[string]string `json:"postgresqlSettings"`
+	SUTCPUSet                  string            `json:"sutCpuSet"`
+	PostgreSQLMemoryBytes      int64             `json:"postgresqlMemoryBytes"`
+	NATSMemoryBytes            int64             `json:"natsMemoryBytes"`
+	APIMemoryBytes             int64             `json:"apiMemoryBytes"`
+	SwapDisabled               bool              `json:"swapDisabled"`
 }
 
 // ReportConfig is the stable, serializable experiment configuration.
@@ -170,8 +222,10 @@ type ReportConfig struct {
 	DrainTimeoutSeconds   float64 `json:"drainTimeoutSeconds"`
 	SampleIntervalSeconds float64 `json:"sampleIntervalSeconds"`
 	E2EP95SLOMillis       float64 `json:"e2eP95SloMillis"`
+	CheckpointTimeoutSecs float64 `json:"checkpointTimeoutSeconds"`
 	MinimumRate           int     `json:"minimumRate"`
 	PayloadProfile        string  `json:"payloadProfile"`
+	PostgreSQLProfile     string  `json:"postgresqlProfile"`
 }
 
 // RunReport is the complete machine-readable capacity artifact.

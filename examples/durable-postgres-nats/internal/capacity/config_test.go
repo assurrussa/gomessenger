@@ -14,20 +14,24 @@ const capacityProfileEnvironment = "CAPACITY_PROFILE"
 func TestConfigProfilesAndOverrides(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name            string
-		environment     map[string]string
-		wantRates       []int
-		wantStage       time.Duration
-		wantDrain       time.Duration
-		wantMinimum     int
-		wantWarmup      time.Duration
-		wantWorkers     int
-		wantBatch       int
-		wantProducerMax int
-		wantRelayMax    int
-		wantConsumers   int
-		wantDBMax       int
-		wantPayload     string
+		name                      string
+		environment               map[string]string
+		wantRates                 []int
+		wantStage                 time.Duration
+		wantDrain                 time.Duration
+		wantMinimum               int
+		wantWarmup                time.Duration
+		wantWorkers               int
+		wantBatch                 int
+		wantProducerMax           int
+		wantRelayMax              int
+		wantConsumers             int
+		wantConsumerMode          demo.ConsumerMode
+		wantConsumerBatchMessages int
+		wantConsumerBatchBytes    int
+		wantConsumerBatchWait     time.Duration
+		wantDBMax                 int
+		wantPayload               string
 	}{
 		{
 			name: "quick defaults", wantRates: []int{50, 100, 250, 500},
@@ -35,7 +39,10 @@ func TestConfigProfilesAndOverrides(t *testing.T) {
 			wantWarmup: 15 * time.Second, wantWorkers: 4, wantBatch: 1,
 			wantProducerMax: 9, wantRelayMax: 1,
 			wantConsumers: 4, wantDBMax: 32,
-			wantPayload: demo.CapacityPayloadMixed,
+			wantConsumerMode:          demo.ConsumerModeSingle,
+			wantConsumerBatchMessages: 100, wantConsumerBatchBytes: 4 << 20,
+			wantConsumerBatchWait: 25 * time.Millisecond,
+			wantPayload:           demo.CapacityPayloadMixed,
 		},
 		{
 			name: "full defaults", environment: map[string]string{capacityProfileEnvironment: ProfileFull},
@@ -44,7 +51,10 @@ func TestConfigProfilesAndOverrides(t *testing.T) {
 			wantWarmup: 30 * time.Second, wantWorkers: 4, wantBatch: 1,
 			wantProducerMax: 9, wantRelayMax: 1,
 			wantConsumers: 4, wantDBMax: 32,
-			wantPayload: demo.CapacityPayloadMixed,
+			wantConsumerMode:          demo.ConsumerModeSingle,
+			wantConsumerBatchMessages: 100, wantConsumerBatchBytes: 4 << 20,
+			wantConsumerBatchWait: 25 * time.Millisecond,
+			wantPayload:           demo.CapacityPayloadMixed,
 		},
 		{
 			name: "site defaults", environment: map[string]string{capacityProfileEnvironment: ProfileSite},
@@ -52,19 +62,27 @@ func TestConfigProfilesAndOverrides(t *testing.T) {
 			wantDrain: 30 * time.Second, wantWarmup: 30 * time.Second,
 			wantWorkers: 1, wantBatch: 1, wantProducerMax: 9, wantRelayMax: 1,
 			wantConsumers: 1, wantDBMax: 10, wantPayload: demo.CapacityPayloadSmall,
+			wantConsumerMode:          demo.ConsumerModeSingle,
+			wantConsumerBatchMessages: 100, wantConsumerBatchBytes: 4 << 20,
+			wantConsumerBatchWait: 25 * time.Millisecond,
 		},
 		{
 			name: "single rate and gate",
 			environment: map[string]string{
 				"CAPACITY_RATES": "500", "CAPACITY_STAGE_DURATION": "10s", "CAPACITY_MIN_RATE": "500",
 				"OUTBOX_RESERVATION_BATCH_SIZE": "32",
+				"CONSUMER_MODE":                 "batch", "CONSUMER_BATCH_MAX_MESSAGES": "64",
+				"CONSUMER_BATCH_MAX_BYTES": "2097152", "CONSUMER_BATCH_MAX_WAIT": "40ms",
 			},
 			wantRates: []int{500}, wantStage: 10 * time.Second,
 			wantDrain: 30 * time.Second, wantMinimum: 500,
 			wantWarmup: 15 * time.Second, wantWorkers: 4, wantBatch: 32,
 			wantProducerMax: 9, wantRelayMax: 1,
 			wantConsumers: 4, wantDBMax: 32,
-			wantPayload: demo.CapacityPayloadMixed,
+			wantConsumerMode:          demo.ConsumerModeBatch,
+			wantConsumerBatchMessages: 64, wantConsumerBatchBytes: 2 << 20,
+			wantConsumerBatchWait: 40 * time.Millisecond,
+			wantPayload:           demo.CapacityPayloadMixed,
 		},
 	}
 	for _, test := range tests {
@@ -83,10 +101,29 @@ func TestConfigProfilesAndOverrides(t *testing.T) {
 				config.OutboxProducerMaxConns != test.wantProducerMax ||
 				config.OutboxRelayMaxConns != test.wantRelayMax ||
 				config.ConsumerConcurrency != test.wantConsumers || config.DBMaxOpenConns != test.wantDBMax ||
+				config.ConsumerMode != test.wantConsumerMode ||
+				config.ConsumerBatchMaxMessages != test.wantConsumerBatchMessages ||
+				config.ConsumerBatchMaxBytes != test.wantConsumerBatchBytes ||
+				config.ConsumerBatchMaxWait != test.wantConsumerBatchWait ||
 				config.PayloadProfile != test.wantPayload {
 				t.Fatalf("config = %#v", config)
 			}
 		})
+	}
+}
+
+func TestConfigRejectsInvalidConsumerBatchSettings(t *testing.T) {
+	t.Parallel()
+	tests := []map[string]string{
+		{"CONSUMER_MODE": "automatic"},
+		{"CONSUMER_BATCH_MAX_MESSAGES": "-1"},
+		{"CONSUMER_BATCH_MAX_BYTES": "0"},
+		{"CONSUMER_BATCH_MAX_WAIT": "0s"},
+	}
+	for _, environment := range tests {
+		if _, err := fromLookup(mapLookup(environment), time.Now); err == nil {
+			t.Fatalf("fromLookup(%v) unexpectedly succeeded", environment)
+		}
 	}
 }
 

@@ -15,6 +15,20 @@ services:
       - track_io_timing=on
       - -c
       - track_wal_io_timing=on
+      - -c
+      - checkpoint_timeout=${POSTGRES_CHECKPOINT_TIMEOUT:-5min}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-1GB}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - wal_buffers=${POSTGRES_WAL_BUFFERS:--1}
+      - -c
+      - fsync=on
+      - -c
+      - synchronous_commit=on
+      - -c
+      - full_page_writes=on
     environment:
       POSTGRES_DB: gomessenger
       POSTGRES_USER: gomessenger
@@ -26,18 +40,24 @@ services:
       retries: 15
     volumes:
       - capacity-postgres-data:/var/lib/postgresql
+    cpuset: "0-1"
+    mem_limit: 1g
+    memswap_limit: 1g
 
   nats:
-    image: nats:2.12.3-alpine
+    image: ${NATS_IMAGE:-nats:2.12.3-alpine}
     command: ["-c", "/etc/nats/nats-server.conf"]
     volumes:
       - ./nats-server.conf:/etc/nats/nats-server.conf:ro
       - capacity-nats-data:/data
+    cpuset: "0-1"
+    mem_limit: 512m
+    memswap_limit: 512m
 
   capacity-api:
     build:
-      context: ../..
-      dockerfile: examples/durable-postgres-nats/Dockerfile.capacity
+      context: ${CAPACITY_BUILD_CONTEXT:-../../tmp/capacity-build-context}
+      dockerfile: gomessenger/examples/durable-postgres-nats/Dockerfile.capacity
       target: capacity-api
     environment:
       POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable&application_name=gomessenger-capacity-api
@@ -47,7 +67,16 @@ services:
       OUTBOX_RESERVATION_BATCH_SIZE: ${OUTBOX_RESERVATION_BATCH_SIZE:-1}
       OUTBOX_PRODUCER_MAX_CONNS: ${OUTBOX_PRODUCER_MAX_CONNS:-9}
       OUTBOX_RELAY_MAX_CONNS: ${OUTBOX_RELAY_MAX_CONNS:-1}
+      OUTBOX_INGRESS_MODE: ${OUTBOX_INGRESS_MODE:-single}
+      OUTBOX_RELAY_MODE: ${OUTBOX_RELAY_MODE:-single}
+      OUTBOX_BATCH_MAX_MESSAGES: ${OUTBOX_BATCH_MAX_MESSAGES:-1}
+      OUTBOX_BATCH_MAX_BYTES: ${OUTBOX_BATCH_MAX_BYTES:-4194304}
+      OUTBOX_BATCH_MAX_WAIT: ${OUTBOX_BATCH_MAX_WAIT:-25ms}
       NATS_CONSUMER_CONCURRENCY: ${NATS_CONSUMER_CONCURRENCY:-4}
+      CONSUMER_MODE: ${CONSUMER_MODE:-single}
+      CONSUMER_BATCH_MAX_MESSAGES: ${CONSUMER_BATCH_MAX_MESSAGES:-100}
+      CONSUMER_BATCH_MAX_BYTES: ${CONSUMER_BATCH_MAX_BYTES:-4194304}
+      CONSUMER_BATCH_MAX_WAIT: ${CONSUMER_BATCH_MAX_WAIT:-25ms}
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-32}
     depends_on:
       postgres:
@@ -55,11 +84,16 @@ services:
       nats:
         condition: service_started
     init: true
+    cpuset: "0-1"
+    mem_limit: 512m
+    memswap_limit: 512m
+    ports:
+      - "127.0.0.1:${CAPACITY_HTTP_PORT:-18080}:8080"
 
   capacity-runner:
     build:
-      context: ../..
-      dockerfile: examples/durable-postgres-nats/Dockerfile.capacity
+      context: ${CAPACITY_BUILD_CONTEXT:-../../tmp/capacity-build-context}
+      dockerfile: gomessenger/examples/durable-postgres-nats/Dockerfile.capacity
       target: capacity-runner
     environment:
       POSTGRES_DSN: postgres://gomessenger:gomessenger@postgres:5432/gomessenger?sslmode=disable
@@ -77,18 +111,35 @@ services:
       CAPACITY_SAMPLE_INTERVAL: ${CAPACITY_SAMPLE_INTERVAL:-}
       CAPACITY_READY_TIMEOUT: ${CAPACITY_READY_TIMEOUT:-}
       CAPACITY_E2E_P95_SLO: ${CAPACITY_E2E_P95_SLO:-}
+      CAPACITY_CHECKPOINT_TIMEOUT: ${CAPACITY_CHECKPOINT_TIMEOUT:-}
       CAPACITY_PAYLOAD_PROFILE: ${CAPACITY_PAYLOAD_PROFILE:-}
       OUTBOX_WORKERS: ${OUTBOX_WORKERS:-4}
       OUTBOX_RESERVATION_BATCH_SIZE: ${OUTBOX_RESERVATION_BATCH_SIZE:-1}
       OUTBOX_PRODUCER_MAX_CONNS: ${OUTBOX_PRODUCER_MAX_CONNS:-9}
       OUTBOX_RELAY_MAX_CONNS: ${OUTBOX_RELAY_MAX_CONNS:-1}
+      OUTBOX_INGRESS_MODE: ${OUTBOX_INGRESS_MODE:-single}
+      OUTBOX_RELAY_MODE: ${OUTBOX_RELAY_MODE:-single}
+      OUTBOX_BATCH_MAX_MESSAGES: ${OUTBOX_BATCH_MAX_MESSAGES:-1}
+      OUTBOX_BATCH_MAX_BYTES: ${OUTBOX_BATCH_MAX_BYTES:-4194304}
+      OUTBOX_BATCH_MAX_WAIT: ${OUTBOX_BATCH_MAX_WAIT:-25ms}
       NATS_CONSUMER_CONCURRENCY: ${NATS_CONSUMER_CONCURRENCY:-4}
+      CONSUMER_MODE: ${CONSUMER_MODE:-single}
+      CONSUMER_BATCH_MAX_MESSAGES: ${CONSUMER_BATCH_MAX_MESSAGES:-100}
+      CONSUMER_BATCH_MAX_BYTES: ${CONSUMER_BATCH_MAX_BYTES:-4194304}
+      CONSUMER_BATCH_MAX_WAIT: ${CONSUMER_BATCH_MAX_WAIT:-25ms}
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-32}
       CAPACITY_HOST_OS: ${CAPACITY_HOST_OS:-unknown}
       CAPACITY_HOST_ARCH: ${CAPACITY_HOST_ARCH:-unknown}
       CAPACITY_HOST_CPUS: ${CAPACITY_HOST_CPUS:-unknown}
       CAPACITY_GIT_COMMIT: ${CAPACITY_GIT_COMMIT:-unknown}
       CAPACITY_GIT_DIRTY: ${CAPACITY_GIT_DIRTY:-unknown}
+      CAPACITY_OUTBOX_GIT_COMMIT: ${CAPACITY_OUTBOX_GIT_COMMIT:-unknown}
+      CAPACITY_OUTBOX_GIT_DIRTY: ${CAPACITY_OUTBOX_GIT_DIRTY:-unknown}
+      CAPACITY_POSTGRES_PROFILE: ${CAPACITY_POSTGRES_PROFILE:-stock}
+      CAPACITY_POSTGRES_IMAGE: ${CAPACITY_POSTGRES_IMAGE:-unknown}
+      CAPACITY_POSTGRES_IMAGE_DIGEST: ${CAPACITY_POSTGRES_IMAGE_DIGEST:-unknown}
+      CAPACITY_NATS_IMAGE: ${CAPACITY_NATS_IMAGE:-unknown}
+      CAPACITY_NATS_IMAGE_DIGEST: ${CAPACITY_NATS_IMAGE_DIGEST:-unknown}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,8 +148,9 @@ services:
       capacity-api:
         condition: service_started
     volumes:
-      - ../../tmp/capacity:/results
+      - ${CAPACITY_RESULTS_HOST_DIR:-../../tmp/capacity}:/results
     init: true
+    cpuset: "2-11"
 
 volumes:
   capacity-postgres-data:

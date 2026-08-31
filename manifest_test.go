@@ -87,7 +87,7 @@ func TestManifestValidateAllIdentityBoundaries(t *testing.T) {
 			want: messenger.ErrRouteConflict,
 		},
 		{
-			name: "handler",
+			name: testHandlerLiteral,
 			edit: func(value *messenger.Manifest) { value.Descriptors[0].HandlerIDs = []string{"bad handler"} },
 			want: messenger.ErrHandlerConflict,
 		},

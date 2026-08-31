@@ -189,6 +189,8 @@ func (defaultFailureSanitizer) SanitizeFailure(err error) string {
 		return ErrMessageNotReady.Error()
 	case errors.Is(err, ErrInvalidMessage):
 		return ErrInvalidMessage.Error()
+	case errors.Is(err, ErrInvalidBatchResult):
+		return ErrInvalidBatchResult.Error()
 	default:
 		return "messenger: operation failed"
 	}

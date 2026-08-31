@@ -109,7 +109,8 @@ need an idempotency key accepted by that system, or their own durable hand-off i
 PostgreSQL suppression relies on one transaction containing the identity insert, handler business writes, and completed
 marker. The unique key serializes concurrent new identities. Bounded handling keeps its durable attempt update outside a
 handler savepoint in that transaction, so failed business writes roll back while the invocation count commits; an
-already persisted incomplete identity is row-locked before the next attempt.
+already persisted incomplete identity is row-locked before the next attempt. A `DeferAfter` outcome is the exception:
+its business writes roll back and its attempt remains unchanged.
 
 That SQL transaction remains open for the full handler invocation. The host sizes and monitors the shared
 `database/sql` pool; it is the intended connection backpressure boundary and the Inbox adapter adds no second semaphore.
@@ -125,6 +126,72 @@ fresh bounded counter; redeliveries in the same generation continue that counter
 independent counters. Cleanup removes only the selected generation and keeps an incomplete logical identity while any
 other attempt generation remains. This keeps explicit replay independent from best-effort post-ACK cleanup without
 allowing broker redelivery to reset `MaxAttempts`.
+
+## Producer and relay batch contract
+
+`BatchRoute` is an optional, atomic command/event staging capability. The
+supported implementation is `outboxadapter.NewBatchProducer`; local and direct
+NATS/Kafka routes do not implement it. `SendBatch`, `SendMessageBatch`,
+`PublishBatch`, and `PublishMessageBatch` therefore return
+`ErrUnsupportedCapability` instead of falling back to repeated single calls.
+
+A typed batch call must be non-empty. GoMessenger creates and validates all
+metadata first, rejects repeated `MessageID` values, canonicalizes every
+envelope, calls `BatchRoute.DeliverBatch` once, and returns one receipt per
+input in the original order. The Outbox adapter stages the complete set through
+`PutVersionedUniqueBatch` inside the host transaction. Any validation,
+idempotency, or database error fails the complete call; no partial receipt is a
+success guarantee.
+
+`outboxadapter.NewBatchRelayJob` is registered with the separate Outbox
+`RegisterBatchJob` API. It validates every stored envelope and passes the valid
+subset once to `BatchEnvelopePublisher`. NATS uses one bounded asynchronous
+publication group with an independent deterministic message ID and confirmed
+`PubAck` for every item. Kafka produces the valid subset as multiple records in
+one broker transaction; produce or commit failure retries the whole subset.
+Permanent validation failures remain individual outcomes.
+
+Old producer constructors, `NewRelayJob`, and Outbox reservation batching keep
+their single-message behavior. Reservation size is prefetch only and does not
+activate the true handler or broker batch path. See
+[ADR-0006](decisions/0006-producer-relay-batching.md).
+
+## Batch consumer contract
+
+`BatchHandler[T]` is a separate durable-consumer API; it does not change producers, Outbox, relay, local handlers, or
+queries. NATS and Kafka provide batch command and event constructors. Existing single-message middleware is not repeated
+over a batch and is rejected by batch constructors; `BatchConfig` contains batch-only middleware.
+
+The zero-value `BatchConfig` means 100 messages, 4 MiB of canonical envelope bytes, and 25 ms after the first admitted
+message. A batch flushes at the first limit. `MaxMessages=1` follows the identical engine. `Concurrency` counts active
+batch invocations, not messages.
+
+The handler receives unique active messages in broker order. Results are keyed by `(Source, MessageID)`, may be returned
+in any order, and must cover the input exactly once. Equal identity and fingerprint deliveries coalesce; a completed
+identity is ACKed without handler replay; an identity/fingerprint conflict is an individual terminal DLQ outcome.
+Missing, duplicate, or unknown result keys are `ErrInvalidBatchResult` and fail the consumer closed.
+`NewBatchResultBuilder[T](messages)` simplifies constructing an exact-cover result in original input order,
+defaulting items to success and allowing individual items to be marked with `builder.Fail(msg, err)`.
+
+One invocation and all Inbox finalization use one SQL transaction. The handler must classify the complete input before
+issuing business SQL and must write only for successful items. GoMessenger does not infer which SQL statement belongs
+to which message and does not add automatic per-item savepoints.
+
+- item success commits and ACKs;
+- item ordinary error or `RetryAfter` consumes an attempt and retries, then enters DLQ at the limit;
+- item `DeferAfter` does not consume an attempt and uses its exact delay;
+- item `Permanent` commits terminal state and enters DLQ;
+- a transient top-level error, panic, or timeout rolls back all batch writes and retries without changing item attempts;
+- top-level `Permanent`, a non-empty result paired with a top-level error, or an invalid exact-cover result rolls back
+  and fails the consumer closed.
+
+PostgreSQL and SQLite implement the optional `BatchAttemptBackend` capability; a batch constructor rejects stores whose
+backend lacks it. No new Inbox table is required.
+
+NATS supports command native envelopes and event native/structured/binary CloudEvents. Confirmed ACK, delayed NAK, and
+publish-confirmed DLQ handoff remain per delivery after the SQL commit. Kafka batches only an ascending contiguous range
+from one concrete topic-partition. One Kafka transaction publishes all retry/DLQ records and commits that range's
+offset; unrelated polled records are rewound. Neither transport promises global ordering after a partial retry.
 
 ## Handler middleware
 
@@ -159,6 +226,7 @@ logical `Time` remains inside the canonical envelope.
 
 - `Permanent(err)` means retrying the same message cannot succeed without changing the input or code.
 - `RetryAfter(err, delay)` requests a durable delay and must not be implemented only as an in-memory sleep.
+- `DeferAfter(err, delay)` requests an exact durable delay without consuming a handler attempt.
 - an unclassified error is retryable and is bounded by adapter attempt limits.
 - a panic is recovered at a delivery boundary and treated as a failed attempt; the process runtime stays supervised.
   Ordinary errors, observations, logs, and DLQ records receive only the transport-neutral `HandlerPanicError` interface;

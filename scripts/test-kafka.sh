@@ -63,7 +63,7 @@ for version in $versions; do
 		GOWORK=off \
 			GOMESSENGER_KAFKA_BROKERS="127.0.0.1:${port}" \
 			GOMESSENGER_KAFKA_VERSION="$version" \
-			go test -race -count=1 -run '^TestKafkaPipeline$' ./...
+			go test -race -count=1 -run '^TestKafka(Batch)?Pipeline$' ./...
 	); then
 		docker logs --tail 300 "$container" >&2 || true
 		exit 1

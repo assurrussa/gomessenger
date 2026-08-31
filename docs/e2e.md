@@ -76,19 +76,25 @@ with:
 ```sh
 make capacity-nats
 make capacity-nats-site
+make capacity-frontier
+make capacity-frontier-matrix
 make capacity-inbox-postgres
 ```
 
 `make capacity-nats-full` runs the longer schedule; `CAPACITY_RATES=500 make capacity-nats` isolates one rate; and
 `CAPACITY_MIN_RATE=500 make capacity-nats` turns the result into a checkout-local performance gate. The controller uses
-k6 `constant-arrival-rate`, performs a separate warm-up, samples PostgreSQL/application/JetStream state each second,
-drains after every stage, and stops at the first unsustainable rate.
+k6 `constant-arrival-rate`, performs a separate warm-up, samples lightweight
+stage-local application progress plus PostgreSQL waits and JetStream state each
+second, drains after every stage, and stops at the first unsustainable rate.
+Exact load-window and post-drain reconciliation remains SQL-backed; verifier
+sessions disable PostgreSQL parallel gather so measurement cannot consume SUT
+parallel workers or Docker shared memory.
 
-`make capacity-nats-site` reproduces PostgreSQL 17, Outbox workers `2`, reservation batch `1`, consumer `1`, and isolated Outbox producer/relay
-`9 + 1` pgx budget, and separate Inbox/measurement pool `10` topology with a
-small deterministic payload and one two-minute `2000 msg/s` stage. Override the
-schedule with `CAPACITY_RATES`. Set
-`CAPACITY_PAYLOAD_PROFILE=mixed` for the existing 80/15/5 payload mix. `make capacity-inbox-postgres` removes HTTP,
+The historical site-shaped command remains available for screening. New
+frontier claims use PostgreSQL 18, a shared two-CPU/2-GiB SUT limit, fresh
+volumes, checkpoint-aware preconditioning, and report spec 2.1. The matrix
+selects a fixed topology before comparing legacy, consumer-batch, relay-batch,
+and full-batch paths for small and mixed payloads. `make capacity-inbox-postgres` removes HTTP,
 Outbox, and NATS and measures the real PostgreSQL `ProcessAttempt` path for concurrency `1` and `4`, with three
 repetitions of `20,000` measured operations after a `1,000`-operation warm-up.
 
@@ -122,9 +128,11 @@ consumer MiB/s = exact canonical envelope bytes for committed message IDs / load
 After drain, accepted HTTP responses must reconcile exactly with business orders, transactional envelope measurements,
 JetStream-confirmed publications, stream message delta, and unique projections. Integrity failures exit nonzero;
 ordinary performance saturation reports the first unsustainable stage, while passing the whole schedule reports
-`capacity >= maximum tested rate`. Capacity report spec `1.3` records the exact
-Outbox module version used by the binary, separate relay/consumer rates and
-lags, and no longer emits the former `effective*` fields. Reports and raw
+`capacity >= maximum tested rate`. Capacity report spec `2.1` records exact
+checkout and image provenance, runtime-confirmed ingress/relay/consumer modes,
+batch calls/sizes/latency/outcomes, separate relay/consumer rates and lags,
+producer/relay pool connection health, normalized SQL/transaction/WAL/checkpoint cost, resource limits, pprof, and
+PostgreSQL execution plans. Reports and raw
 samples live under ignored `tmp/capacity/<run-id>/`.
 
 The isolated PostgreSQL stacks preload `pg_stat_statements` and enable query IDs, utility tracking, I/O timing, and WAL
@@ -153,6 +161,11 @@ handled before the two-second retry deadline and that exactly one second handler
 also proves declarative topic convergence, transactional direct publish, retry hand-off, Inbox attempt accounting,
 Outbox relay and duplicate suppression, transactional DLQ, protected replay, static worker identity, read-committed
 visibility, and graceful runtime shutdown.
+
+The gate also runs a real batch event consumer. Three same-partition records
+enter one handler invocation and one SQLite Inbox transaction; one item retries
+through the Kafka transaction while the successful subset commits, and final
+business effects reconcile exactly.
 
 The same target runs locally and in independent hosted matrix jobs for both supported Kafka versions. It does not prove
 multi-broker failover, capacity, production credentials, deployment, or a live operational smoke.

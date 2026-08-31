@@ -233,7 +233,7 @@ func TestMessengerSyncQueryMetadataLineageMiddlewareAndObservations(t *testing.T
 		ctx context.Context,
 		message messenger.Message[findArticle],
 	) (articleView, error) {
-		middlewareOrder = append(middlewareOrder, "handler")
+		middlewareOrder = append(middlewareOrder, testHandlerLiteral)
 		if ctx.Value(queryContextKey{}) != "from-middleware" {
 			return articleView{}, errors.New("replacement context missing")
 		}
@@ -411,7 +411,7 @@ func TestQueryMiddlewareErrorsPanicsAndSyntheticResults(t *testing.T) {
 		handler := messenger.ChainQueryHandler(
 			func(context.Context, messenger.Message[int]) (string, error) {
 				calls.Add(1)
-				return "handler", nil
+				return testHandlerLiteral, nil
 			},
 			func(messenger.QueryHandler[int, string]) messenger.QueryHandler[int, string] {
 				return func(context.Context, messenger.Message[int]) (string, error) { return "cached", nil }

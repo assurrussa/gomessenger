@@ -143,6 +143,13 @@ separate opt-in to franz-go's internal logger and follows franz-go's own logging
 `NewCommandConsumer` has the same lifecycle and retry contract. The Inbox backend must support durable attempts and the
 handler must use `inbox.SQLTxFromContext` for database writes that need atomic Inbox completion.
 
+`NewBatchCommandConsumer` and `NewBatchEventConsumer` select the separate true-batch path. They take the same
+`HandlerConfig` plus `messenger.BatchConfig`; single-message middleware is rejected. Each invocation contains only an
+ascending contiguous range from one concrete topic-partition and uses one Inbox/business transaction. The result must
+cover every handler message exactly once by source and message ID. One Kafka transaction then publishes all retry/DLQ
+records and commits the range offset. Polled records outside that range are rewound. See
+[ADR-0005](decisions/0005-batch-consumer.md) for partial-outcome and top-level retry semantics.
+
 For a transactional producer database path, give the same Kafka route to `outboxadapter.NewRelayJob`; the relay sends
 the persisted canonical bytes without rebuilding identity or timestamps. A direct route receipt becomes
 `broker_confirmed` only after its Kafka transaction commits. The immutable logical creation time stays in the envelope;
@@ -151,8 +158,8 @@ source retention as already-old records.
 
 ## Retry, ordering, and terminal hand-off
 
-One worker is one Kafka group member and processes one record at a time. On success, the consumed offset commits in a
-Kafka transaction. On a retryable failure, the same canonical bytes and key move to the selected retry topic with an
+One worker is one Kafka group member and processes either one record or one configured same-partition batch at a time.
+On success, the consumed offset commits in a Kafka transaction. On a retryable failure, the same canonical bytes and key move to the selected retry topic with an
 exact `not-before`, atomically with the source offset. Workers use franz-go's blocked-rebalance poll mode only for a
 bounded preflight: adapter-owned control-header parsing plus native envelope structure, descriptor, record-key, and
 expiry validation, followed by any exact pause/rewind. This bounded work never calls the application codec. A retry is
@@ -216,7 +223,8 @@ compatibility entry point, while hosted CI runs one independent matrix job per s
 make test-kafka
 ```
 
-It runs the transactional direct/Outbox/Inbox/retry/DLQ/replay pipeline against Kafka 4.1.2 and 4.3.1. Passing it proves
+It runs the transactional direct/Outbox/Inbox/retry/DLQ/replay pipeline and the partial-outcome batch pipeline against
+Kafka 4.1.2 and 4.3.1. Passing it proves
 the tested checkout and scenarios, not production capacity, multi-broker failover, deployment, or a live smoke.
 
 The design rationale and deliberately separate NATS/Kafka implementations are recorded in

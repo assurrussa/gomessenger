@@ -8,12 +8,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
 )
 
-const maxCreateOrderBodyBytes = 96 << 10
+const (
+	maxCreateOrderBodyBytes      = 96 << 10
+	maxCreateOrderBatchBodyBytes = 10 << 20
+)
 
 type capacityHTTPService interface {
 	StageOrder(
@@ -25,6 +29,15 @@ type capacityHTTPService interface {
 	Readiness(ctx context.Context) error
 	Stats(ctx context.Context, labels BenchmarkLabels) (AppStats, error)
 	FlushPublications(ctx context.Context) error
+}
+
+type capacityHTTPBatchService interface {
+	StageOrders(
+		ctx context.Context,
+		orders []OrderCreated,
+		labels BenchmarkLabels,
+		offeredAt time.Time,
+	) ([]messenger.Receipt, error)
 }
 
 type capacityHTTPHandler struct {
@@ -43,10 +56,92 @@ func NewHTTPHandler(service capacityHTTPService, log *slog.Logger) (http.Handler
 	handler := &capacityHTTPHandler{service: service, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /orders", handler.createOrder)
+	mux.HandleFunc("POST /orders/batch", handler.createOrderBatch)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /benchmark/stats", handler.stats)
 	mux.HandleFunc("POST /benchmark/publications/flush", handler.flushPublications)
+	// The capacity binary is checkout-local. Exposing pprof through the same
+	// loopback-published listener keeps every frontier run diagnosable without
+	// introducing another application lifecycle.
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("POST /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	return mux, nil
+}
+
+func (h *capacityHTTPHandler) createOrderBatch(writer http.ResponseWriter, request *http.Request) {
+	service, ok := h.service.(capacityHTTPBatchService)
+	if !ok {
+		writeJSONError(writer, http.StatusNotImplemented, "batch ingress is not configured")
+		return
+	}
+	labels := BenchmarkLabels{
+		RunID:   request.Header.Get("X-GoMessenger-Capacity-Run"),
+		StageID: request.Header.Get("X-GoMessenger-Capacity-Stage"),
+	}
+	if err := labels.Validate(); err != nil {
+		writeJSONError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxCreateOrderBatchBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input struct {
+		Orders []CreateOrderRequest `json:"orders"`
+	}
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(writer, http.StatusBadRequest, "decode order batch: "+err.Error())
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		writeJSONError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(input.Orders) < 1 || len(input.Orders) > 100 {
+		writeJSONError(writer, http.StatusBadRequest, "orders must contain 1..100 entries")
+		return
+	}
+	orders := make([]OrderCreated, len(input.Orders))
+	for index, requestOrder := range input.Orders {
+		order, err := NewOrder(requestOrder)
+		if err != nil {
+			writeJSONError(writer, http.StatusBadRequest, fmt.Sprintf("orders[%d]: %v", index, err))
+			return
+		}
+		orders[index] = order
+	}
+	offeredAt, err := capacityOfferedAt(request)
+	if err != nil {
+		writeJSONError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	receipts, err := service.StageOrders(request.Context(), orders, labels, offeredAt)
+	if err != nil {
+		h.log.Error("stage capacity order batch", "error", err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSONError(writer, status, "order batch was not staged")
+		return
+	}
+	type responseItem struct {
+		OrderID   string                 `json:"orderId"`
+		MessageID string                 `json:"messageId"`
+		State     messenger.ReceiptState `json:"state"`
+	}
+	response := make([]responseItem, len(receipts))
+	for index, receipt := range receipts {
+		response[index] = responseItem{
+			OrderID: orders[index].OrderID, MessageID: receipt.MessageID.String(), State: receipt.State,
+		}
+	}
+	writeJSON(writer, http.StatusAccepted, struct {
+		Orders []responseItem `json:"orders"`
+	}{Orders: response})
 }
 
 // RunHTTPServer serves until cancellation, then closes admission and performs
@@ -139,13 +234,10 @@ func (h *capacityHTTPHandler) createOrder(writer http.ResponseWriter, request *h
 		writeJSONError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	offeredAt := time.Now().UTC()
-	if rawOfferedAt := request.Header.Get(CapacityOfferedAtHeader); rawOfferedAt != "" {
-		offeredAt, err = time.Parse(time.RFC3339Nano, rawOfferedAt)
-		if err != nil {
-			writeJSONError(writer, http.StatusBadRequest, "invalid offered-at timestamp")
-			return
-		}
+	offeredAt, err := capacityOfferedAt(request)
+	if err != nil {
+		writeJSONError(writer, http.StatusBadRequest, err.Error())
+		return
 	}
 	receipt, err := h.service.StageOrder(request.Context(), payload, labels, offeredAt)
 	if err != nil {
@@ -162,6 +254,18 @@ func (h *capacityHTTPHandler) createOrder(writer http.ResponseWriter, request *h
 		MessageID string                 `json:"messageId"`
 		State     messenger.ReceiptState `json:"state"`
 	}{OrderID: payload.OrderID, MessageID: receipt.MessageID.String(), State: receipt.State})
+}
+
+func capacityOfferedAt(request *http.Request) (time.Time, error) {
+	offeredAt := time.Now().UTC()
+	if raw := request.Header.Get(CapacityOfferedAtHeader); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return time.Time{}, errors.New("invalid offered-at timestamp")
+		}
+		offeredAt = parsed.UTC()
+	}
+	return offeredAt, nil
 }
 
 func (h *capacityHTTPHandler) health(writer http.ResponseWriter, request *http.Request) {

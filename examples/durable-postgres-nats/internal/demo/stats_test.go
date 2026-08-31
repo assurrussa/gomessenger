@@ -43,7 +43,7 @@ func TestOutboxStatsFromSnapshotReportsExactCapabilitiesAndGlobalOldestReady(t *
 	}
 
 	stats := outboxStatsFromSnapshot(queue, supports)
-	if stats.ObservedAt != observedAt || stats.Total != 11 || stats.Available != 8 || stats.Processing != 3 {
+	if !stats.ObservedAt.Equal(observedAt) || stats.Total != 11 || stats.Available != 8 || stats.Processing != 3 {
 		t.Fatalf("aggregate stats = %#v", stats)
 	}
 	if stats.OldestAvailableAt == nil || !stats.OldestAvailableAt.Equal(unsupportedOldest) {

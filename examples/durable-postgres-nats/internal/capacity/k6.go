@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"example.com/gomessenger-durable-postgres-nats/internal/demo"
 )
 
 type k6Process struct {
@@ -43,8 +45,13 @@ func startK6(
 		return nil, fmt.Errorf("create k6 stage log: %w", err)
 	}
 	summaryPath := stageBase + ".json"
-	preallocatedVUs := max(16, int(math.Ceil(float64(rate)*0.25)))
-	maximumVUs := max(preallocatedVUs, int(math.Ceil(float64(rate)*config.E2EP95SLO.Seconds()*1.25)))
+	ingressBatchSize := 1
+	if config.OutboxIngressMode == demo.OutboxModeBatch {
+		ingressBatchSize = config.OutboxBatchMaxMessages
+	}
+	requestRate := float64(rate) / float64(ingressBatchSize)
+	preallocatedVUs := max(16, int(math.Ceil(requestRate*0.25)))
+	maximumVUs := max(preallocatedVUs, int(math.Ceil(requestRate*config.E2EP95SLO.Seconds()*1.25)))
 	processCtx, cancel := context.WithCancel(ctx)
 	// The binary and script are explicit local capacity-runner settings, never HTTP input.
 	//nolint:gosec // Running that configured executable is the controller's purpose.
@@ -59,6 +66,8 @@ func startK6(
 		"CAPACITY_MAX_VUS="+strconv.Itoa(maximumVUs),
 		"CAPACITY_K6_SUMMARY="+summaryPath,
 		"CAPACITY_PAYLOAD_PROFILE="+config.PayloadProfile,
+		"CAPACITY_INGRESS_MODE="+string(config.OutboxIngressMode),
+		"CAPACITY_INGRESS_BATCH_SIZE="+strconv.Itoa(ingressBatchSize),
 	)
 	writer := io.MultiWriter(os.Stdout, logFile)
 	command.Stdout = writer
@@ -104,15 +113,19 @@ func readK6Result(summaryPath string, exitCode int) (K6Result, error) {
 	if err := json.Unmarshal(summaryData, &summary); err != nil {
 		return K6Result{}, fmt.Errorf("decode k6 summary: %w", err)
 	}
-	iterations, err := requiredMetric(summary, "iterations", "count")
+	iterations, err := requiredCountMetric(summary, "iterations")
 	if err != nil {
 		return K6Result{}, err
 	}
-	accepted, err := requiredMetric(summary, "accepted_orders", "count")
+	accepted, err := requiredCountMetric(summary, "accepted_orders")
 	if err != nil {
 		return K6Result{}, err
 	}
-	httpRequests, err := requiredMetric(summary, "http_reqs", "count")
+	offered, err := requiredCountMetric(summary, "offered_orders")
+	if err != nil {
+		return K6Result{}, err
+	}
+	httpRequests, err := requiredCountMetric(summary, "http_reqs")
 	if err != nil {
 		return K6Result{}, err
 	}
@@ -120,7 +133,7 @@ func readK6Result(summaryPath string, exitCode int) (K6Result, error) {
 		ExitCode:             exitCode,
 		Iterations:           int64(math.Round(iterations)),
 		DroppedIterations:    int64(math.Round(optionalMetric(summary, "dropped_iterations", "count"))),
-		OfferedIterations:    int64(math.Round(iterations + optionalMetric(summary, "dropped_iterations", "count"))),
+		OfferedIterations:    int64(math.Round(offered)),
 		AcceptedOrders:       int64(math.Round(accepted)),
 		HTTPRequests:         int64(math.Round(httpRequests)),
 		HTTPFailureRate:      optionalMetric(summary, "http_req_failed", "rate"),
@@ -142,14 +155,14 @@ func (p *k6Process) abort() error {
 	return closeErr
 }
 
-func requiredMetric(summary rawK6Summary, name, value string) (float64, error) {
+func requiredCountMetric(summary rawK6Summary, name string) (float64, error) {
 	metric, ok := summary.Metrics[name]
 	if !ok {
 		return 0, fmt.Errorf("k6 summary is missing metric %q", name)
 	}
-	result, ok := metric.Values[value]
+	result, ok := metric.Values["count"]
 	if !ok {
-		return 0, fmt.Errorf("k6 metric %q is missing value %q", name, value)
+		return 0, fmt.Errorf("k6 metric %q is missing value %q", name, "count")
 	}
 	return result, nil
 }

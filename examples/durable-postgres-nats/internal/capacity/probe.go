@@ -145,15 +145,11 @@ func (p *probe) snapshot(
 	phase string,
 	elapsed time.Duration,
 ) (Sample, error) {
-	business, err := p.businessSnapshot(ctx, labels)
+	application, err := p.applicationStats(ctx, labels)
 	if err != nil {
 		return Sample{}, err
 	}
 	broker, err := p.brokerSnapshot(ctx)
-	if err != nil {
-		return Sample{}, err
-	}
-	application, err := p.applicationStats(ctx)
 	if err != nil {
 		return Sample{}, err
 	}
@@ -164,8 +160,18 @@ func (p *probe) snapshot(
 	return Sample{
 		ObservedAt: time.Now().UTC(), RunID: labels.RunID, StageID: labels.StageID,
 		Phase: phase, ElapsedSeconds: elapsed.Seconds(),
-		Business: business, Broker: broker, Application: application, PostgreSQLWaits: waits,
+		Business: businessSnapshotFromApplication(application),
+		Broker:   broker, Application: application, PostgreSQLWaits: waits,
 	}, nil
+}
+
+func businessSnapshotFromApplication(application demo.AppStats) BusinessSnapshot {
+	return BusinessSnapshot{
+		Accepted:  application.Benchmark.Accepted,
+		Staged:    application.Benchmark.Staged,
+		Published: application.Benchmark.Published,
+		Committed: application.Benchmark.Committed,
+	}
 }
 
 func (p *probe) businessSnapshot(
@@ -428,19 +434,63 @@ func (p *probe) environment(ctx context.Context, config Config) (Environment, er
 	if output, err := exec.CommandContext(versionCtx, config.K6Binary, "version").CombinedOutput(); err == nil {
 		k6Version = strings.TrimSpace(string(output))
 	}
+	application, err := p.applicationStats(ctx)
+	if err != nil {
+		return Environment{}, fmt.Errorf("read capacity application runtime config: %w", err)
+	}
+	expectedConsumer := demo.ConsumerRuntimeStats{
+		Mode: config.ConsumerMode, Concurrency: config.ConsumerConcurrency,
+		BatchMaxMessages:   config.ConsumerBatchMaxMessages,
+		BatchMaxBytes:      config.ConsumerBatchMaxBytes,
+		BatchMaxWaitMillis: float64(config.ConsumerBatchMaxWait) / float64(time.Millisecond),
+	}
+	if application.ConsumerRuntime != expectedConsumer {
+		return Environment{}, fmt.Errorf(
+			"capacity consumer runtime config drift: got %#v, want %#v",
+			application.ConsumerRuntime, expectedConsumer,
+		)
+	}
+	expectedOutbox := demo.OutboxRuntimeStats{
+		IngressMode: config.OutboxIngressMode, RelayMode: config.OutboxRelayMode,
+		BatchMaxMessages:   config.OutboxBatchMaxMessages,
+		BatchMaxBytes:      config.OutboxBatchMaxBytes,
+		BatchMaxWaitMillis: float64(config.OutboxBatchMaxWait) / float64(time.Millisecond),
+	}
+	if application.OutboxRuntime != expectedOutbox {
+		return Environment{}, fmt.Errorf(
+			"capacity Outbox runtime config drift: got %#v, want %#v",
+			application.OutboxRuntime, expectedOutbox,
+		)
+	}
 	return Environment{
 		GoVersion: runtime.Version(), ContainerOS: runtime.GOOS, ContainerArch: runtime.GOARCH,
 		OutboxVersion: outboxModuleVersion(),
 		ContainerCPUs: runtime.NumCPU(), HostOS: config.HostOS, HostArch: config.HostArch,
 		HostCPUs: config.HostCPUs, GitCommit: config.GitCommit, GitDirty: config.GitDirty,
-		PostgreSQLVersion: postgresVersion, NATSServerVersion: p.nats.ConnectedServerVersion(),
+		OutboxGitCommit: config.OutboxGitCommit, OutboxGitDirty: config.OutboxGitDirty,
+		PostgreSQLVersion: postgresVersion, PostgreSQLProfile: config.PostgresProfile,
+		PostgreSQLImage: config.PostgresImage, PostgreSQLImageDigest: config.PostgresImageDigest,
+		NATSServerVersion: p.nats.ConnectedServerVersion(),
+		NATSImage:         config.NATSImage, NATSImageDigest: config.NATSImageDigest,
 		K6Version: k6Version, OutboxWorkers: config.OutboxWorkers,
 		OutboxReservationBatchSize: config.OutboxReservationBatchSize,
 		OutboxProducerMaxConns:     config.OutboxProducerMaxConns,
 		OutboxRelayMaxConns:        config.OutboxRelayMaxConns,
+		OutboxIngressMode:          string(application.OutboxRuntime.IngressMode),
+		OutboxRelayMode:            string(application.OutboxRuntime.RelayMode),
+		OutboxBatchMaxMessages:     application.OutboxRuntime.BatchMaxMessages,
+		OutboxBatchMaxBytes:        application.OutboxRuntime.BatchMaxBytes,
+		OutboxBatchMaxWaitMillis:   application.OutboxRuntime.BatchMaxWaitMillis,
 		OutboxPGXConnectionBudget:  config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
-		ConsumerConcurrency:        config.ConsumerConcurrency, DBMaxOpenConns: config.DBMaxOpenConns,
-		JetStreamStorage: "file", PostgreSQLSettings: p.postgresSettings,
+		ConsumerConcurrency:        application.ConsumerRuntime.Concurrency,
+		ConsumerMode:               string(application.ConsumerRuntime.Mode),
+		ConsumerBatchMaxMessages:   application.ConsumerRuntime.BatchMaxMessages,
+		ConsumerBatchMaxBytes:      application.ConsumerRuntime.BatchMaxBytes,
+		ConsumerBatchMaxWaitMillis: application.ConsumerRuntime.BatchMaxWaitMillis,
+		DBMaxOpenConns:             config.DBMaxOpenConns,
+		JetStreamStorage:           "file", PostgreSQLSettings: p.postgresSettings,
+		SUTCPUSet: "0-1", PostgreSQLMemoryBytes: 1 << 30,
+		NATSMemoryBytes: 512 << 20, APIMemoryBytes: 512 << 20, SwapDisabled: true,
 	}, nil
 }
 
@@ -450,6 +500,13 @@ func (p *probe) postgresSnapshot(ctx context.Context) (pgtelemetry.Snapshot, err
 		return pgtelemetry.Snapshot{}, fmt.Errorf("capture PostgreSQL telemetry: %w", err)
 	}
 	return snapshot, nil
+}
+
+func (p *probe) completeCheckpoint(ctx context.Context) error {
+	if _, err := p.db.ExecContext(ctx, `/* gomessenger-capacity-probe */ CHECKPOINT`); err != nil {
+		return fmt.Errorf("complete pre-measurement PostgreSQL checkpoint: %w", err)
+	}
+	return nil
 }
 
 func secondsToMillis(value sql.NullFloat64) float64 {
