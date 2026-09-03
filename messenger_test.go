@@ -208,3 +208,98 @@ func mustMessageID(t *testing.T, value string) messenger.MessageID {
 	}
 	return id
 }
+
+type recordingDeliveryRoute struct {
+	deliveries []messenger.Delivery
+}
+
+func (r *recordingDeliveryRoute) Name() string { return "recording.route" }
+
+func (r *recordingDeliveryRoute) Deliver(_ context.Context, delivery messenger.Delivery) (messenger.Receipt, error) {
+	r.deliveries = append(r.deliveries, delivery)
+	return messenger.Receipt{State: messenger.ReceiptBrokerConfirmed}, nil
+}
+
+func TestMessengerNilInterfaceCommandAndEvent_LocalDispatch(t *testing.T) {
+	command := messenger.MustCommand[any]("test.nil-command", 1, messenger.JSON[any]())
+	event := messenger.MustEvent[any]("test.nil-event", 1, messenger.JSON[any]())
+	builder := messenger.NewBuilder(messenger.WithSource("urn:service:test"))
+	var commandCalls, eventCalls atomic.Int32
+
+	builder.HandleCommandFunc(command, "command.handler", func(_ context.Context, value any) error {
+		commandCalls.Add(1)
+		if value != nil {
+			return fmt.Errorf("expected nil command payload, got %#v", value)
+		}
+		return nil
+	})
+	builder.SubscribeFunc(event, "event.subscriber", func(_ context.Context, value any) error {
+		eventCalls.Add(1)
+		if value != nil {
+			return fmt.Errorf("expected nil event payload, got %#v", value)
+		}
+		return nil
+	})
+	builder.RouteCommand(command, messenger.NewLocalSyncRoute())
+	builder.RouteEvent(event, messenger.NewLocalSyncRoute())
+
+	bus, _, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	if _, err := bus.Send(t.Context(), command, nil); err != nil {
+		t.Fatalf("send nil command: %v", err)
+	}
+	if commandCalls.Load() != 1 {
+		t.Fatalf("command calls = %d, want 1", commandCalls.Load())
+	}
+
+	if _, err := bus.Publish(t.Context(), event, nil); err != nil {
+		t.Fatalf("publish nil event: %v", err)
+	}
+	if eventCalls.Load() != 1 {
+		t.Fatalf("event calls = %d, want 1", eventCalls.Load())
+	}
+}
+
+func TestMessengerNilInterfaceCommandAndEvent_RemotePublish(t *testing.T) {
+	command := messenger.MustCommand[any]("test.nil-command", 1, messenger.JSON[any]())
+	event := messenger.MustEvent[any]("test.nil-event", 1, messenger.JSON[any]())
+	route := &recordingDeliveryRoute{}
+	builder := messenger.NewBuilder(messenger.WithSource("urn:service:test"))
+	builder.RouteCommand(command, route)
+	builder.RouteEvent(event, route)
+
+	bus, _, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	if _, err := bus.Send(t.Context(), command, nil); err != nil {
+		t.Fatalf("remote send nil command: %v", err)
+	}
+	if _, err := bus.Publish(t.Context(), event, nil); err != nil {
+		t.Fatalf("remote publish nil event: %v", err)
+	}
+	if len(route.deliveries) != 2 {
+		t.Fatalf("recorded deliveries = %d, want 2", len(route.deliveries))
+	}
+	for i, delivery := range route.deliveries {
+		data, err := delivery.MarshalEnvelope()
+		if err != nil {
+			t.Fatalf("delivery %d marshal envelope: %v", i, err)
+		}
+		envelope, err := messenger.UnmarshalEnvelope(data)
+		if err != nil {
+			t.Fatalf("delivery %d unmarshal envelope: %v", i, err)
+		}
+		payload, encoding, err := envelope.Payload()
+		if err != nil {
+			t.Fatalf("delivery %d payload: %v", i, err)
+		}
+		if string(payload) != "null" || encoding != messenger.DataJSON {
+			t.Fatalf("delivery %d payload = %q, encoding = %v", i, string(payload), encoding)
+		}
+	}
+}

@@ -32,6 +32,7 @@ type transportState uint8
 
 const (
 	transportNew transportState = iota
+	transportStarting
 	transportRunning
 	transportDraining
 	transportClosed
@@ -39,10 +40,11 @@ const (
 
 // Transport owns the shared direct producer and admin client used by routes.
 type Transport struct {
-	config   TransportConfig
-	client   *kgo.Client
-	admin    *kadm.Client
-	baseOpts []kgo.Opt
+	config       TransportConfig
+	client       *kgo.Client
+	admin        *kadm.Client
+	baseOpts     []kgo.Opt
+	startupCheck func(context.Context, time.Duration, transactionalReadinessClient) error
 
 	txGate          chan struct{}
 	topologyMu      sync.Mutex
@@ -97,7 +99,7 @@ func (t *Transport) Run(ctx context.Context) error {
 	}
 	t.mu.Lock()
 	switch t.state {
-	case transportRunning:
+	case transportStarting, transportRunning:
 		t.mu.Unlock()
 		return messenger.ErrRuntimeRunning
 	case transportDraining:
@@ -115,15 +117,24 @@ func (t *Transport) Run(ctx context.Context) error {
 		return ErrTransportClosed
 	case transportNew:
 		t.runStarted = true
-		t.state = transportRunning
+		t.state = transportStarting
 	}
 	t.mu.Unlock()
-	if err := checkTransactionalStartup(ctx, t.config.OperationTimeout, t.client); err != nil {
+	startupCheck := t.startupCheck
+	if startupCheck == nil {
+		startupCheck = checkTransactionalStartup
+	}
+	if err := startupCheck(ctx, t.config.OperationTimeout, t.client); err != nil {
 		t.markClosed()
 		failure := fmt.Errorf("messenger/kafka: transport startup: %w", err)
 		t.logFailure(ctx, messenger.LogError, "Kafka transport startup failed", "transport_startup", failure)
 		return failure
 	}
+	t.mu.Lock()
+	if t.state == transportStarting {
+		t.state = transportRunning
+	}
+	t.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		t.markClosed()
@@ -153,7 +164,7 @@ func (t *Transport) Readiness(ctx context.Context) error {
 // BeginDrain synchronously rejects new route deliveries.
 func (t *Transport) BeginDrain() {
 	t.mu.Lock()
-	if t.state == transportNew || t.state == transportRunning {
+	if t.state == transportNew || t.state == transportStarting || t.state == transportRunning {
 		t.state = transportDraining
 	}
 	t.mu.Unlock()
@@ -208,7 +219,7 @@ func (t *Transport) acquireTransaction(ctx context.Context) error {
 		t.txDone = make(chan struct{})
 	case transportClosed:
 		err = ErrTransportClosed
-	case transportNew, transportDraining:
+	case transportNew, transportStarting, transportDraining:
 		err = messenger.ErrRuntimeNotRunning
 	default:
 		err = messenger.ErrRuntimeNotRunning
@@ -257,7 +268,7 @@ func (t *Transport) ensureRunning() error {
 		return nil
 	case transportClosed:
 		return ErrTransportClosed
-	case transportNew, transportDraining:
+	case transportNew, transportStarting, transportDraining:
 		return messenger.ErrRuntimeNotRunning
 	default:
 		return messenger.ErrRuntimeNotRunning

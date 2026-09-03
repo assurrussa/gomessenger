@@ -560,8 +560,10 @@ infrastructure state only and never logs record keys, payloads, message bodies, 
 Recovered handler panic values and stacks are dropped by default; ordinary errors satisfy the transport-neutral
 `HandlerPanicError` interface and can be classified with `errors.As` across independently versioned adapters.
 Configure `WithPanicReporter` (or the corresponding durable consumer field) only for a trusted diagnostic sink.
-Consumer observations and DLQ errors use the conservative `DefaultFailureSanitizer` unless the host explicitly supplies
-another sanitizer.
+Consumer observations and operational logs use the conservative `DefaultFailureSanitizer` unless the host explicitly
+supplies another sanitizer. In batch consumers, durable DLQ wire text strictly retains the built-in conservative
+sanitizer to ensure rebalance and finalization boundaries remain bounded, while configured host sanitizers apply to
+observations and logs. Custom sanitizers must execute promptly without blocking.
 
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.

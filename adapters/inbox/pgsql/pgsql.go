@@ -472,20 +472,32 @@ func (b *backend) handleExisting(
 ) (inbox.Result, bool, error) {
 	var stored []byte
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, b.statements.readIdentity,
+	if err := tx.QueryRowContext(ctx, b.statements.lockIdentity,
 		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&stored, &completedAt); err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: read identity: %w", err)
+		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: lock identity: %w", err)
 	}
 	if !fingerprintsEqual(stored, fingerprint) {
 		return inbox.Result{}, false, inbox.ErrFingerprintConflict
 	}
-	if !completedAt.Valid {
-		return inbox.Result{}, false, nil
+	if completedAt.Valid {
+		if err := tx.Commit(); err != nil {
+			return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: commit duplicate: %w", err)
+		}
+		return inbox.Result{Duplicate: true}, true, nil
 	}
-	if err := tx.Commit(); err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: commit duplicate: %w", err)
+	var maxTerminal int
+	var count int
+	if err := tx.QueryRowContext(ctx, b.statements.inspectAttempts,
+		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&maxTerminal, &count); err != nil {
+		return inbox.Result{}, false, fmt.Errorf("inbox/pgsql: inspect attempts: %w", err)
 	}
-	return inbox.Result{Duplicate: true}, true, nil
+	if count > 0 {
+		if maxTerminal > 0 {
+			return inbox.Result{}, false, messenger.Permanent(inbox.ErrAttemptTerminal)
+		}
+		return inbox.Result{}, false, inbox.ErrAttemptConflict
+	}
+	return inbox.Result{}, false, nil
 }
 
 func (b *backend) Prune(ctx context.Context, before time.Time, limit int) (int64, error) {

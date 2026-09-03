@@ -122,6 +122,7 @@ func TestDeferAfterWrappingAndBounds(t *testing.T) {
 	}
 }
 
+//nolint:gocognit // The batch result builder tests exercise all build permutations.
 func TestBatchResultBuilder(t *testing.T) {
 	t.Parallel()
 
@@ -140,15 +141,15 @@ func TestBatchResultBuilder(t *testing.T) {
 
 	msg1 := messenger.Message[string]{
 		Metadata: messenger.Metadata{ID: id1, Source: testSource},
-		Payload:  "hello",
+		Payload:  "test-payload-1",
 	}
 	msg2 := messenger.Message[string]{
 		Metadata: messenger.Metadata{ID: id2, Source: testSource},
-		Payload:  "world",
+		Payload:  "test-payload-2",
 	}
 	msg3 := messenger.Message[string]{
 		Metadata: messenger.Metadata{ID: id3, Source: testSource},
-		Payload:  "foo",
+		Payload:  "test-payload-3",
 	}
 
 	t.Run("empty", func(t *testing.T) {
@@ -157,7 +158,10 @@ func TestBatchResultBuilder(t *testing.T) {
 		if builder.HasErrors() {
 			t.Fatal("empty builder has errors")
 		}
-		res := builder.Build()
+		res, err := builder.Build()
+		if err != nil {
+			t.Fatalf("empty builder returned error: %v", err)
+		}
 		if len(res.Items) != 0 {
 			t.Fatalf("empty builder produced items: %v", res.Items)
 		}
@@ -171,8 +175,8 @@ func TestBatchResultBuilder(t *testing.T) {
 		if builder.HasErrors() {
 			t.Fatal("initial builder has errors")
 		}
-		if err := builder.Error(msg2); err != nil {
-			t.Fatalf("expected nil error for msg2, got %v", err)
+		if err, ok := builder.Error(msg2); !ok || err != nil {
+			t.Fatalf("expected nil error and ok=true for msg2, got err=%v ok=%t", err, ok)
 		}
 
 		failErr := errors.New("something went wrong")
@@ -181,8 +185,8 @@ func TestBatchResultBuilder(t *testing.T) {
 		if !builder.HasErrors() {
 			t.Fatal("builder should have errors")
 		}
-		if !errors.Is(builder.Error(msg2), failErr) {
-			t.Fatalf("expected %v, got %v", failErr, builder.Error(msg2))
+		if err, ok := builder.Error(msg2); !ok || !errors.Is(err, failErr) {
+			t.Fatalf("expected %v and ok=true, got err=%v ok=%t", failErr, err, ok)
 		}
 
 		// Re-marking msg2 as OK
@@ -195,7 +199,10 @@ func TestBatchResultBuilder(t *testing.T) {
 		key3 := messenger.BatchItemKey{Source: msg3.Metadata.Source, MessageID: msg3.Metadata.ID}
 		builder.FailKey(key3, failErr)
 
-		res := builder.Build()
+		res, err := builder.Build()
+		if err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
 		if len(res.Items) != 3 {
 			t.Fatalf("expected 3 items, got %d", len(res.Items))
 		}
@@ -209,4 +216,56 @@ func TestBatchResultBuilder(t *testing.T) {
 			t.Fatalf("unexpected item 2: %+v", res.Items[2])
 		}
 	})
+}
+
+func TestBatchResultBuilderUnknownKey(t *testing.T) {
+	t.Parallel()
+	id1, err := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg1 := messenger.Message[string]{
+		Metadata: messenger.Metadata{ID: id1, Source: testSource},
+		Payload:  "test-payload-unknown-base",
+	}
+	unknownID, err := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownKey := messenger.BatchItemKey{Source: testSource, MessageID: unknownID}
+	unknownMsg := messenger.Message[string]{
+		Metadata: messenger.Metadata{ID: unknownID, Source: testSource},
+		Payload:  "unknown",
+	}
+
+	builder := messenger.NewBatchResultBuilder([]messenger.Message[string]{msg1})
+
+	// Error and ErrorKey for unknown key returns ok=false
+	if err, ok := builder.ErrorKey(unknownKey); ok || err != nil {
+		t.Fatalf("expected ok=false for unknown key, got err=%v, ok=%t", err, ok)
+	}
+	if err, ok := builder.Error(unknownMsg); ok || err != nil {
+		t.Fatalf("expected ok=false for unknown msg, got err=%v, ok=%t", err, ok)
+	}
+
+	// FailKey with unknown key marks builder with error
+	builder.FailKey(unknownKey, errors.New("business err"))
+	if !builder.HasErrors() {
+		t.Fatal("expected builder to have errors after unknown FailKey")
+	}
+	_, err = builder.Build()
+	if !errors.Is(err, messenger.ErrInvalidBatchResult) {
+		t.Fatalf("Build() error = %v, want ErrInvalidBatchResult", err)
+	}
+
+	// OKKey with unknown key also marks builder with error
+	builderOK := messenger.NewBatchResultBuilder([]messenger.Message[string]{msg1})
+	builderOK.OKKey(unknownKey)
+	if !builderOK.HasErrors() {
+		t.Fatal("expected builder to have errors after unknown OKKey")
+	}
+	_, err = builderOK.Build()
+	if !errors.Is(err, messenger.ErrInvalidBatchResult) {
+		t.Fatalf("Build() error = %v, want ErrInvalidBatchResult", err)
+	}
 }

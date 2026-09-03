@@ -21,6 +21,8 @@ var (
 	ErrAttemptsExhausted = errors.New("inbox: handler attempts exhausted")
 	// ErrAttemptTerminal reports a previously committed permanent handler outcome.
 	ErrAttemptTerminal = errors.New("inbox: handler attempt is terminal")
+	// ErrAttemptConflict reports an incomplete message identity tracked by ProcessAttempt.
+	ErrAttemptConflict = errors.New("inbox: message identity is tracked by attempt processing")
 	// ErrAttemptTrackingUnsupported reports a backend without durable attempt support.
 	ErrAttemptTrackingUnsupported = errors.New("inbox: durable attempt tracking is unsupported")
 	// ErrBatchAttemptTrackingUnsupported reports a backend without the atomic
@@ -128,10 +130,12 @@ type AttemptBackend interface {
 	ForgetAttempt(ctx context.Context, key Key, fingerprint Fingerprint) error
 }
 
-// BatchAttemptBackend extends Backend with one shared transaction for partial
+// BatchAttemptBackend extends AttemptBackend with one shared transaction for partial
 // batch outcomes. A top-level handler error rolls the transaction back and is
 // returned directly without consuming any item attempts.
 type BatchAttemptBackend interface {
+	AttemptBackend
+
 	ProcessBatchAttempt(
 		ctx context.Context,
 		items []BatchItem,
@@ -202,6 +206,7 @@ func (s *Store) ProcessBatchAttempt(
 		return BatchProcessResult{}, errors.New("inbox: nil batch handler")
 	}
 	consumerID := items[0].Key.ConsumerID
+	generations := make(map[messenger.BatchItemKey]string, len(items))
 	for index, item := range items {
 		if err := ValidateKey(item.Key); err != nil {
 			return BatchProcessResult{}, fmt.Errorf("inbox: batch item %d: %w", index, err)
@@ -209,6 +214,19 @@ func (s *Store) ProcessBatchAttempt(
 		if item.Key.ConsumerID != consumerID {
 			return BatchProcessResult{}, fmt.Errorf("%w: mixed consumer IDs", ErrInvalidKey)
 		}
+		key := messenger.BatchItemKey{
+			Source:    item.Key.Source,
+			MessageID: item.Key.MessageID,
+		}
+		if gen, exists := generations[key]; exists && gen != item.Key.AttemptGeneration {
+			return BatchProcessResult{}, fmt.Errorf(
+				"%w: mixed attempt generations for %s/%s",
+				messenger.ErrInvalidBatchResult,
+				key.Source,
+				key.MessageID,
+			)
+		}
+		generations[key] = item.Key.AttemptGeneration
 	}
 	backend, ok := s.backend.(BatchAttemptBackend)
 	if !ok {

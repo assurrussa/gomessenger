@@ -631,6 +631,73 @@ func assertSQLiteNamespace(t *testing.T, db *sql.DB) {
 	}
 }
 
+func TestStore_ProcessRejectsIdentityWithTerminalAttempt(t *testing.T) {
+	db := openDatabase(t)
+	store, err := inboxsqlite.New(db)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	key := inbox.Key{
+		ConsumerID: testConsumerID,
+		Source:     testSource,
+		MessageID:  mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000088"),
+	}
+	fingerprint := inbox.FingerprintEnvelope([]byte("terminal-attempt"))
+
+	_, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
+		return messenger.Permanent(errors.New("terminal failure"))
+	})
+	if !messenger.IsPermanent(err) {
+		t.Fatalf("expected permanent attempt error, got %v", err)
+	}
+
+	var calls atomic.Int32
+	_, err = store.Process(t.Context(), key, fingerprint, func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	if calls.Load() != 0 {
+		t.Fatalf("handler was invoked %d times, want 0", calls.Load())
+	}
+	if !messenger.IsPermanent(err) || !errors.Is(err, inbox.ErrAttemptTerminal) {
+		t.Fatalf("process error = %v, want permanent ErrAttemptTerminal", err)
+	}
+}
+
+func TestStore_ProcessRejectsIdentityWithIncompleteAttempt(t *testing.T) {
+	db := openDatabase(t)
+	store, err := inboxsqlite.New(db)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	key := inbox.Key{
+		ConsumerID: testConsumerID,
+		Source:     testSource,
+		MessageID:  mustMessageID(t, "018f4f2c-4a00-7000-8000-000000000089"),
+	}
+	fingerprint := inbox.FingerprintEnvelope([]byte("retry-attempt"))
+	retryErr := errors.New("transient error")
+
+	_, err = store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
+		return retryErr
+	})
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("expected retry error, got %v", err)
+	}
+
+	var calls atomic.Int32
+	_, err = store.Process(t.Context(), key, fingerprint, func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	if calls.Load() != 0 {
+		t.Fatalf("handler was invoked %d times, want 0", calls.Load())
+	}
+	if !errors.Is(err, inbox.ErrAttemptConflict) {
+		t.Fatalf("process error = %v, want ErrAttemptConflict", err)
+	}
+}
+
 func assertSQLiteRowCount(t *testing.T, db *sql.DB, table string, want int) {
 	t.Helper()
 	var count int

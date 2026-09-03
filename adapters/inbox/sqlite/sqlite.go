@@ -492,13 +492,26 @@ func (b *backend) handleExisting(
 	if !fingerprintsEqual(stored, fingerprint) {
 		return inbox.Result{}, false, inbox.ErrFingerprintConflict
 	}
-	if !completedAt.Valid {
-		return inbox.Result{}, false, nil
+	if completedAt.Valid {
+		if err := tx.Commit(); err != nil {
+			return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: commit duplicate: %w", err)
+		}
+		return inbox.Result{Duplicate: true}, true, nil
 	}
-	if err := tx.Commit(); err != nil {
-		return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: commit duplicate: %w", err)
+	var maxTerminal int
+	var count int
+	if err := tx.QueryRowContext(ctx, b.statements.inspectAttempts,
+		key.ConsumerID, key.Source, key.MessageID.String(),
+		key.ConsumerID, key.Source, key.MessageID.String()).Scan(&maxTerminal, &count); err != nil {
+		return inbox.Result{}, false, fmt.Errorf("inbox/sqlite: inspect attempts: %w", err)
 	}
-	return inbox.Result{Duplicate: true}, true, nil
+	if count > 0 {
+		if maxTerminal > 0 {
+			return inbox.Result{}, false, messenger.Permanent(inbox.ErrAttemptTerminal)
+		}
+		return inbox.Result{}, false, inbox.ErrAttemptConflict
+	}
+	return inbox.Result{}, false, nil
 }
 
 func fingerprintsEqual(stored []byte, fingerprint inbox.Fingerprint) bool {

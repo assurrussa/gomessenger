@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
@@ -14,7 +16,11 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-const defaultConsumerRebalanceTimeout = time.Minute
+const (
+	defaultConsumerRebalanceTimeout   = time.Minute
+	defaultBatchRebalanceSafetyMargin = 5 * time.Second
+	maxKafkaRebalanceTimeout          = time.Duration(math.MaxInt32) * time.Millisecond
+)
 
 var errTransactionNotCommitted = errors.New("messenger/kafka: transaction was aborted")
 
@@ -423,20 +429,25 @@ func (c *Consumer) runWorker(ctx context.Context, index int, ready func()) error
 	if err != nil {
 		return err
 	}
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
 	opts := c.transport.workerOptions(c.groupID, instanceID, transactionID, c.topics)
-	opts = append(opts, kgo.RebalanceTimeout(consumerRebalanceTimeout(c.transport.config.OperationTimeout)))
+	opts = append(opts,
+		kgo.WithContext(sessionCtx),
+		kgo.RebalanceTimeout(consumerRebalanceTimeout(c.transport.config.OperationTimeout)),
+	)
 	session, err := kgo.NewGroupTransactSession(opts...)
 	if err != nil {
 		return fmt.Errorf("messenger/kafka: create consumer worker %d: %w", index, err)
 	}
 	defer session.CloseAllowingRebalance()
 	if err := checkTransactionalStartup(
-		ctx, c.transport.config.OperationTimeout, session.Client(),
+		sessionCtx, c.transport.config.OperationTimeout, session.Client(),
 	); err != nil {
 		return fmt.Errorf("messenger/kafka: worker %d startup: %w", index, err)
 	}
 	return c.runWorkerSession(
-		ctx,
+		sessionCtx,
 		franzConsumerSession{session: session},
 		ready,
 		c.prepareRecord,
@@ -599,6 +610,7 @@ type transactionalConsumerSession interface {
 	Begin() error
 	ProduceSync(ctx context.Context, records ...*kgo.Record) kgo.ProduceResults
 	End(ctx context.Context, operation kgo.TransactionEndTry) (bool, error)
+	CloseAllowingRebalance()
 }
 
 type franzConsumerSession struct {
@@ -611,6 +623,10 @@ func (s franzConsumerSession) GroupMetadata() (string, int32) {
 
 func (s franzConsumerSession) AllowRebalance() {
 	s.session.AllowRebalance()
+}
+
+func (s franzConsumerSession) CloseAllowingRebalance() {
+	s.session.CloseAllowingRebalance()
 }
 
 func (s franzConsumerSession) PauseFetchPartitions(topicPartitions map[string][]int32) map[string][]int32 {
@@ -709,6 +725,44 @@ func (c *Consumer) recordWorkerError(ctx context.Context, err error) {
 
 func consumerRebalanceTimeout(operationTimeout time.Duration) time.Duration {
 	return max(defaultConsumerRebalanceTimeout, operationTimeout)
+}
+
+// batchConsumerRebalanceTimeout sizes rebalance timeout covering MaxWait, handler
+// transaction timeout, and up to two broker operation timeouts (to cover ProduceSync
+// failure followed by TryAbort), plus safety margin. It assumes application codec
+// execution has bounded runtime.
+func batchConsumerRebalanceTimeout(
+	batchMaxWait time.Duration,
+	handlerTimeout time.Duration,
+	finalizationTimeout time.Duration,
+	operationTimeout time.Duration,
+) (time.Duration, error) {
+	if batchMaxWait < 0 || handlerTimeout < 0 || finalizationTimeout < 0 || operationTimeout < 0 {
+		return 0, fmt.Errorf("%w: negative timeout in batch rebalance calculation", ErrInvalidConfig)
+	}
+	handlerTx := handlerTransactionTimeout(handlerTimeout, finalizationTimeout)
+	if batchMaxWait > maxKafkaRebalanceTimeout {
+		return 0, fmt.Errorf("%w: batch MaxWait %s exceeds maximum Kafka rebalance timeout %s",
+			ErrInvalidConfig, batchMaxWait, maxKafkaRebalanceTimeout)
+	}
+	remaining := maxKafkaRebalanceTimeout - batchMaxWait
+	if handlerTx > remaining {
+		return 0, fmt.Errorf("%w: batch handler transaction timeout %s exceeds maximum Kafka rebalance timeout %s",
+			ErrInvalidConfig, handlerTx, maxKafkaRebalanceTimeout)
+	}
+	remaining -= handlerTx
+	totalBrokerTimeout := 2 * operationTimeout
+	if totalBrokerTimeout > remaining {
+		return 0, fmt.Errorf("%w: batch broker operation timeout %s exceeds maximum Kafka rebalance timeout %s",
+			ErrInvalidConfig, totalBrokerTimeout, maxKafkaRebalanceTimeout)
+	}
+	remaining -= totalBrokerTimeout
+	if defaultBatchRebalanceSafetyMargin > remaining {
+		return 0, fmt.Errorf("%w: batch rebalance budget exceeds maximum Kafka rebalance timeout %s",
+			ErrInvalidConfig, maxKafkaRebalanceTimeout)
+	}
+	budget := batchMaxWait + handlerTx + totalBrokerTimeout + defaultBatchRebalanceSafetyMargin
+	return max(defaultConsumerRebalanceTimeout, budget), nil
 }
 
 func (c *Consumer) prepareRecord(record *kgo.Record) preparedRecord {
@@ -954,14 +1008,67 @@ func (c *Consumer) deadLetterRecord(
 	return err
 }
 
+const (
+	watchdogRunning int32 = iota
+	watchdogCompleted
+	watchdogTimedOut
+)
+
+type produceWatchdog struct {
+	state atomic.Int32
+	done  chan struct{}
+	wait  chan struct{}
+}
+
+func startProduceWatchdog(ctx context.Context, session transactionalConsumerSession) *produceWatchdog {
+	w := &produceWatchdog{
+		done: make(chan struct{}),
+		wait: make(chan struct{}),
+	}
+	w.state.Store(watchdogRunning)
+	go func() {
+		defer close(w.wait)
+		select {
+		case <-w.done:
+		case <-ctx.Done():
+			if w.state.CompareAndSwap(watchdogRunning, watchdogTimedOut) {
+				session.CloseAllowingRebalance()
+			}
+		}
+	}()
+	return w
+}
+
+func (w *produceWatchdog) Complete() {
+	w.state.CompareAndSwap(watchdogRunning, watchdogCompleted)
+	close(w.done)
+	<-w.wait
+}
+
 func (c *Consumer) commitRecord(
 	ctx context.Context,
 	session transactionalConsumerSession,
 	produced *kgo.Record,
 ) (bool, error) {
-	topic := c.sourceTopic
+	var records []*kgo.Record
 	if produced != nil {
-		topic = produced.Topic
+		records = []*kgo.Record{produced}
+	}
+	committed, logAction, err := c.commitTransactionalRecords(ctx, session, records)
+	if logAction != nil {
+		logAction()
+	}
+	return committed, err
+}
+
+func (c *Consumer) commitTransactionalRecords(
+	ctx context.Context,
+	session transactionalConsumerSession,
+	produced []*kgo.Record,
+) (bool, func(), error) {
+	topic := c.sourceTopic
+	if len(produced) != 0 {
+		topic = produced[0].Topic
 	}
 	logAttrs := []messenger.LogAttr{
 		{Key: logAttrConsumerID, Value: c.config.ConsumerID},
@@ -969,34 +1076,46 @@ func (c *Consumer) commitRecord(
 	}
 	if err := session.Begin(); err != nil {
 		failure := fmt.Errorf("messenger/kafka: begin consumer transaction: %w", err)
-		c.transport.logFailure(ctx, messenger.LogError, "Kafka transaction failed", "consumer_begin", failure,
-			logAttrs...)
-		return false, failure
+		logAction := func() {
+			c.transport.logFailure(ctx, messenger.LogError, "Kafka transaction failed", "consumer_begin", failure,
+				logAttrs...)
+		}
+		return false, logAction, failure
 	}
 	brokerContext, cancel := c.brokerContext(ctx)
 	defer cancel()
-	if produced != nil {
-		if err := session.ProduceSync(brokerContext, produced).FirstErr(); err != nil {
+	if len(produced) != 0 {
+		watchdog := startProduceWatchdog(brokerContext, session)
+		produceResults := session.ProduceSync(brokerContext, produced...)
+		watchdog.Complete()
+		if err := produceResults.FirstErr(); err != nil {
 			abortContext, abortCancel := c.brokerContext(ctx)
 			_, abortErr := session.End(abortContext, kgo.TryAbort)
 			abortCancel()
 			failure := fmt.Errorf("messenger/kafka: transactional handoff: %w", err)
-			c.transport.logTransactionFailure(ctx, "consumer_handoff", failure, abortErr, logAttrs...)
-			return false, errors.Join(failure, abortErr)
+			logAction := func() {
+				c.transport.logTransactionFailure(ctx, "consumer_handoff", failure, abortErr, logAttrs...)
+			}
+			return false, logAction, errors.Join(failure, abortErr)
 		}
 	}
 	committed, err := session.End(brokerContext, kgo.TryCommit)
 	if err != nil {
 		failure := fmt.Errorf("messenger/kafka: commit consumer transaction: %w", err)
-		c.transport.logFailure(ctx, messenger.LogError, "Kafka transaction failed", "consumer_commit", failure,
-			logAttrs...)
-		return false, failure
+		logAction := func() {
+			c.transport.logFailure(ctx, messenger.LogError, "Kafka transaction failed", "consumer_commit", failure,
+				logAttrs...)
+		}
+		return false, logAction, failure
 	}
 	if !committed {
-		c.transport.logFailure(ctx, messenger.LogWarn, "Kafka consumer transaction aborted", "consumer_commit",
-			errTransactionNotCommitted, logAttrs...)
+		logAction := func() {
+			c.transport.logFailure(ctx, messenger.LogWarn, "Kafka consumer transaction aborted", "consumer_commit",
+				errTransactionNotCommitted, logAttrs...)
+		}
+		return false, logAction, nil
 	}
-	return committed, nil
+	return committed, nil, nil
 }
 
 // brokerContext keeps graceful drain finalization bounded while preserving
@@ -1073,6 +1192,17 @@ func (c *Consumer) observeBoundary(
 	startedAt time.Time,
 	err error,
 ) {
+	c.observeBoundaryWithDuration(ctx, operation, messageID, startedAt, c.clock().UTC().Sub(startedAt), err)
+}
+
+func (c *Consumer) observeBoundaryWithDuration(
+	ctx context.Context,
+	operation messenger.Operation,
+	messageID messenger.MessageID,
+	startedAt time.Time,
+	duration time.Duration,
+	err error,
+) {
 	if len(c.config.Observers) == 0 {
 		return
 	}
@@ -1080,7 +1210,7 @@ func (c *Consumer) observeBoundary(
 		Operation: operation, MessageID: messageID, Kind: c.descriptor.Kind,
 		Name: c.descriptor.Name, SchemaVersion: c.descriptor.SchemaVersion,
 		ConsumerID: c.config.ConsumerID, HandlerID: c.config.ConsumerID,
-		StartedAt: startedAt, Duration: c.clock().UTC().Sub(startedAt),
+		StartedAt: startedAt, Duration: duration,
 		Err: sanitizeError(c.config.FailureSanitizer, err),
 	})
 }

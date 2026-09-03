@@ -172,6 +172,7 @@ identity is ACKed without handler replay; an identity/fingerprint conflict is an
 Missing, duplicate, or unknown result keys are `ErrInvalidBatchResult` and fail the consumer closed.
 `NewBatchResultBuilder[T](messages)` simplifies constructing an exact-cover result in original input order,
 defaulting items to success and allowing individual items to be marked with `builder.Fail(msg, err)`.
+Its `Build()` returns `(BatchResult, error)`, failing closed if an unknown key was supplied.
 
 One invocation and all Inbox finalization use one SQL transaction. The handler must classify the complete input before
 issuing business SQL and must write only for successful items. GoMessenger does not infer which SQL statement belongs
@@ -299,11 +300,17 @@ A retry is deferred only when its exact `not-before` precedes `ExpiresAt`; an ex
 terminal outcome instead of a scheduled pause. An early retry record pauses and rewinds only its concrete
 topic-partition to the exact leader epoch and offset; an unconfirmed rewind fails the worker closed. A bounded deadline
 scheduler retains no record payload, polling continues for other partitions, and only scheduler-owned pauses resume at
-their due time so the record is fetched again. The worker calls `AllowRebalance` before canonicalization, custom
-`Codec.Decode`, Inbox, handler, or Kafka transaction execution. Invalid control or envelope metadata and expired records
-enter their transactional DLQ hand-off only after that release. A valid early retry does not invoke its codec until the
-partition resumes and the record is fetched again. `MaxAttempts`, Inbox savepoint behavior, permanent outcomes, and
-attempt generations retain the same handler-invocation meaning as the JetStream path.
+their due time so the record is fetched again. For single-record consumers, the worker calls `AllowRebalance` before
+canonicalization, custom `Codec.Decode`, Inbox, handler, or Kafka transaction execution; rebalance completion is bounded
+by broker transaction finalization rather than handler duration. Invalid control or envelope metadata and expired
+records enter their transactional DLQ hand-off only after that release. For batch consumers, `BlockRebalanceOnPoll`
+holds rebalancing across multi-poll fill, Inbox batch attempt, application handler, and transaction commit/abort, with
+`RebalanceTimeout` dynamically sized to cover the entire processing budget. `AllowRebalance` is invoked only after the
+Kafka transaction and any deferred partition pause complete, and strictly before user observers are dispatched. In
+addition, worker sessions enforce finite broker operation bounds via watchdog session closure, unblocking in-flight
+produce operations and allowing worker recreation or shutdown without unbounded hangs. A valid early retry does not
+invoke its codec until the partition resumes and the record is fetched again. `MaxAttempts`, Inbox savepoint behavior,
+permanent outcomes, and attempt generations retain the same handler-invocation meaning as the JetStream path.
 
 Permanent and exhausted records are handed to the consumer-specific Kafka DLQ atomically with the consumed offset. DLQ
 v1 is bounded and records source position, original key/bytes, message identity, attempt/generation, failure class,
@@ -331,7 +338,11 @@ Observations may contain message, consumer and service identity, route, handler,
 and retry delay. `OperationQuery` covers complete local request/reply and `OperationHandle` covers its handler;
 `OperationBrokerAck`, `OperationOffsetCommit`, `OperationRetryHandoff`, and `OperationDLQHandoff` expose the distinct
 durable finalization boundary. Adapter handler failures are sanitized before observation or DLQ serialization while
-preserving `errors.Is`/`errors.As`; hosts may explicitly replace the conservative `DefaultFailureSanitizer`. Message
+preserving `errors.Is`/`errors.As`. For observations and operational logs, hosts may explicitly configure a custom
+`FailureSanitizer` to replace the conservative `DefaultFailureSanitizer`. In batch consumers, durable DLQ wire
+text strictly uses the conservative built-in sanitizer (`DefaultFailureSanitizer`) so that custom host sanitizers
+cannot delay group rebalance or finalization deadlines; the configured host sanitizer continues to govern observations
+and operational logs. Custom host sanitizers must execute promptly and avoid blocking operations. Message
 IDs, attempts, and other high-cardinality values may be trace/log attributes but are never Prometheus metric labels.
 Core infrastructure logs and observations never include record keys, payloads, query results, message bodies, or
 arbitrary headers.

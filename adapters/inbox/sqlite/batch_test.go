@@ -190,7 +190,7 @@ func TestStore_ProcessBatchAttemptExhaustionAndTerminalReplay(t *testing.T) {
 	}
 }
 
-func TestStore_ProcessBatchAttemptSplitsMixedAttemptGenerations(t *testing.T) {
+func TestStore_ProcessBatchAttemptRejectsMixedAttemptGenerations(t *testing.T) {
 	db := openDatabase(t)
 	store, err := inboxsqlite.New(db)
 	if err != nil {
@@ -217,31 +217,30 @@ func TestStore_ProcessBatchAttemptSplitsMixedAttemptGenerations(t *testing.T) {
 	}
 
 	handlerInvocations := 0
-	report, err := store.ProcessBatchAttempt(t.Context(), []inbox.BatchItem{item1, item2}, 3, func(
-		_ context.Context,
+	_, err = store.ProcessBatchAttempt(t.Context(), []inbox.BatchItem{item1, item2}, 3, func(
+		ctx context.Context,
 		active []inbox.BatchItem,
 	) (messenger.BatchResult, error) {
 		handlerInvocations++
-		if len(active) != 1 {
-			t.Fatalf("expected sub-batch size 1, got %d", len(active))
-		}
+		tx, _ := inbox.SQLTxFromContext(ctx)
+		_, _ = tx.ExecContext(ctx, `INSERT INTO business_effects (message_id) VALUES (?)`, active[0].Key.MessageID.String())
 		return messenger.BatchResult{
 			Items: []messenger.BatchItemResult{
 				{Key: batchResultKey(active[0])},
 			},
 		}, nil
 	})
-	if err != nil {
-		t.Fatalf("ProcessBatchAttempt failed: %v", err)
+	if err == nil {
+		t.Fatal("expected error for mixed attempt generations, got nil")
 	}
-	if len(report.Items) != 2 {
-		t.Fatalf("expected 2 reported items, got %d", len(report.Items))
+	if !errors.Is(err, messenger.ErrInvalidBatchResult) {
+		t.Fatalf("expected ErrInvalidBatchResult, got %v", err)
 	}
-	if handlerInvocations != 1 {
-		t.Fatalf("expected handler to be invoked 1 time (first generation executes, second deduplicates), got %d", handlerInvocations)
+	if handlerInvocations != 0 {
+		t.Fatalf("expected handler not to be invoked, got %d invocations", handlerInvocations)
 	}
-	if report.Items[0].Outcome != inbox.BatchACK || report.Items[1].Outcome != inbox.BatchACK {
-		t.Fatalf("expected both items to be ACKed, got %+v", report.Items)
+	if effects := effectCount(t, db); effects != 0 {
+		t.Fatalf("expected 0 business effects, got %d", effects)
 	}
 }
 

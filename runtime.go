@@ -154,10 +154,10 @@ func (r *Runtime) Run(ctx context.Context) error {
 			switch {
 			case draining:
 				gracefulDrain = true
-				if result.err != nil && !errors.Is(result.err, context.Canceled) {
+				if result.err != nil && !isExpectedContextDone(runContext, result.err) {
 					runErr = fmt.Errorf("messenger: service %s during drain: %w", result.id, result.err)
 				}
-			case result.err != nil && !errors.Is(result.err, context.Canceled):
+			case result.err != nil && !isExpectedContextDone(runContext, result.err):
 				runErr = fmt.Errorf("messenger: service %s: %w", result.id, result.err)
 			case runContext.Err() == nil:
 				runErr = fmt.Errorf("messenger: service %s stopped unexpectedly", result.id)
@@ -175,22 +175,39 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if !gracefulDrain || drainErr != nil {
 		cancel()
 	}
-	workers.Wait()
-	if gracefulDrain {
-		for len(results) > 0 {
-			result := <-results
-			if result.err != nil && !errors.Is(result.err, context.Canceled) {
-				runErr = errors.Join(runErr,
-					fmt.Errorf("messenger: service %s during drain: %w", result.id, result.err))
-			}
-		}
-	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
+	}()
+
 	shutdownContext, shutdownCancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
 		r.shutdownTimeout,
 	)
+	defer shutdownCancel()
+
+	select {
+	case <-workersDone:
+	case <-shutdownContext.Done():
+		cancel()
+		runErr = errors.Join(runErr, fmt.Errorf(
+			"messenger: services did not stop within shutdown timeout: %w",
+			shutdownContext.Err(),
+		))
+	}
+	for len(results) > 0 {
+		result := <-results
+		if result.err != nil && !isExpectedContextDone(runContext, result.err) {
+			prefix := "messenger: service %s: %w"
+			if gracefulDrain {
+				prefix = "messenger: service %s during drain: %w"
+			}
+			runErr = errors.Join(runErr,
+				fmt.Errorf(prefix, result.id, result.err))
+		}
+	}
 	shutdownErr := r.shutdownServices(shutdownContext)
-	shutdownCancel()
 	cancel()
 	combinedErr := errors.Join(runErr, shutdownErr)
 	r.mu.Lock()
@@ -198,6 +215,19 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.mu.Unlock()
 	r.markClosed()
 	return combinedErr
+}
+
+func isExpectedContextDone(runContext context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if ctxErr := runContext.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		return true
+	}
+	return false
 }
 
 func (r *Runtime) runManagedService(ctx context.Context, service namedService) (err error) {
@@ -431,16 +461,19 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	return err
 }
 
+type shutdownServiceResult struct {
+	index int
+	err   error
+}
+
 func (r *Runtime) shutdownServices(ctx context.Context) error {
-	shutdownErrors := make([]error, len(r.services))
-	var workers sync.WaitGroup
+	results := make(chan shutdownServiceResult, len(r.services))
 	for index, configuredService := range r.services {
-		workers.Add(1)
 		go func(index int, service namedService) {
-			defer workers.Done()
+			var err error
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					shutdownErrors[index] = ReportHandlerPanic(
+					err = ReportHandlerPanic(
 						ctx,
 						r.panicReporter,
 						"service."+service.id+".shutdown",
@@ -448,13 +481,34 @@ func (r *Runtime) shutdownServices(ctx context.Context) error {
 						debug.Stack(),
 					)
 				}
+				results <- shutdownServiceResult{
+					index: index,
+					err:   err,
+				}
 			}()
-			if err := service.service.Shutdown(ctx); err != nil {
-				shutdownErrors[index] = fmt.Errorf("messenger: shutdown service %s: %w", service.id, err)
+			if shutdownErr := service.service.Shutdown(ctx); shutdownErr != nil {
+				err = fmt.Errorf("messenger: shutdown service %s: %w", service.id, shutdownErr)
 			}
 		}(index, configuredService)
 	}
-	workers.Wait()
+
+	shutdownErrors := make([]error, len(r.services))
+	remaining := len(r.services)
+	for remaining > 0 {
+		select {
+		case res := <-results:
+			shutdownErrors[res.index] = res.err
+			remaining--
+		case <-ctx.Done():
+			return errors.Join(
+				errors.Join(shutdownErrors...),
+				fmt.Errorf(
+					"messenger: service shutdown exceeded deadline: %w",
+					ctx.Err(),
+				),
+			)
+		}
+	}
 	return errors.Join(shutdownErrors...)
 }
 

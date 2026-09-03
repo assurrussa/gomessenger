@@ -213,7 +213,7 @@ func (b *Builder) HandleCommand[T any](descriptor Command[T], handlerID string, 
 	}
 	registration.handlerID = handlerID
 	registration.handler = func(payload any) (funcContextHandler, error) {
-		typed, ok := payload.(T)
+		typed, ok := payloadAs[T](payload)
 		if !ok {
 			return nil, fmt.Errorf("%w: command payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
 		}
@@ -256,18 +256,9 @@ func (b *Builder) HandleQuery[Q, R any](
 	}
 	registration.handlerID = handlerID
 	registration.handler = func(payload any) (funcContextQueryHandler, error) {
-		var typed Q
-		if payload == nil {
-			// A nil interface loses its dynamic type when it is erased to any.
-			if reflect.TypeFor[Q]().Kind() != reflect.Interface {
-				return nil, fmt.Errorf("%w: query payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
-			}
-		} else {
-			var ok bool
-			typed, ok = payload.(Q)
-			if !ok {
-				return nil, fmt.Errorf("%w: query payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
-			}
+		typed, ok := payloadAs[Q](payload)
+		if !ok {
+			return nil, fmt.Errorf("%w: query payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
 		}
 		return func(ctx context.Context) (localQueryResult, error) {
 			metadata, _ := MetadataFromContext(ctx)
@@ -315,7 +306,7 @@ func (b *Builder) Subscribe[T any](descriptor Event[T], subscriptionID string, h
 	registration.subscribers = append(registration.subscribers, eventSubscriber{
 		id: subscriptionID,
 		handler: func(payload any) (funcContextHandler, error) {
-			typed, ok := payload.(T)
+			typed, ok := payloadAs[T](payload)
 			if !ok {
 				return nil, fmt.Errorf("%w: event payload type for %s", ErrDescriptorConflict, descriptor.info.Name)
 			}
@@ -505,7 +496,7 @@ func eraseDescriptor[T any](descriptor descriptor[T]) descriptorRegistration {
 		info:        descriptor.info,
 		payloadType: reflect.TypeFor[T](),
 		encode: func(payload any) ([]byte, DataEncoding, error) {
-			typed, ok := payload.(T)
+			typed, ok := payloadAs[T](payload)
 			if !ok {
 				return nil, 0, fmt.Errorf("%w: payload for %s", ErrDescriptorConflict, descriptor.info.Name)
 			}
@@ -608,6 +599,18 @@ func nilInterface(value any) bool {
 	default:
 		return false
 	}
+}
+
+func payloadAs[T any](payload any) (T, bool) {
+	if payload == nil {
+		var zero T
+		if reflect.TypeFor[T]().Kind() == reflect.Interface {
+			return zero, true
+		}
+		return zero, false
+	}
+	typed, ok := payload.(T)
+	return typed, ok
 }
 
 func validateSource(source string) error {

@@ -928,7 +928,7 @@ func (a *handlerApplication) handleOrderBatch(
 			return messenger.BatchResult{}, fmt.Errorf("write batch order projection: %w", err)
 		}
 	}
-	return builder.Build(), nil
+	return builder.Build()
 }
 
 func (a *handlerApplication) classifyBatchOrder(

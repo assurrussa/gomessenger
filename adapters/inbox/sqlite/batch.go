@@ -42,41 +42,6 @@ type sqliteBatchClassified struct {
 	err   error
 }
 
-type sqliteBatchPartition struct {
-	indexes []int
-}
-
-func partitionSQLiteBatchItems(items []inbox.BatchItem) []sqliteBatchPartition {
-	if len(items) == 0 {
-		return nil
-	}
-	if len(items) == 1 {
-		return []sqliteBatchPartition{{indexes: []int{0}}}
-	}
-	var partitions []sqliteBatchPartition
-	var currentIndexes []int
-	currentGenerations := make(map[messenger.BatchItemKey]string)
-
-	for index, item := range items {
-		key := messenger.BatchItemKey{Source: item.Key.Source, MessageID: item.Key.MessageID}
-		existingGen, exists := currentGenerations[key]
-		if exists && existingGen != item.Key.AttemptGeneration {
-			partitions = append(partitions, sqliteBatchPartition{indexes: currentIndexes})
-			currentIndexes = []int{index}
-			currentGenerations = map[messenger.BatchItemKey]string{key: item.Key.AttemptGeneration}
-		} else {
-			if !exists {
-				currentGenerations[key] = item.Key.AttemptGeneration
-			}
-			currentIndexes = append(currentIndexes, index)
-		}
-	}
-	if len(currentIndexes) > 0 {
-		partitions = append(partitions, sqliteBatchPartition{indexes: currentIndexes})
-	}
-	return partitions
-}
-
 // ProcessBatchAttempt executes one partial-outcome batch in one SQLite transaction.
 func (b *backend) ProcessBatchAttempt(
 	ctx context.Context,
@@ -87,34 +52,6 @@ func (b *backend) ProcessBatchAttempt(
 	if len(items) == 0 {
 		return report, nil
 	}
-	partitions := partitionSQLiteBatchItems(items)
-	if len(partitions) <= 1 {
-		return b.processSingleSQLiteBatchAttempt(ctx, items, maxAttempts, handler)
-	}
-	report.Items = make([]inbox.BatchItemOutcome, len(items))
-	for _, part := range partitions {
-		subItems := make([]inbox.BatchItem, len(part.indexes))
-		for i, origIdx := range part.indexes {
-			subItems[i] = items[origIdx]
-		}
-		subReport, err := b.processSingleSQLiteBatchAttempt(ctx, subItems, maxAttempts, handler)
-		if err != nil {
-			return inbox.BatchProcessResult{}, err
-		}
-		report.HandlerMessages += subReport.HandlerMessages
-		for i, origIdx := range part.indexes {
-			report.Items[origIdx] = subReport.Items[i]
-		}
-	}
-	return report, nil
-}
-
-func (b *backend) processSingleSQLiteBatchAttempt(
-	ctx context.Context,
-	items []inbox.BatchItem,
-	maxAttempts uint64,
-	handler inbox.BatchHandler,
-) (report inbox.BatchProcessResult, processErr error) {
 	groups, err := prepareSQLiteBatchGroups(items)
 	if err != nil {
 		return report, err

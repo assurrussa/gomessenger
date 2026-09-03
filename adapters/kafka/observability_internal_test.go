@@ -100,7 +100,7 @@ func TestTransportLoggerRecordsSafeInfrastructureFailures(t *testing.T) {
 	if entries[0].message != "Kafka consumer worker failed" || entries[0].level != messenger.LogError {
 		t.Fatalf("worker log = %#v", entries[0])
 	}
-	if entries[1].message != "Kafka transaction failed" || entries[1].level != messenger.LogError {
+	if entries[1].message != testKafkaTxFailedMessage || entries[1].level != messenger.LogError {
 		t.Fatalf("transaction log = %#v", entries[1])
 	}
 	assertSafeKafkaLogAttrs(t, entries)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,6 +96,12 @@ func TestPostgresInboxIntegration(t *testing.T) {
 	})
 	t.Run("custom schema and prefix", func(t *testing.T) {
 		testPostgresCustomNamespace(t, database)
+	})
+	t.Run("process attempt then process respects terminal and conflict", func(t *testing.T) {
+		testPostgresProcessAttemptThenProcess(t, database)
+	})
+	t.Run("concurrent process on incomplete attempt identity", func(t *testing.T) {
+		testPostgresConcurrentProcessOnIncompleteIdentity(t, database)
 	})
 }
 
@@ -909,5 +916,95 @@ func assertConcurrentResults(
 	}
 	if duplicateCount != 0 || len(errorsSeen) != 1 {
 		t.Fatalf("duplicates=%d errors=%v", duplicateCount, errorsSeen)
+	}
+}
+
+func testPostgresProcessAttemptThenProcess(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "attempt-then-process")
+	fingerprint := postgresFingerprint("attempt-then-process")
+
+	_, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
+		return messenger.Permanent(errors.New("terminal error"))
+	})
+	if !messenger.IsPermanent(err) {
+		t.Fatalf("expected permanent attempt error, got %v", err)
+	}
+
+	var calls atomic.Int32
+	_, err = store.Process(t.Context(), key, fingerprint, func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	if calls.Load() != 0 {
+		t.Fatalf("Process invoked handler for terminal attempt, calls = %d", calls.Load())
+	}
+	if !messenger.IsPermanent(err) || !errors.Is(err, inbox.ErrAttemptTerminal) {
+		t.Fatalf("Process error = %v, want permanent ErrAttemptTerminal", err)
+	}
+
+	retryKey := postgresKey(t, "retry-then-process")
+	retryFingerprint := postgresFingerprint("retry-then-process")
+	retryErr := errors.New("transient")
+	_, err = store.ProcessAttempt(t.Context(), retryKey, retryFingerprint, 3, func(context.Context) error {
+		return retryErr
+	})
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("expected retry error, got %v", err)
+	}
+
+	calls.Store(0)
+	_, err = store.Process(t.Context(), retryKey, retryFingerprint, func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	if calls.Load() != 0 {
+		t.Fatalf("Process invoked handler for incomplete attempt, calls = %d", calls.Load())
+	}
+	if !errors.Is(err, inbox.ErrAttemptConflict) {
+		t.Fatalf("Process error = %v, want ErrAttemptConflict", err)
+	}
+}
+
+func testPostgresConcurrentProcessOnIncompleteIdentity(t *testing.T, database *sql.DB) {
+	t.Helper()
+	resetPostgresFixtures(t, database)
+	store := newPostgresStore(t, database)
+	key := postgresKey(t, "concurrent-incomplete-process")
+	fingerprint := postgresFingerprint("concurrent-incomplete-process")
+
+	_, err := store.ProcessAttempt(t.Context(), key, fingerprint, 3, func(context.Context) error {
+		return messenger.Permanent(errors.New("terminal"))
+	})
+	if !messenger.IsPermanent(err) {
+		t.Fatalf("process attempt error = %v", err)
+	}
+
+	var calls atomic.Int32
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, procErr := store.Process(t.Context(), key, fingerprint, func(context.Context) error {
+				calls.Add(1)
+				return nil
+			})
+			errs <- procErr
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	if calls.Load() != 0 {
+		t.Fatalf("concurrent Process calls invoked handler: calls = %d", calls.Load())
+	}
+	for procErr := range errs {
+		if !messenger.IsPermanent(procErr) || !errors.Is(procErr, inbox.ErrAttemptTerminal) {
+			t.Fatalf("concurrent Process error = %v, want permanent ErrAttemptTerminal", procErr)
+		}
 	}
 }

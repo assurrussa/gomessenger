@@ -790,6 +790,17 @@ func (c *Consumer) observeBoundary(
 	startedAt time.Time,
 	err error,
 ) {
+	c.observeBoundaryWithDuration(ctx, operation, messageID, startedAt, c.clock().UTC().Sub(startedAt), err)
+}
+
+func (c *Consumer) observeBoundaryWithDuration(
+	ctx context.Context,
+	operation messenger.Operation,
+	messageID messenger.MessageID,
+	startedAt time.Time,
+	duration time.Duration,
+	err error,
+) {
 	if len(c.config.Observers) == 0 {
 		return
 	}
@@ -797,7 +808,7 @@ func (c *Consumer) observeBoundary(
 		Operation: operation, MessageID: messageID, Kind: c.descriptor.Kind,
 		Name: c.descriptor.Name, SchemaVersion: c.descriptor.SchemaVersion,
 		ConsumerID: c.config.ConsumerID, HandlerID: c.config.ConsumerID,
-		StartedAt: startedAt, Duration: c.clock().UTC().Sub(startedAt),
+		StartedAt: startedAt, Duration: duration,
 		Err: sanitizeError(c.config.FailureSanitizer, err),
 	})
 }

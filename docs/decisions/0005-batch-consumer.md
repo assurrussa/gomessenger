@@ -108,13 +108,20 @@ and binary CloudEvents, matching the existing single-message consumer.
 
 One handler batch is an ascending, contiguous range from one concrete
 topic-partition. Rebalancing remains blocked from the first poll until the
-outcome boundary. Any polled record outside the selected range is explicitly
-rewound and cannot enter the offset commit.
+Kafka batch transaction commits or aborts. Polled records from other partitions
+update the earliest observed offset map without unbounded record retention and
+fill stops if a subsequent poll yields no records for the selected partition.
+Any unconsumed offset is rewound and cannot enter the offset commit.
+Because rebalance blocking is held through the batch lifecycle (fill, decode,
+inbox, handler, and transaction), the consumer's `RebalanceTimeout` is sized
+dynamically to cover `MaxWait + Timeout + FinalizationTimeout + 2*OperationTimeout + 5s`,
+preventing group eviction during legitimate batch processing.
 
 After the Inbox commit, one Kafka transaction publishes all retry and DLQ
-records and commits the selected range offset. A top-level handler failure does
-not begin a Kafka transaction: the partition rewinds to its first offset and is
-paused for the batch retry delay without consuming message attempts. An aborted
+records and commits the selected range offset. On a top-level handler failure,
+all valid items move to the durable retry tier with exact `not-before` and are
+committed with the source offset in the Kafka transaction, while preflight
+terminal DLQs are published within the same transaction. An aborted
 transaction is replayed. A fenced or otherwise unusable transactional session
 is recreated under the worker supervisor.
 

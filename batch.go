@@ -42,8 +42,9 @@ type BatchResult struct {
 // as succeeded (nil error) and ensures that all input items are preserved in
 // original order.
 type BatchResultBuilder[T any] struct {
-	keys    []BatchItemKey
-	results map[BatchItemKey]error
+	keys          []BatchItemKey
+	results       map[BatchItemKey]error
+	validationErr error
 }
 
 // NewBatchResultBuilder initializes a builder for the supplied batch of messages.
@@ -91,9 +92,14 @@ func (b *BatchResultBuilder[T]) FailKey(key BatchItemKey, err error) *BatchResul
 	if b == nil || b.results == nil {
 		return b
 	}
-	if _, exists := b.results[key]; exists {
-		b.results[key] = err
+	if _, exists := b.results[key]; !exists {
+		if b.validationErr == nil {
+			b.validationErr = fmt.Errorf("%w: unknown key %s/%s",
+				ErrInvalidBatchResult, key.Source, key.MessageID)
+		}
+		return b
 	}
+	b.results[key] = err
 	return b
 }
 
@@ -101,6 +107,9 @@ func (b *BatchResultBuilder[T]) FailKey(key BatchItemKey, err error) *BatchResul
 func (b *BatchResultBuilder[T]) HasErrors() bool {
 	if b == nil {
 		return false
+	}
+	if b.validationErr != nil {
+		return true
 	}
 	for _, err := range b.results {
 		if err != nil {
@@ -110,22 +119,41 @@ func (b *BatchResultBuilder[T]) HasErrors() bool {
 	return false
 }
 
-// Error returns the classified error for the message, or nil if none.
-func (b *BatchResultBuilder[T]) Error(message Message[T]) error {
+// ErrorKey returns the classified error for key and reports whether the key was
+// present in the batch.
+//
+//nolint:revive // Comma-ok pattern returns the stored value (which is of type error) followed by ok.
+func (b *BatchResultBuilder[T]) ErrorKey(key BatchItemKey) (error, bool) {
 	if b == nil || b.results == nil {
-		return nil
+		return nil, false
 	}
-	return b.results[BatchItemKey{
+	err, ok := b.results[key]
+	return err, ok
+}
+
+// Error returns the classified error for the message and reports whether the
+// message was present in the batch.
+//
+//nolint:revive // Comma-ok pattern returns the stored value (which is of type error) followed by ok.
+func (b *BatchResultBuilder[T]) Error(message Message[T]) (error, bool) {
+	return b.ErrorKey(BatchItemKey{
 		Source:    message.Metadata.Source,
 		MessageID: message.Metadata.ID,
-	}]
+	})
 }
 
 // Build constructs the populated BatchResult containing one item result for every
-// message in the original batch in input order.
-func (b *BatchResultBuilder[T]) Build() BatchResult {
-	if b == nil || len(b.keys) == 0 {
-		return BatchResult{}
+// message in the original batch in input order, or returns an error if an unknown
+// key was passed to the builder.
+func (b *BatchResultBuilder[T]) Build() (BatchResult, error) {
+	if b == nil {
+		return BatchResult{}, nil
+	}
+	if b.validationErr != nil {
+		return BatchResult{}, b.validationErr
+	}
+	if len(b.keys) == 0 {
+		return BatchResult{}, nil
 	}
 	items := make([]BatchItemResult, len(b.keys))
 	for index, key := range b.keys {
@@ -134,7 +162,7 @@ func (b *BatchResultBuilder[T]) Build() BatchResult {
 			Err: b.results[key],
 		}
 	}
-	return BatchResult{Items: items}
+	return BatchResult{Items: items}, nil
 }
 
 // BatchHandler processes one broker-ordered batch of unique active messages.

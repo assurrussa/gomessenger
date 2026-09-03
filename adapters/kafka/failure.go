@@ -17,7 +17,8 @@ type PanicReporter interface {
 }
 
 // FailureSanitizer converts errors to text safe for operational observations
-// and dead-letter records.
+// and logs. In batch consumers, durable DLQ wire text strictly uses the
+// conservative built-in sanitizer to protect rebalance boundaries.
 type FailureSanitizer interface {
 	SanitizeFailure(err error) string
 }

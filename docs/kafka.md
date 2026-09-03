@@ -168,8 +168,14 @@ hand-off instead of pausing the partition. If a valid retry record arrives early
 partition pauses, pauses only that topic-partition, rewinds the local and uncommitted cursor to the record's exact leader
 epoch and offset, verifies the rewind, and then allows rebalancing. A failed verification terminates the worker without
 processing later offsets. The worker retains only the topic-partition and deadline in a bounded scheduler, continues
-polling other partitions, and resumes only pauses it owns when the nearest deadline is due. Canonicalization,
-application-supplied `Codec.Decode`, handler, Inbox, and Kafka transaction execution start only after `AllowRebalance`.
+polling other partitions, and resumes only pauses it owns when the nearest deadline is due. For single-record
+consumers, canonicalization, application-supplied `Codec.Decode`, handler, Inbox, and Kafka transaction execution start
+only after `AllowRebalance`. For batch consumers, `BlockRebalanceOnPoll` holds rebalancing across the multi-poll fill
+window, decode, Inbox attempt, batch handler, and Kafka transaction to preserve same-partition batch atomicity;
+its rebalance timeout is therefore sized dynamically to cover that complete worst-case processing window
+(`MaxWait + Timeout + FinalizationTimeout + 2*OperationTimeout + 5s` safety margin), assuming bounded application codec
+execution. `AllowRebalance` is invoked immediately once the Kafka transaction and any deferred partition pause
+complete, before executing best-effort terminal cleanup.
 Invalid control or envelope metadata and expired records enter transactional DLQ hand-off only after that release. A
 valid early retry does not invoke its codec until it is fetched again. `MaxAttempts` counts application handler
 invocations, not broker deliveries or `NotBefore` deferrals.
@@ -213,8 +219,10 @@ cancellable by the caller context while waiting; after admission, bounded transa
 `BeginDrain` rejects new route delivery and stops new polls; `Shutdown` waits for in-flight handler and Kafka
 transaction finalization until the host deadline. Before starting any worker, `Consumer.Run` verifies required topic
 presence, equal partition counts, and unlimited retry retention; topology drift fails startup without polling records.
-Readiness repeats those checks with broker connectivity. Consumer rebalance timeout follows the bounded broker
-finalization window rather than handler duration. Run topology plan separately to verify every managed field.
+Readiness repeats those checks with broker connectivity. Consumer rebalance timeout for single-record consumers
+follows the bounded broker finalization window rather than handler duration; for batch consumers it covers the entire
+worst-case batch processing window (`MaxWait + Timeout + FinalizationTimeout + OperationTimeout + 5s`). Run topology plan
+separately to verify every managed field.
 
 `make check` compiles, vets, lints, and tests the Kafka module without requiring Docker. The same script is the local
 compatibility entry point, while hosted CI runs one independent matrix job per supported Kafka version:
