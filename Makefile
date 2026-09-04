@@ -1,6 +1,6 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
-CHECK_GOWORK ?= $(abspath go.work)
+CHECK_GOWORK ?= off
 MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 E2E_MODULE := testdata/e2e
