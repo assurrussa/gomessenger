@@ -4,11 +4,11 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.2.2
-	github.com/assurrussa/outbox v0.13.0
+	github.com/assurrussa/outbox v0.15.0
 )
 
 require (
-	github.com/assurrussa/gobus v1.1.0 // indirect
+	github.com/assurrussa/gobus v1.2.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 )

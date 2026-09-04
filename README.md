@@ -82,7 +82,7 @@ may describe unreleased APIs that are not present in that release line. Use the 
 [Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.2.2) for the exact release API, or use the checkout
 workflow below when evaluating unreleased changes.
 
-Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.12.0`; the
+Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.15.0`; the
 host selects and installs its matching database backend separately. To evaluate the current checkout instead:
 
 ```sh
@@ -275,7 +275,7 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 
 The module set uses synchronized path-qualified `v0.2.2` tags. Release completion requires every tag above plus the
 clean post-publication consumer probe; neither is inferred from source-only checks. Outbox root and its
-PostgreSQL/SQLite backend tags at `v0.12.0` are the pinned durable-producer dependencies. During repository development
+PostgreSQL/SQLite backend tags at `v0.15.0` are the pinned durable-producer dependencies. During repository development
 `go.work` selects local GoMessenger modules; published consumers use matching path-qualified tags and no local
 `replace` directives. See the [release process](docs/release.md) for dependency order and verification.
 
@@ -709,8 +709,8 @@ Inbox-dependent transports, and finally the CLI and checkout fixtures. After the
 resolve through the Go proxy, finalize and check the complete graph:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
 make check
 ```
 

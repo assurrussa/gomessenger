@@ -8,8 +8,8 @@ require (
 	github.com/assurrussa/gomessenger/adapters/kafka v0.0.0
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
-	github.com/assurrussa/outbox v0.13.0
-	github.com/assurrussa/outbox/backends/sqlite v0.13.0
+	github.com/assurrussa/outbox v0.15.0
+	github.com/assurrussa/outbox/backends/sqlite v0.15.0
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
 	github.com/twmb/franz-go v1.21.6
@@ -18,7 +18,7 @@ require (
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect
-	github.com/assurrussa/gobus v1.1.0 // indirect
+	github.com/assurrussa/gobus v1.2.1 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
