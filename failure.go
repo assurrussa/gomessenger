@@ -147,7 +147,10 @@ func HandlerCompletionError(ctx context.Context, handlerErr error) error {
 }
 
 // FailureSanitizer converts an error to text safe for operational channels such
-// as default logs, traces, and dead-letter records.
+// as default logs and telemetry observations. In batch consumers, durable DLQ
+// wire text strictly uses the conservative built-in sanitizer to protect
+// rebalance and finalization bounds, while configured host sanitizers apply to
+// observations and operational logs.
 type FailureSanitizer interface {
 	SanitizeFailure(err error) string
 }
@@ -189,13 +192,17 @@ func (defaultFailureSanitizer) SanitizeFailure(err error) string {
 		return ErrMessageNotReady.Error()
 	case errors.Is(err, ErrInvalidMessage):
 		return ErrInvalidMessage.Error()
+	case errors.Is(err, ErrInvalidBatchResult):
+		return ErrInvalidBatchResult.Error()
 	default:
 		return "messenger: operation failed"
 	}
 }
 
 // DefaultFailureSanitizer returns the conservative built-in sanitizer. Hosts
-// may opt in to richer text with an explicit FailureSanitizer implementation.
+// may opt in to richer text for observations and operational logs with an
+// explicit FailureSanitizer implementation; durable batch DLQ wire payloads
+// always retain the conservative sanitizer.
 func DefaultFailureSanitizer() FailureSanitizer { return defaultFailureSanitizer{} }
 
 // SanitizeFailure returns safe failure text. A nil or typed-nil sanitizer uses

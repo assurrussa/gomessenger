@@ -54,6 +54,22 @@ func TestBuildStageReportSeparatesRelayAndConsumerAndExcludesDrain(t *testing.T)
 	}
 }
 
+func TestBuildStageReportClassifiesUnavailableLoadTelemetryAsUnsustainable(t *testing.T) {
+	t.Parallel()
+	report := buildStageReport(stageReportInput{
+		config:  Config{StageDuration: time.Second, E2EP95SLO: 2 * time.Second},
+		stageID: "r000100", rate: 100, drainCompleted: true,
+		k6:                 K6Result{AcceptedRate: 1},
+		loadSampleFailures: 2,
+	})
+	if report.Sustainable {
+		t.Fatal("report with unavailable load telemetry must be unsustainable")
+	}
+	if !containsReason(report.UnsustainableReasons, "application telemetry was unavailable for 2 load samples") {
+		t.Fatalf("reasons = %q", report.UnsustainableReasons)
+	}
+}
+
 func TestBuildStageReportCalculatesDistinctPipelineBoundaries(t *testing.T) {
 	t.Parallel()
 	config := Config{StageDuration: 10 * time.Second, E2EP95SLO: 2 * time.Second}
@@ -148,11 +164,119 @@ func TestSustainabilityReasonsSeparateRelayConsumerAndLagGrowth(t *testing.T) {
 	}
 }
 
-func TestReportSpec13JSONAndMarkdownExposeOnlySeparatedMetrics(t *testing.T) {
+func TestSustainabilityRejectsOutboxExecutionErrorsAndNonSuccessOutcomes(t *testing.T) {
+	t.Parallel()
+	reasons := sustainabilityReasons(Config{E2EP95SLO: 2 * time.Second}, StageReport{
+		TargetRate:             100,
+		AcceptedMessagesPerSec: 100,
+		RelayMessagesPerSec:    100,
+		ConsumerMessagesPerSec: 100,
+		DrainCompleted:         true,
+		K6:                     K6Result{AcceptedRate: 1},
+		OutboxExecution: demo.OutboxExecutionStats{
+			Handler:      demo.BatchHandlerStats{Handler: demo.OperationStats{Errors: 1}},
+			Publish:      demo.BatchHandlerStats{Handler: demo.OperationStats{Errors: 2}},
+			Finalization: demo.BatchHandlerStats{Handler: demo.OperationStats{Errors: 3}},
+			Outcomes:     demo.BatchOutcomeStats{Retry: 4, Defer: 5, DLQ: 6},
+		},
+	})
+	for _, fragment := range []string{
+		"Outbox observations contain errors (handler=1 publish=2 finalization=3)",
+		"unexpected Outbox outcomes observed (retry=4 defer=5 dlq=6)",
+	} {
+		if !containsReason(reasons, fragment) {
+			t.Fatalf("reasons %q do not contain %q", reasons, fragment)
+		}
+	}
+}
+
+func TestPGXPoolStageStatsDiscountsOnlyObservedInitialExpansion(t *testing.T) {
+	t.Parallel()
+
+	initial := demo.PGXPoolStats{
+		MaxConnections: 9, TotalConnections: 1, NewConnectionsCount: 1,
+	}
+	final := demo.PGXPoolStats{
+		MaxConnections: 9, TotalConnections: 9, MaxAcquiredConnections: 9,
+		NewConnectionsCount: 9,
+	}
+	stats := pgxPoolStageStats(initial, final)
+	if stats.NewConnections != 8 || stats.ReplacementConnections != 0 {
+		t.Fatalf("initial expansion stats = %#v, want 8 new and zero replacements", stats)
+	}
+
+	final.NewConnectionsCount = 11
+	final.CanceledAcquireCount = 2
+	final.UnusableReleaseCount = 3
+	stats = pgxPoolStageStats(initial, final)
+	if stats.NewConnections != 10 || stats.ReplacementConnections != 2 ||
+		stats.CanceledAcquires != 2 || stats.UnusableReleases != 3 {
+		t.Fatalf("replacement stats = %#v", stats)
+	}
+}
+
+func TestSustainabilityRejectsOutboxPoolConnectionChurn(t *testing.T) {
+	t.Parallel()
+
+	reasons := sustainabilityReasons(Config{E2EP95SLO: 2 * time.Second}, StageReport{
+		TargetRate:             100,
+		AcceptedMessagesPerSec: 100,
+		RelayMessagesPerSec:    100,
+		ConsumerMessagesPerSec: 100,
+		DrainCompleted:         true,
+		K6:                     K6Result{AcceptedRate: 1},
+		OutboxDatabase: OutboxDatabaseStats{
+			Producer: PGXPoolStageStats{
+				MaxConnections: 9, MaxAcquiredConnections: 10,
+				ReplacementConnections: 1, CanceledAcquires: 2, UnusableReleases: 3,
+			},
+			Relay: PGXPoolStageStats{MaxConnections: 1, MaxAcquiredConnections: 1},
+		},
+	})
+	for _, fragment := range []string{
+		"producer pool replaced 1 connections",
+		"producer pool canceled 2 acquires",
+		"producer pool released 3 unusable connections",
+		"producer pool acquired high-water 10 exceeds max 9",
+	} {
+		if !containsReason(reasons, fragment) {
+			t.Fatalf("reasons %q do not contain %q", reasons, fragment)
+		}
+	}
+}
+
+func TestReportSpec21JSONAndMarkdownExposeBatchExecutionAndNormalizedCost(t *testing.T) {
 	t.Parallel()
 	stage := StageReport{
 		RelayMessagesPerSec: 2_000, ConsumerMessagesPerSec: 1_990, ConsumerMiBPerSec: 1.5,
 		OutboxLag: 10, ConsumerLag: 20,
+		ConsumerBatch: demo.BatchHandlerStats{
+			Invocations: 20, Messages: 1_990, AverageMessages: 99.5, MaxMessages: 100,
+			Handler: demo.OperationStats{P95Millis: 8.5},
+		},
+		OutboxExecution: demo.OutboxExecutionStats{
+			Handler: demo.BatchHandlerStats{
+				Invocations: 20, Messages: 1_990, AverageMessages: 99.5, MaxMessages: 100,
+				Handler: demo.OperationStats{P95Millis: 9.5},
+			},
+			Publish: demo.BatchHandlerStats{
+				Invocations: 20, Messages: 1_990, AverageMessages: 99.5, MaxMessages: 100,
+				Handler: demo.OperationStats{P95Millis: 7.5},
+			},
+			Finalization: demo.BatchHandlerStats{
+				Invocations: 20, Messages: 1_990, AverageMessages: 99.5, MaxMessages: 100,
+				Handler: demo.OperationStats{P95Millis: 6.5},
+			},
+			Outcomes: demo.BatchOutcomeStats{Success: 1_990},
+		},
+		PostgreSQLNormalized: PostgreSQLNormalizedStats{
+			SQLCalls: 70, Transactions: 30, TransactionsPerMessage: 0.015,
+			WALBytes: 640_000, WALBytesPerMessage: 321.61, CompletedCheckpoints: 1,
+		},
+		OutboxDatabase: OutboxDatabaseStats{
+			Producer: PGXPoolStageStats{MaxConnections: 9, MaxAcquiredConnections: 9, NewConnections: 8},
+			Relay:    PGXPoolStageStats{MaxConnections: 1, MaxAcquiredConnections: 1},
+		},
 	}
 	encoded, err := json.Marshal(stage)
 	if err != nil {
@@ -164,6 +288,7 @@ func TestReportSpec13JSONAndMarkdownExposeOnlySeparatedMetrics(t *testing.T) {
 	}
 	for _, field := range []string{
 		"relayMessagesPerSecond", "consumerMessagesPerSecond", "consumerMiBPerSecond", "outboxLag", "consumerLag",
+		"consumerBatch", "outboxExecution", "postgresqlNormalized", "outboxDatabase",
 	} {
 		if _, ok := fields[field]; !ok {
 			t.Fatalf("missing JSON field %q in %s", field, encoded)
@@ -174,17 +299,41 @@ func TestReportSpec13JSONAndMarkdownExposeOnlySeparatedMetrics(t *testing.T) {
 			t.Fatalf("legacy JSON field %q remains in %s", field, encoded)
 		}
 	}
+	environment := Environment{
+		OutboxVersion: testOutboxVersion, PostgreSQLSettings: map[string]string{},
+		ConsumerMode: "batch", ConsumerConcurrency: 2,
+		ConsumerBatchMaxMessages: 100, ConsumerBatchMaxBytes: 4 << 20,
+		ConsumerBatchMaxWaitMillis: 25,
+	}
+	environmentJSON, err := json.Marshal(environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		`"consumerMode":"batch"`, `"consumerBatchMaxMessages":100`,
+		`"consumerBatchMaxBytes":4194304`, `"consumerBatchMaxWaitMillis":25`,
+	} {
+		if !strings.Contains(string(environmentJSON), fragment) {
+			t.Fatalf("environment JSON does not contain %q: %s", fragment, environmentJSON)
+		}
+	}
 
 	markdown := renderMarkdown(RunReport{
 		SpecVersion: reportSpecVersion,
-		RunID:       "spec-1.3",
+		RunID:       "spec-2.1",
 		Stages:      []StageReport{stage},
-		Environment: Environment{OutboxVersion: testOutboxVersion, PostgreSQLSettings: map[string]string{}},
+		Environment: environment,
 	})
 	for _, fragment := range []string{
 		"Relay msg/s", "Consumer msg/s", "Consumer MiB/s", "Outbox lag", "Consumer lag",
+		"Batch calls", "Avg batch", "Max batch", "Batch handler p95", "| 20 | 99.50 | 100 | 8.50 ms |",
 		"relay msg/s = published delta", "consumer msg/s = committed projection delta",
 		"Outbox module: `" + testOutboxVersion + "`",
+		"consumer mode `batch`", "batch max messages/bytes/wait `100` / `4194304` / `25.000 ms`",
+		"Outbox handler", "Outbox publish", "Outbox finalization", "9.50 ms", "7.50 ms", "6.50 ms",
+		"SQL calls `70`", "transactions/message `0.0150`", "WAL/message `321.61 B`", "checkpoints `1`",
+		"success `1990`, retry `0`, defer `0`, DLQ `0`",
+		"Outbox pool health: producer new/replaced/canceled/unusable/max-acquired `8/0/0/0/9`; relay `0/0/0/0/1`",
 	} {
 		if !strings.Contains(markdown, fragment) {
 			t.Fatalf("Markdown does not contain %q:\n%s", fragment, markdown)

@@ -13,6 +13,8 @@ const (
 	OperationDeliver Operation = "deliver"
 	// OperationHandle covers local or durable handler execution.
 	OperationHandle Operation = "handle"
+	// OperationBatchHandle covers one durable batch handler transaction.
+	OperationBatchHandle Operation = "batch_handle"
 	// OperationQuery covers a complete local request/reply call.
 	OperationQuery Operation = "query"
 	// OperationService covers managed service completion.
@@ -30,22 +32,31 @@ const (
 // Observation contains bounded operational data. Observers decide which
 // fields are safe for low-cardinality metric labels.
 type Observation struct {
-	Operation     Operation
-	MessageID     MessageID
-	Kind          Kind
-	Name          string
-	SchemaVersion int
-	Route         string
-	HandlerID     string
-	ConsumerID    string
-	ServiceID     string
-	Attempt       uint64
-	Duplicate     bool
-	RetryDelay    time.Duration
-	State         ReceiptState
-	StartedAt     time.Time
-	Duration      time.Duration
-	Err           error
+	Operation            Operation
+	MessageID            MessageID
+	Kind                 Kind
+	Name                 string
+	SchemaVersion        int
+	Route                string
+	HandlerID            string
+	ConsumerID           string
+	ServiceID            string
+	Attempt              uint64
+	Duplicate            bool
+	RetryDelay           time.Duration
+	BatchSize            int
+	BatchBytes           int
+	BatchHandlerMessages int
+	BatchACKs            int
+	BatchRetries         int
+	BatchDeferrals       int
+	BatchDLQs            int
+	BatchFillDuration    time.Duration
+	BatchHandlerDuration time.Duration
+	State                ReceiptState
+	StartedAt            time.Time
+	Duration             time.Duration
+	Err                  error
 }
 
 // Observer receives messaging lifecycle observations. Implementations must not
@@ -130,7 +141,7 @@ func (observer loggingObserver) Observe(ctx context.Context, observation Observa
 }
 
 func observationLogAttrs(observation Observation) []LogAttr {
-	attrs := make([]LogAttr, 0, 14)
+	attrs := make([]LogAttr, 0, 24)
 	attrs = append(attrs, LogAttr{Key: "operation", Value: observation.Operation})
 	if !observation.MessageID.IsZero() {
 		attrs = append(attrs, LogAttr{Key: "message_id", Value: observation.MessageID.String()})
@@ -165,6 +176,25 @@ func observationLogAttrs(observation Observation) []LogAttr {
 	}
 	if observation.RetryDelay != 0 {
 		attrs = append(attrs, LogAttr{Key: "retry_delay", Value: observation.RetryDelay})
+	}
+	for _, attr := range []LogAttr{
+		{Key: "batch_size", Value: observation.BatchSize},
+		{Key: "batch_bytes", Value: observation.BatchBytes},
+		{Key: "batch_handler_messages", Value: observation.BatchHandlerMessages},
+		{Key: "batch_acks", Value: observation.BatchACKs},
+		{Key: "batch_retries", Value: observation.BatchRetries},
+		{Key: "batch_deferrals", Value: observation.BatchDeferrals},
+		{Key: "batch_dlqs", Value: observation.BatchDLQs},
+	} {
+		if value, ok := attr.Value.(int); ok && value != 0 {
+			attrs = append(attrs, attr)
+		}
+	}
+	if observation.BatchFillDuration != 0 {
+		attrs = append(attrs, LogAttr{Key: "batch_fill_duration", Value: observation.BatchFillDuration})
+	}
+	if observation.BatchHandlerDuration != 0 {
+		attrs = append(attrs, LogAttr{Key: "batch_handler_duration", Value: observation.BatchHandlerDuration})
 	}
 	attrs = append(attrs, LogAttr{Key: "duration", Value: observation.Duration})
 	return attrs

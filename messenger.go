@@ -186,6 +186,16 @@ func BindPublisher[T any](messenger *Messenger, descriptor Event[T]) Publisher[T
 	return boundPublisher[T]{messenger: messenger, descriptor: descriptor}
 }
 
+// BindBatchSender returns a narrow atomic batch facade bound to one command.
+func BindBatchSender[T any](messenger *Messenger, descriptor Command[T]) BatchSender[T] {
+	return boundBatchSender[T]{messenger: messenger, descriptor: descriptor}
+}
+
+// BindBatchPublisher returns a narrow atomic batch facade bound to one event.
+func BindBatchPublisher[T any](messenger *Messenger, descriptor Event[T]) BatchPublisher[T] {
+	return boundBatchPublisher[T]{messenger: messenger, descriptor: descriptor}
+}
+
 // BindQuerier returns a narrow DI facade bound to one query descriptor.
 func BindQuerier[Q, R any](messenger *Messenger, descriptor Query[Q, R]) Querier[Q, R] {
 	return boundQuerier[Q, R]{messenger: messenger, descriptor: descriptor}
@@ -209,6 +219,16 @@ type boundPublisher[T any] struct {
 	descriptor Event[T]
 }
 
+type boundBatchSender[T any] struct {
+	messenger  *Messenger
+	descriptor Command[T]
+}
+
+type boundBatchPublisher[T any] struct {
+	messenger  *Messenger
+	descriptor Event[T]
+}
+
 type boundQuerier[Q, R any] struct {
 	messenger  *Messenger
 	descriptor Query[Q, R]
@@ -220,6 +240,22 @@ func (p boundPublisher[T]) Publish(ctx context.Context, payload T) (Receipt, err
 
 func (p boundPublisher[T]) PublishMessage(ctx context.Context, outgoing Outgoing[T]) (Receipt, error) {
 	return p.messenger.PublishMessage(ctx, p.descriptor, outgoing)
+}
+
+func (s boundBatchSender[T]) SendBatch(ctx context.Context, payloads []T) ([]Receipt, error) {
+	return s.messenger.SendBatch(ctx, s.descriptor, payloads)
+}
+
+func (s boundBatchSender[T]) SendMessageBatch(ctx context.Context, outgoing []Outgoing[T]) ([]Receipt, error) {
+	return s.messenger.SendMessageBatch(ctx, s.descriptor, outgoing)
+}
+
+func (p boundBatchPublisher[T]) PublishBatch(ctx context.Context, payloads []T) ([]Receipt, error) {
+	return p.messenger.PublishBatch(ctx, p.descriptor, payloads)
+}
+
+func (p boundBatchPublisher[T]) PublishMessageBatch(ctx context.Context, outgoing []Outgoing[T]) ([]Receipt, error) {
+	return p.messenger.PublishMessageBatch(ctx, p.descriptor, outgoing)
 }
 
 func (q boundQuerier[Q, R]) Query(ctx context.Context, payload Q) (R, error) {

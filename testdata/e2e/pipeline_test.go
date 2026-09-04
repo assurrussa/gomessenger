@@ -90,6 +90,71 @@ func TestTransactionalPipelineCommitsAndAcknowledges(t *testing.T) {
 	}
 }
 
+func TestTransactionalBatchPipelineCommitsOneSharedTransaction(t *testing.T) {
+	harness := newTestHarness(t)
+	for _, jobID := range []int64{51, 52, 53} {
+		if _, err := harness.stage(t, jobID, nil); err != nil {
+			t.Fatalf("stage command %d: %v", jobID, err)
+		}
+	}
+
+	connection := connectNATS(t, harness.server.ClientURL())
+	var calls atomic.Int32
+	consumer := harness.newBatchConsumer(
+		t,
+		connection,
+		"batch-worker",
+		func(ctx context.Context, messages []messenger.Message[processPayload]) (messenger.BatchResult, error) {
+			calls.Add(1)
+			if len(messages) != 3 {
+				return messenger.BatchResult{}, errors.New("expected one three-message batch")
+			}
+			seen := make(map[int64]struct{}, len(messages))
+			result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+			for index, message := range messages {
+				if message.Payload.JobID < 51 || message.Payload.JobID > 53 {
+					return messenger.BatchResult{}, errors.New("unexpected batch payload")
+				}
+				if _, exists := seen[message.Payload.JobID]; exists {
+					return messenger.BatchResult{}, errors.New("duplicate batch payload")
+				}
+				seen[message.Payload.JobID] = struct{}{}
+				if err := harness.incrementBusiness(ctx); err != nil {
+					return messenger.BatchResult{}, err
+				}
+				result.Items[index] = messenger.BatchItemResult{Key: messenger.BatchItemKey{
+					Source: message.Metadata.Source, MessageID: message.Metadata.ID,
+				}}
+			}
+			return result, nil
+		},
+		messenger.BatchConfig{MaxMessages: 3, MaxWait: 500 * time.Millisecond},
+	)
+	consumerRunner := startConsumer(t, consumer, false)
+	outboxRunner := harness.startOutbox(t)
+
+	harness.waitConsumerEmpty(t, "batch-worker")
+	harness.waitOutboxEmpty(t)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("batch handler calls = %d, want 1", got)
+	}
+	if count := harness.businessCount(t); count != 3 {
+		t.Fatalf("business counter = %d, want 3", count)
+	}
+	if rows := harness.producerRows(t); rows != 3 {
+		t.Fatalf("producer rows = %d, want 3", rows)
+	}
+	if duplicates := harness.duplicates.Load(); duplicates != 0 {
+		t.Fatalf("duplicate inbox deliveries = %d, want 0", duplicates)
+	}
+	if err := stopService(t, consumerRunner); err != nil {
+		t.Fatalf("stop batch consumer: %v", err)
+	}
+	if err := stopService(t, outboxRunner); err != nil {
+		t.Fatalf("stop outbox: %v", err)
+	}
+}
+
 func TestTransactionalPipelineSurvivesLostAck(t *testing.T) {
 	harness := newTestHarness(t)
 	receipt, err := harness.stage(t, 42, nil)

@@ -2,6 +2,7 @@
 package pgtelemetry
 
 import (
+	"net/url"
 	"reflect"
 	"testing"
 )
@@ -17,10 +18,41 @@ func TestProbeDSNPreservesConnectionOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeDSN() error = %v", err)
 	}
-	//nolint:gosec // This is a parser-only test DSN, never a live credential.
-	want := "postgres://user:pass@db:5432/name?application_name=gomessenger-capacity-probe&sslmode=disable"
-	if got != want {
-		t.Fatalf("ProbeDSN() = %q, want %q", got, want)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse ProbeDSN() result: %v", err)
+	}
+	query := parsed.Query()
+	if parsed.Host != "db:5432" || parsed.Path != "/name" || query.Get("sslmode") != "disable" ||
+		query.Get("application_name") != ProbeApplicationName ||
+		query.Get("max_parallel_workers_per_gather") != "0" {
+		t.Fatalf("ProbeDSN() = %q", got)
+	}
+}
+
+func TestProbeDSNOverridesParallelVerifierQueries(t *testing.T) {
+	t.Parallel()
+	got, err := ProbeDSN(
+		"postgres://user:pass@db:5432/name?max_parallel_workers_per_gather=4",
+	)
+	if err != nil {
+		t.Fatalf("ProbeDSN() error = %v", err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse ProbeDSN() result: %v", err)
+	}
+	if parsed.Query().Get("max_parallel_workers_per_gather") != "0" {
+		t.Fatalf("ProbeDSN() = %q", got)
+	}
+}
+
+func TestClassifyBatchCapacityStatements(t *testing.T) {
+	if got := ClassifyStatement("INSERT INTO batch_capacity.business_effects SELECT * FROM unnest($1)"); got != "business" {
+		t.Fatalf("ClassifyStatement() = %q, want business", got)
+	}
+	if got := ClassifyStatement("UPDATE batch_capacity.gm_inbox SET completed_at = now()"); got != "inbox" {
+		t.Fatalf("ClassifyStatement() = %q, want inbox", got)
 	}
 }
 

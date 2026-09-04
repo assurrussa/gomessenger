@@ -479,3 +479,187 @@ func runtimeWithServices(
 	}
 	return runtime
 }
+
+type stuckRunService struct {
+	started chan struct{}
+}
+
+func (s *stuckRunService) Run(_ context.Context) error {
+	close(s.started)
+	select {}
+}
+
+func (s *stuckRunService) Readiness(context.Context) error { return nil }
+func (s *stuckRunService) BeginDrain()                     {}
+func (s *stuckRunService) Shutdown(context.Context) error  { return nil }
+
+type stuckShutdownService struct {
+	started  chan struct{}
+	shutdown chan struct{}
+}
+
+func (s *stuckShutdownService) Run(ctx context.Context) error {
+	close(s.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *stuckShutdownService) Readiness(context.Context) error { return nil }
+func (s *stuckShutdownService) BeginDrain()                     {}
+func (s *stuckShutdownService) Shutdown(_ context.Context) error {
+	close(s.shutdown)
+	select {}
+}
+
+type stuckBothService struct {
+	started chan struct{}
+}
+
+func (s *stuckBothService) Run(_ context.Context) error {
+	close(s.started)
+	select {}
+}
+
+func (s *stuckBothService) Readiness(context.Context) error { return nil }
+func (s *stuckBothService) BeginDrain()                     {}
+func (s *stuckBothService) Shutdown(context.Context) error  { select {} }
+
+const stuckServiceName = "stuck"
+
+func TestRuntimeShutdownWithStuckRunServiceBounded(t *testing.T) {
+	stuck := &stuckRunService{started: make(chan struct{})}
+	timeout := 25 * time.Millisecond
+	runtime := runtimeWithServices(t, map[string]messenger.Service{stuckServiceName: stuck},
+		messenger.WithRuntimeShutdownTimeout(timeout))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(ctx) }()
+
+	<-stuck.started
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Runtime.Run hung forever on stuck Run service")
+	}
+}
+
+func TestRuntimeShutdownWithStuckShutdownServiceBounded(t *testing.T) {
+	stuck := &stuckShutdownService{started: make(chan struct{}), shutdown: make(chan struct{})}
+	timeout := 25 * time.Millisecond
+	runtime := runtimeWithServices(t, map[string]messenger.Service{stuckServiceName: stuck},
+		messenger.WithRuntimeShutdownTimeout(timeout))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(ctx) }()
+
+	<-stuck.started
+	cancel()
+	<-stuck.shutdown
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Runtime.Run hung forever on stuck Shutdown service")
+	}
+}
+
+func TestRuntimeShutdownWithBothRunAndShutdownStuckBounded(t *testing.T) {
+	stuck := &stuckBothService{started: make(chan struct{})}
+	timeout := 25 * time.Millisecond
+	runtime := runtimeWithServices(t, map[string]messenger.Service{stuckServiceName: stuck},
+		messenger.WithRuntimeShutdownTimeout(timeout))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(ctx) }()
+
+	<-stuck.started
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Runtime.Run hung forever when both Run and Shutdown stuck")
+	}
+}
+
+func TestRuntimePreRunShutdownWithStuckServiceBounded(t *testing.T) {
+	stuck := &stuckShutdownService{started: make(chan struct{}), shutdown: make(chan struct{})}
+	runtime := runtimeWithServices(t, map[string]messenger.Service{stuckServiceName: stuck})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancel()
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- runtime.Shutdown(ctx) }()
+
+	<-stuck.shutdown
+
+	select {
+	case err := <-shutdownDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Runtime.Shutdown hung forever on stuck service")
+	}
+}
+
+func TestRuntimeParentDeadlineDeterministic(t *testing.T) {
+	for i := range 10 {
+		service := newControlledService()
+		runtime := runtimeWithServices(t, map[string]messenger.Service{testRuntimeServiceID: service})
+
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		runDone := make(chan error, 1)
+		go func() { runDone <- runtime.Run(ctx) }()
+
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Fatalf("iteration %d: unexpected run error on parent deadline: %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatalf("iteration %d: runtime did not stop after parent deadline", i)
+		}
+		cancel()
+	}
+}
+
+type deadlineErrorService struct {
+	started chan struct{}
+}
+
+func (s *deadlineErrorService) Run(_ context.Context) error {
+	close(s.started)
+	return context.DeadlineExceeded
+}
+
+func (s *deadlineErrorService) Readiness(context.Context) error { return nil }
+func (s *deadlineErrorService) BeginDrain()                     {}
+func (s *deadlineErrorService) Shutdown(context.Context) error  { return nil }
+
+func TestRuntimeInternalServiceDeadlineIsFailure(t *testing.T) {
+	service := &deadlineErrorService{started: make(chan struct{})}
+	runtime := runtimeWithServices(t, map[string]messenger.Service{"failing-service": service})
+
+	err := runtime.Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "messenger: service failing-service:") ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("run error = %v, want service failure with DeadlineExceeded", err)
+	}
+}

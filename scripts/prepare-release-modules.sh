@@ -82,6 +82,7 @@ drop_replace adapters/kafka github.com/assurrussa/gomessenger
 drop_replace adapters/kafka github.com/assurrussa/gomessenger/adapters/inbox
 drop_replace adapters/nats github.com/assurrussa/gomessenger
 drop_replace adapters/nats github.com/assurrussa/gomessenger/adapters/inbox
+drop_replace adapters/outbox github.com/assurrussa/gomessenger
 drop_replace adapters/outbox github.com/assurrussa/outbox
 drop_replace observability github.com/assurrussa/gomessenger
 drop_replace tools/gomessengerctl github.com/assurrussa/gomessenger

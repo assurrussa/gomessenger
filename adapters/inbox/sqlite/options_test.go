@@ -93,7 +93,7 @@ func TestCustomNamespaceRendersAllStatementsAndMigrations(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("read migration %s: %v", path, readErr)
 		}
-		rendered.WriteString(names.render(string(data)))
+		_, _ = rendered.WriteString(names.render(string(data)))
 	}
 	sql := rendered.String()
 	for _, expected := range []string{

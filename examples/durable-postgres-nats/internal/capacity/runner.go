@@ -93,23 +93,45 @@ func Run(ctx context.Context, config Config, log *slog.Logger) (report RunReport
 			DrainTimeoutSeconds:   config.DrainTimeout.Seconds(),
 			SampleIntervalSeconds: config.SampleInterval.Seconds(),
 			E2EP95SLOMillis:       float64(config.E2EP95SLO.Milliseconds()),
+			CheckpointTimeoutSecs: config.CheckpointTimeout.Seconds(),
 			MinimumRate:           config.MinimumRate,
 			PayloadProfile:        config.PayloadProfile,
+			PostgreSQLProfile:     config.PostgresProfile,
 		},
 		IntegrityPassed: true,
 		Stages:          make([]StageReport, 0, len(config.Rates)),
 		Environment: Environment{
 			HostOS: config.HostOS, HostArch: config.HostArch, HostCPUs: config.HostCPUs,
 			GitCommit: config.GitCommit, GitDirty: config.GitDirty,
+			OutboxGitCommit: config.OutboxGitCommit, OutboxGitDirty: config.OutboxGitDirty,
 			OutboxVersion:              outboxModuleVersion(),
 			OutboxWorkers:              config.OutboxWorkers,
 			OutboxReservationBatchSize: config.OutboxReservationBatchSize,
+			OutboxIngressMode:          string(config.OutboxIngressMode),
+			OutboxRelayMode:            string(config.OutboxRelayMode),
+			OutboxBatchMaxMessages:     config.OutboxBatchMaxMessages,
+			OutboxBatchMaxBytes:        config.OutboxBatchMaxBytes,
+			OutboxBatchMaxWaitMillis:   float64(config.OutboxBatchMaxWait) / float64(time.Millisecond),
 			ConsumerConcurrency:        config.ConsumerConcurrency,
+			ConsumerMode:               string(config.ConsumerMode),
+			ConsumerBatchMaxMessages:   config.ConsumerBatchMaxMessages,
+			ConsumerBatchMaxBytes:      config.ConsumerBatchMaxBytes,
+			ConsumerBatchMaxWaitMillis: float64(config.ConsumerBatchMaxWait) / float64(time.Millisecond),
 			OutboxProducerMaxConns:     config.OutboxProducerMaxConns,
 			OutboxRelayMaxConns:        config.OutboxRelayMaxConns,
 			OutboxPGXConnectionBudget:  config.OutboxProducerMaxConns + config.OutboxRelayMaxConns,
 			DBMaxOpenConns:             config.DBMaxOpenConns,
 			JetStreamStorage:           "file",
+			PostgreSQLProfile:          config.PostgresProfile,
+			PostgreSQLImage:            config.PostgresImage,
+			PostgreSQLImageDigest:      config.PostgresImageDigest,
+			NATSImage:                  config.NATSImage,
+			NATSImageDigest:            config.NATSImageDigest,
+			SUTCPUSet:                  "0-1",
+			PostgreSQLMemoryBytes:      1 << 30,
+			NATSMemoryBytes:            512 << 20,
+			APIMemoryBytes:             512 << 20,
+			SwapDisabled:               true,
 		},
 	}
 
@@ -153,6 +175,14 @@ func Run(ctx context.Context, config Config, log *slog.Logger) (report RunReport
 	}
 	if err := artifacts.writeReport(report); err != nil {
 		return report, err
+	}
+	if config.CheckpointTimeout > 0 {
+		checkpointCtx, cancelCheckpoint := context.WithTimeout(ctx, config.CheckpointTimeout)
+		err = probe.completeCheckpoint(checkpointCtx)
+		cancelCheckpoint()
+		if err != nil {
+			return report, failReport(artifacts, &report, err)
+		}
 	}
 
 	firstUnsustainable, err := experiment.runMeasuredStages(ctx, &report)
@@ -269,6 +299,7 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 	var commandErr error
 	var k6Result K6Result
 	var postgresLoadEnd pgtelemetry.Snapshot
+	loadSampleFailures := 0
 	processDone := process.done
 	boundaryDone := postgresBoundary
 	processCompleted := false
@@ -320,10 +351,22 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 			)
 		case <-ticker.C:
 			elapsed := time.Since(controllerStartedAt)
-			_, err = takeSample(ctx, e.probe, e.artifacts, labels, "load", elapsed, &samples)
-		}
-		if err != nil {
-			return StageReport{}, err
+			sampleCtx, sampleCancel := context.WithTimeout(ctx, 3*time.Second)
+			sample, sampleErr := e.probe.snapshot(sampleCtx, labels, "load", elapsed)
+			sampleCancel()
+			if sampleErr != nil {
+				if ctx.Err() != nil {
+					return StageReport{}, ctx.Err()
+				}
+				loadSampleFailures++
+				e.log.Warn("skip unavailable capacity load sample",
+					"stage", spec.id, "elapsed", elapsed, "error", sampleErr)
+				continue
+			}
+			samples = append(samples, sample)
+			if err := e.artifacts.appendSample(sample); err != nil {
+				return StageReport{}, err
+			}
 		}
 	}
 	if k6Result, err = process.finish(commandErr); err != nil {
@@ -360,7 +403,8 @@ func (e *execution) runStage(ctx context.Context, spec stageSpec) (StageReport, 
 		drainDuration: drain.duration, drainCompleted: drain.completedWithinLimit,
 		initial: initial, loadEnd: loadEnd, final: drain.final, samples: samples,
 		k6: k6Result, latency: postDrain.latency, envelopes: postDrain.envelopes, integrity: postDrain.integrity,
-		postgres: pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postDrain.postgres),
+		postgres:           pgtelemetry.BuildTimeline(postgresBefore, postgresLoadEnd, postDrain.postgres),
+		loadSampleFailures: loadSampleFailures,
 	})
 	return report, nil
 }
@@ -396,6 +440,7 @@ func (e *execution) reconcileAfterDrain(
 		return postDrainResult{}, err
 	}
 	drain.final.Application.Consumer = observedApplication.Consumer
+	drain.final.Application.OutboxExecution = observedApplication.OutboxExecution
 	postgresAfterDrain, err := e.probe.postgresSnapshot(ctx)
 	if err != nil {
 		return postDrainResult{}, err
@@ -512,28 +557,6 @@ func takeLoadEndSample(
 	return sample, startedAt, nil
 }
 
-func takeSample(
-	ctx context.Context,
-	probe *probe,
-	artifacts *artifacts,
-	labels demo.BenchmarkLabels,
-	phase string,
-	elapsed time.Duration,
-	samples *[]Sample,
-) (Sample, error) {
-	sampleCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	sample, err := probe.snapshot(sampleCtx, labels, phase, elapsed)
-	if err != nil {
-		return Sample{}, err
-	}
-	*samples = append(*samples, sample)
-	if err := artifacts.appendSample(sample); err != nil {
-		return Sample{}, err
-	}
-	return sample, nil
-}
-
 func waitQuiescent(
 	ctx context.Context,
 	config Config,
@@ -631,6 +654,10 @@ func systemQuiescent(sample Sample) bool {
 func failReport(artifacts *artifacts, report *RunReport, err error) error {
 	report.CompletedAt = time.Now().UTC()
 	report.Failure = err.Error()
+	var minimumRateErr *MinimumRateError
+	if !errors.As(err, &minimumRateErr) {
+		report.IntegrityPassed = false
+	}
 	if writeErr := artifacts.writeReport(*report); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}

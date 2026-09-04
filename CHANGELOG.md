@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `make check-workspace` runs the maximal source gate against the local
+  multi-module workspace, including the sibling Outbox checkout, without
+  weakening the separate `GOWORK=off` publication boundary.
+- True-batch proof artifacts identify their evidence scope as
+  `checkout-workspace` and retain both clean checkout commits.
+- `make capacity-outbox-batch-screen` provides a two-cell development A/B with
+  30 seconds of warm-up and 60 seconds of measured load per Outbox variant at
+  a default 1,000 msg/s; its artifacts are explicitly non-proof `SCREEN_ONLY`
+  evidence.
+
 ## [0.2.2] - 2026-08-29
 
 ### Added

@@ -6,10 +6,10 @@ github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/assurrussa/gobus v1.1.0 h1:eagUg6Dhl4Tx0K9rInb5UHjesi3x/a+l5nW8szECGxY=
 github.com/assurrussa/gobus v1.1.0/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
-github.com/assurrussa/outbox v0.12.0 h1:ChnUueyc0rWPpLU9RS5Xcgq1xHPQdiGq6m7T6hY9mWc=
-github.com/assurrussa/outbox v0.12.0/go.mod h1:fzNmhtaNHltUtnUsj5KMQPNlnEB9tY/Z5MfsxJYvBgg=
-github.com/assurrussa/outbox/backends/pgsql v0.12.0 h1:24X++Mt2oFbW8gRBbIfPKEUMqBc8+OsaCgdZii2WC9A=
-github.com/assurrussa/outbox/backends/pgsql v0.12.0/go.mod h1:jS1k2jU7sWsDervMCTpj09/+R6eyk05bHPFuho+FxOQ=
+github.com/assurrussa/outbox v0.13.0 h1:s2WKtZwvKgIhuGoAeP5qd37+SD3j6hOPRWidrS7tMn8=
+github.com/assurrussa/outbox v0.13.0/go.mod h1:fzNmhtaNHltUtnUsj5KMQPNlnEB9tY/Z5MfsxJYvBgg=
+github.com/assurrussa/outbox/backends/pgsql v0.13.0 h1:srwTf3yohevmPXlqF8RFFD1jKrX0bTYM33sTforLWvU=
+github.com/assurrussa/outbox/backends/pgsql v0.13.0/go.mod h1:55eJZWWY29aXtr22hVMEWTDV1Wc0hjAkofAg3s7Nr+s=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/cockroachdb/cockroach-go/v2 v2.2.0 h1:/5znzg5n373N/3ESjHF5SMLxiW4RKB05Ql//KWfeTFs=

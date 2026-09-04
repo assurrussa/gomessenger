@@ -13,6 +13,7 @@ import (
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
+	"github.com/assurrussa/gomessenger/adapters/inbox"
 	inboxsqlite "github.com/assurrussa/gomessenger/adapters/inbox/sqlite"
 	kafkaadapter "github.com/assurrussa/gomessenger/adapters/kafka"
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
@@ -24,7 +25,10 @@ type kafkaPipelinePayload struct {
 	Data string `json:"data,omitempty"`
 }
 
-const permanentFailureKind = "permanent"
+const (
+	permanentFailureKind = "permanent"
+	kafkaRetryCase       = "retry"
+)
 
 type kafkaDeferralEvent struct {
 	Topic     string
@@ -145,7 +149,7 @@ func TestKafkaPipeline(t *testing.T) {
 		attempt := attempts[message.Payload.Case]
 		attemptsMu.Unlock()
 		switch message.Payload.Case {
-		case "retry":
+		case kafkaRetryCase:
 			if attempt == 1 {
 				return errors.New("transient integration failure")
 			}
@@ -204,12 +208,12 @@ func TestKafkaPipeline(t *testing.T) {
 	})
 
 	publisher := messenger.BindPublisher(bus, event)
-	receipt, err := publisher.Publish(t.Context(), kafkaPipelinePayload{Case: "retry"})
+	receipt, err := publisher.Publish(t.Context(), kafkaPipelinePayload{Case: kafkaRetryCase})
 	if err != nil || receipt.State != messenger.ReceiptBrokerConfirmed {
 		t.Fatalf("publish retry case: receipt=%#v error=%v", receipt, err)
 	}
-	waitHandled(t, handled, "retry")
-	if got := attemptCount(&attemptsMu, attempts, "retry"); got != 2 {
+	waitHandled(t, handled, kafkaRetryCase)
+	if got := attemptCount(&attemptsMu, attempts, kafkaRetryCase); got != 2 {
 		t.Fatalf("retry handler attempts = %d, want 2", got)
 	}
 	delayedKey := kafkaKeyForPartition(t, sourceTopic, 0, 2)
@@ -329,6 +333,191 @@ func TestKafkaPipeline(t *testing.T) {
 	}
 }
 
+//nolint:gocognit,gocyclo // This test keeps the complete live transactional scenario together.
+func TestKafkaBatchPipeline(t *testing.T) {
+	brokersValue := os.Getenv("GOMESSENGER_KAFKA_BROKERS")
+	if brokersValue == "" {
+		t.Skip("GOMESSENGER_KAFKA_BROKERS is not set; use make test-kafka")
+	}
+	brokers := strings.Split(brokersValue, ",")
+	namespace := fmt.Sprintf("kafkabatch%d", time.Now().UnixNano())
+	instanceID := fmt.Sprintf("batchtest%d", time.Now().UnixNano())
+	consumerID := "batch-pipeline-worker"
+	event := messenger.MustEvent("batch-pipeline-event", 1, messenger.JSON[kafkaPipelinePayload]())
+	sourceTopic, err := kafkaadapter.Topic(namespace, event.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryTopic, _ := kafkaadapter.RetryTopic(sourceTopic, consumerID, 0)
+	replayTopic, _ := kafkaadapter.ReplayTopic(sourceTopic, consumerID)
+	dlqTopic, _ := kafkaadapter.DLQTopic(sourceTopic, consumerID)
+	transport, err := kafkaadapter.NewTransport(kafkaadapter.TransportConfig{
+		Name: "kafka-batch-integration", Brokers: brokers, ClientID: "gomessenger-kafka-batch-integration",
+		InstanceID: instanceID, OperationTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("create Kafka transport: %v", err)
+	}
+	topology := kafkaIntegrationTopology(sourceTopic, consumerID, retryTopic, replayTopic, dlqTopic)
+	if plan, err := kafkaadapter.ApplyTopology(t.Context(), transport, topology); err != nil {
+		t.Fatalf("apply Kafka batch topology: plan=%#v error=%v", plan, err)
+	}
+	eventuallyKafka(t, 20*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		plan, err := kafkaadapter.PlanTopology(ctx, transport, topology)
+		return err == nil && !plan.HasChanges() && !plan.HasConflicts()
+	}, "Kafka batch topology did not become visible")
+
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "kafka-batch-inbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.ExecContext(t.Context(), "PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inboxsqlite.Migrate(t.Context(), database); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE kafka_batch_effects (
+		case_name TEXT PRIMARY KEY
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	store, err := inboxsqlite.New(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var attemptsMu sync.Mutex
+	attempts := make(map[string]int)
+	batchSizes := make(chan int, 4)
+	consumer, err := kafkaadapter.NewBatchEventConsumer(
+		transport,
+		store,
+		event,
+		func(ctx context.Context, messages []messenger.Message[kafkaPipelinePayload]) (messenger.BatchResult, error) {
+			batchSizes <- len(messages)
+			result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+			successes := make([]string, 0, len(messages))
+			for index, message := range messages {
+				attemptsMu.Lock()
+				attempts[message.Payload.Case]++
+				attempt := attempts[message.Payload.Case]
+				attemptsMu.Unlock()
+				var itemErr error
+				if message.Payload.Case == kafkaRetryCase && attempt == 1 {
+					itemErr = messenger.RetryAfter(errors.New("retry batch item"), 200*time.Millisecond)
+				} else {
+					successes = append(successes, message.Payload.Case)
+				}
+				result.Items[index] = messenger.BatchItemResult{
+					Key: messenger.BatchItemKey{Source: message.Metadata.Source, MessageID: message.Metadata.ID},
+					Err: itemErr,
+				}
+			}
+			tx, ok := inbox.SQLTxFromContext(ctx)
+			if !ok {
+				return messenger.BatchResult{}, errors.New("missing Kafka batch Inbox transaction")
+			}
+			for _, caseName := range successes {
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO kafka_batch_effects(case_name) VALUES (?) ON CONFLICT DO NOTHING`, caseName); err != nil {
+					return messenger.BatchResult{}, err
+				}
+			}
+			return result, nil
+		},
+		kafkaadapter.HandlerConfig{
+			Namespace: namespace, ConsumerID: consumerID, Concurrency: 1,
+			Timeout: 3 * time.Second, FinalizationTimeout: 3 * time.Second, MaxAttempts: 3,
+			BaseRetry: 50 * time.Millisecond, MaxRetry: 200 * time.Millisecond,
+			RetryTiers: []time.Duration{200 * time.Millisecond},
+		},
+		messenger.BatchConfig{MaxMessages: 3, MaxWait: 2 * time.Second},
+	)
+	if err != nil {
+		t.Fatalf("create Kafka batch consumer: %v", err)
+	}
+	route, err := kafkaadapter.NewRoute(transport, kafkaadapter.RouteConfig{
+		Name: "kafka.batch.integration", Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := messenger.NewBuilder(messenger.WithSource("urn:service:kafka-batch-integration"))
+	builder.RouteEvent(event, route)
+	builder.Use("kafka.consumer.batch-pipeline", consumer)
+	_, runtime, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(context.Background()) }()
+	t.Cleanup(func() {
+		runtime.BeginDrain()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := runtime.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown Kafka batch runtime: %v", err)
+		}
+		if err := <-runDone; err != nil {
+			t.Errorf("run Kafka batch runtime: %v", err)
+		}
+	})
+	var readinessErr error
+	var readinessState string
+	eventuallyKafka(t, 20*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		readinessErr = runtime.Readiness(ctx)
+		if state := fmt.Sprint(readinessErr); state != readinessState {
+			readinessState = state
+			t.Logf("Kafka batch readiness: %s", state)
+		}
+		return readinessErr == nil
+	}, "Kafka batch runtime did not become ready")
+
+	key := kafkaKeyForPartition(t, sourceTopic, 0, 2)
+	payloads := make([][]byte, 0, 3)
+	for _, caseName := range []string{"first", kafkaRetryCase, "third"} {
+		payloads = append(payloads, encodeKafkaIntegrationPayloadWithKey(
+			t, event, kafkaPipelinePayload{Case: caseName}, key,
+		))
+	}
+	receipts, itemErrors, err := route.PublishEnvelopeBatch(t.Context(), payloads)
+	if err != nil {
+		t.Fatalf("publish Kafka relay batch: %v", err)
+	}
+	if len(receipts) != len(payloads) || len(itemErrors) != len(payloads) {
+		t.Fatalf("Kafka relay batch lengths = receipts %d errors %d, want %d",
+			len(receipts), len(itemErrors), len(payloads))
+	}
+	for index := range payloads {
+		if itemErrors[index] != nil || receipts[index].State != messenger.ReceiptBrokerConfirmed {
+			t.Fatalf("Kafka relay batch item %d = receipt %#v error %v", index, receipts[index], itemErrors[index])
+		}
+	}
+	eventuallyKafka(t, 20*time.Second, func() bool {
+		var effects int
+		if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM kafka_batch_effects`).Scan(&effects); err != nil {
+			return false
+		}
+		return effects == 3 && attemptCount(&attemptsMu, attempts, kafkaRetryCase) == 2
+	}, "Kafka batch outcomes did not reconcile")
+	select {
+	case size := <-batchSizes:
+		if size != 3 {
+			t.Fatalf("first Kafka batch size = %d, want 3", size)
+		}
+	default:
+		t.Fatal("Kafka batch handler was not invoked")
+	}
+}
+
 func kafkaIntegrationTopology(source, consumerID, retry, replay, dlq string) kafkaadapter.Topology {
 	base := kafkaadapter.TopicSpec{
 		Partitions: 2, ReplicationFactor: 1, MinInSyncReplicas: 1,
@@ -378,13 +567,23 @@ func encodeKafkaIntegrationPayload(
 	payload kafkaPipelinePayload,
 ) []byte {
 	t.Helper()
+	return encodeKafkaIntegrationPayloadWithKey(t, event, payload, "")
+}
+
+func encodeKafkaIntegrationPayloadWithKey(
+	t *testing.T,
+	event messenger.Event[kafkaPipelinePayload],
+	payload kafkaPipelinePayload,
+	key string,
+) []byte {
+	t.Helper()
 	id, err := messenger.UUIDv7Generator().New()
 	if err != nil {
 		t.Fatalf("generate message ID: %v", err)
 	}
 	wire, err := messenger.EncodeEventEnvelope(event, messenger.Metadata{
 		ID: id, Kind: messenger.KindEvent, Name: event.Info().Name, SchemaVersion: event.Info().SchemaVersion,
-		Source: "urn:service:kafka-outbox", Time: time.Now().UTC(), CorrelationID: id,
+		Source: "urn:service:kafka-outbox", Time: time.Now().UTC(), CorrelationID: id, Key: key,
 		ContentType: event.Info().ContentType,
 	}, payload)
 	if err != nil {

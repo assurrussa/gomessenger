@@ -1,5 +1,378 @@
 # Implementation notes
 
+## 2026-09-04 — PR #24 review round 13 fixes (Restore GOWORK=off as default check graph)
+
+- [P1 - Restore GOWORK=off as the default check graph]: In `Makefile`, changed `CHECK_GOWORK ?= $(abspath go.work)` to `CHECK_GOWORK ?= off`. Unqualified targets (`build`, `vet`, `lint`, `test`, `test-race`, `test-checkptr`, `cover`, `test-consumer`, `test-e2e`, and `make check`) and hosted GitHub Actions CI jobs now resolve through the published-graph boundary (`GOWORK=off`) by default, preventing workspace replacements from masking broken requirements or unavailable published APIs. `make check-workspace` remains available to explicitly opt into verifying the local `go.work` workspace graph.
+
+## 2026-09-04 — PR #24 review round 12 fixes (NATS Route PublishEnvelopeBatch context-aware chunking and saturated window cancellation)
+
+- [P2 - Honor cancellation while filling the async publish window]: In `adapters/nats/route.go:PublishEnvelopeBatch`, replaced the unchunked enqueue loop with context-aware chunking bounded by `windowSize := r.publishWindow` (defaulting to 100 via `defaultPublishAsyncMaxPending`). When `len(valid)` exceeds the window size, items are enqueued and awaited in chunks of at most `windowSize`. Because each chunk size is `<= maxPending`, `PublishMsgAsync` never exceeds the pending limit and never blocks on internal `asyncStall()` or `stallWait`. Before each item enqueue and during future resolution, `ctx.Done()` is checked: if cancelled while the window is saturated, the publisher is cleaned up immediately, all uncompleted and subsequent items are assigned `ctx.Err()`, and the method exits promptly without delay. Added `PublishWindow` configuration to `RouteConfig` (rejecting negative values in `NewRoute`). Added `publishMsgAsyncHook` to `Route` and added deterministic unit test `TestRoutePublishEnvelopeBatchHonorsCancellationWhenWindowSaturated` in `adapters/nats/route_internal_test.go` and integration test `TestRoutePublishEnvelopeBatchChunksAcrossPublishWindow` in `adapters/nats/integration_test.go`.
+
+## 2026-09-04 — PR #24 review round 11 fixes (NATS batch startup exit on admission cancellation, drop Outbox facade replace in release preparation)
+
+- [P1 - Exit startup when batch admission is cancelled]: In `adapters/nats/batch_consumer.go:runBatch`, added `case <-admissionCtx.Done(): cancelAdmission(); workers.Wait(); return nil` to the worker startup synchronization loop. If `BeginDrain` is invoked while workers are establishing topology or pull loops before signaling `started`, `admissionCtx` is cancelled; the coordinator now observes admission cancellation immediately, waits for worker termination, and exits `Run` cleanly instead of remaining blocked until shutdown forces `runContext` cancellation. Added deterministic test `TestNATSBatchStartupExitsOnAdmissionCancellation` in `adapters/nats/batch_consumer_internal_test.go`.
+- [P1 - Drop the Outbox facade replace in release preparation]: In `scripts/prepare-release-modules.sh`, added `drop_replace adapters/outbox github.com/assurrussa/gomessenger`. This ensures that running `make release-ready` strips the development replace directive from `adapters/outbox/go.mod` alongside the Outbox dependency replace, allowing `scripts/check-release-modules.sh` and the release workflow to pass without failing on unexpected replace directives.
+
+## 2026-09-04 — PR #24 review round 10 fixes (Mark idle NATS batch workers ready before waiting for messages, subtract first decode duration from fill deadline)
+
+- [P1 - Mark idle NATS batch workers ready before waiting for messages]: In `adapters/nats/batch_consumer.go:collectNATSBatch`, signaled `ready()` immediately after the initial synchronous `subscription.FetchBatch(1, natsio.Context(admissionCtx))` establishes without setup errors, before blocking on `firstResult.Messages()`. When a stream is empty during startup, workers previously waited for an incoming message before signaling readiness, causing consumers on empty streams to remain in `ErrRuntimeNotRunning` indefinitely and preventing readiness-gated publishers from producing messages. Passing `signalReady` into `collectNATSBatch` guarantees idle workers report ready once their pull loop is established. Added integration test `TestNATSBatchReadinessReportsReadyOnEmptyStream`.
+- [P2 - Subtract first-message decoding time from fill deadline]: In `adapters/nats/batch_consumer.go:collectNATSBatch`, computed `elapsed := c.clock().UTC().Sub(batch.startedAt)` after decoding the first message. If `elapsed >= c.batch.config.MaxWait`, the batch flushes immediately without issuing a fill pull. Otherwise, the fill context timeout is scaled to `remainingWait := c.batch.config.MaxWait - elapsed`, preventing decode latency from artificially doubling batch latency bounds. Added unit test `TestNATSBatchFillSubtractsFirstDecodeTimeAndFlushesImmediatelyWhenElapsed`.
+
+## 2026-09-04 — PR #24 review round 9 fixes (Batch delivery canonicalization before route invocation, NATS batch heartbeat before decode and immediate NAK eviction)
+
+- [P2 - Batch delivery canonicalization before route invocation]: In `messenger_batch.go:deliverBatch`, iterated through all `deliveries` and called `delivery.MarshalEnvelope()` prior to invoking `route.DeliverBatch`. Because `Delivery.MarshalEnvelope()` is cached via `sync.Once`, pre-validating guarantees that any codec or envelope serialization defect fails closed before route invocation, preventing custom batch routes from partially staging earlier deliveries before encountering an unencodable later item. Added regression test `TestBatchFacadeCanonicalizesDeliveriesBeforeRouteInvocation` in `messenger_batch_test.go`.
+- [P2 - NATS batch heartbeat before decode and immediate NAK eviction]: In `adapters/nats/batch_consumer.go:collectNATSBatch`, registered each fetched message with `batch.heartbeat.Add(message)` before calling `c.decodeNATSBatchDelivery(message)` for both the initial pull and the subsequent fill loop. If an admitted message is immediately rejected due to conflicting attempt generation or exceeding remaining batch byte capacity, it is removed from `batch.heartbeat` via `batch.heartbeat.Remove(message)` before issuing `message.NakWithDelay`. Added `heartbeatHook` to `Consumer` and added deterministic regression test `TestNATSBatchHeartbeatStartsBeforeDecodingAndEvictsOnImmediateNak` in `adapters/nats/batch_consumer_internal_test.go`.
+
+## 2026-09-04 — PR #24 review round 8 fixes (NATS batch consumer pull loop readiness behind established pull boundary and deterministic fatal first fetch coverage)
+
+- [P1 - Signal readiness only after each pull loop starts]: In `adapters/nats/batch_consumer.go:runNATSBatchWorker`, moved `readyOnce.Do(ready)` behind the established pull boundary after `collectNATSBatch`. With multiple workers and a buffered startup channel, workers previously invoked `ready` before entering `collectNATSBatch`, allowing the coordinator to consume all signals and set `pullLoopReady = true` while a worker was still preempted before its first pull or while that first pull was about to report a fatal error. Moving the signal behind the pull boundary guarantees that any fatal error on the first pull sends to `fatal` without signaling readiness, causing the coordinator to abort startup and preventing `pullLoopReady` from becoming true. Added `collectBatchHook` on `Consumer` for deterministic package test simulation. Added unit tests `TestNATSBatchWorkerFatalFirstFetchDoesNotSignalReady`, `TestNATSBatchReadinessFailsClosedOnWorkerFatalFirstFetch`, and `TestNATSBatchReadinessSucceedsOnlyAfterAllWorkersEstablishPullBoundary`.
+
+## 2026-09-04 — PR #24 review round 7 fixes (Runtime bounded shutdown, wire DLQ conservative sanitization, NATS OperationHandle decoupling, batch latency timing, and deterministic watchdog tests)
+
+- [P1 - Runtime shutdownServices bounded by deadline]: In `runtime.go`, replaced `sync.WaitGroup` in `shutdownServices` with a buffered result channel `results := make(chan shutdownServiceResult, len(r.services))` and a select loop against `ctx.Done()`. This guarantees `Runtime.Run` and pre-run `Runtime.Shutdown(ctx)` return boundedly within the timeout even if a registered service's `Shutdown` method blocks or ignores context cancellation. Eliminated data race by updating `shutdownErrors` only on the receiving goroutine.
+- [P1 - Runtime unified shutdown budget]: In `Runtime.Run`, unified the wait for service `Run` termination and the subsequent `shutdownServices` call under a single `shutdownContext` with `r.shutdownTimeout`. Services can no longer consume up to `2 * shutdownTimeout`. Added comprehensive deterministic lifecycle regression tests for stuck `Run`, stuck `Shutdown`, both stuck, and pre-run stuck shutdown.
+- [P2 - Wire DLQ payload conservative sanitization]: In `adapters/kafka/batch_consumer.go` (`makeKafkaBatchDLQ`) and `adapters/nats/batch_consumer.go` (`deadLetterAndAcknowledgeNATSBatch`), switched durable DLQ payload error sanitization to the transport-owned conservative sanitizer (`defaultFailureSanitizer{}`). In Kafka batch pipelines, user-provided `FailureSanitizer` is invoked strictly after `session.AllowRebalance()` during post-release observation dispatch, preventing slow custom sanitizers from delaying group rebalance. In NATS, operational error logging within finalization workers still passes errors through the configured sanitizer, but durable wire DLQ text always uses the conservative sanitizer, and custom sanitizers are expected to execute promptly without blocking. Added item-level and preflight DLQ scenarios to `TestKafkaBatchObserversCalledOnlyAfterAllowRebalance`.
+- [P2 - Kafka deferred partition logging post-rebalance]: In `adapters/kafka/batch_consumer.go`, removed logger invocation from `pauseKafkaBatchPartition` and deferred `logDeferredPartition` until after `session.AllowRebalance()` in all-deferred and partial-deferred commit branches, ensuring custom loggers never run inside the blocked-rebalance window.
+- [P2 - Decouple NATS OperationHandle from broker ACK worker pool]: In `adapters/nats/batch_consumer.go:processNATSBatch`, moved `OperationHandle` observation emission immediately after `c.store.ProcessBatchAttempt` returns, emitting handler observations for all invoked items and completed duplicates before broker finalization starts. Broker ACK/NAK/DLQ workers now only generate broker boundary telemetry (`OperationBrokerAck`, `OperationRetryHandoff`, `OperationDLQHandoff`). Force shutdown during ACK finalization no longer drops telemetry for completed handler executions. Optimized worker pool cancellation exit to return in $O(1)$ without draining remaining tasks.
+- [P2 - Batch observation timing accuracy]: In both Kafka and NATS batch consumers, populated `StartedAt: handlerStarted` and `Duration: handlerDuration` for invoked batch items, and `StartedAt: handlerStarted, Duration: 0` for duplicates, ensuring OpenTelemetry spans and Prometheus histograms record valid handler latencies instead of zero duration. Captured `batchDuration` before observer fan-out, queued item and boundary observations, and dispatched them after `batchDuration` calculation, preventing slow observer callbacks from distorting measured batch duration. Added regression tests verifying latency independence from observer execution time.
+- [P3 - Deterministic Kafka produce watchdog tests]: Extracted watchdog state machine into internal helper `produceWatchdog` with explicit `startProduceWatchdog` and `Complete()` methods. Replaced the race-prone test with deterministic unit tests for completed-before-cancellation and cancellation-before-completed paths.
+- [P3 - NATS DLQ handoff stage operational context]: In `adapters/nats/batch_consumer.go`, wrapped failed DLQ handoff errors with the failed stage (`headers`, `validate`, `encode`, `publish`, `ack`), providing bounded operational telemetry for DLQ pipeline failures.
+- [P3 - FailureSanitizer contract documentation alignment]: Clarified the contract separation across `docs/contracts.md`, `README.md`, `failure.go`, and adapter interfaces: durable batch DLQ wire text strictly uses the adapter-owned conservative sanitizer to safeguard rebalance/finalization bounds, while configured host sanitizers apply to observations and operational logs, requiring custom sanitizers to execute promptly without blocking.
+- [P3 - CI static analysis cleanups]: Replaced repeated `"stuck"` string literals in `runtime_test.go` with `stuckServiceName` constant (`goconst`). Removed unused `ctx` parameter from `pauseKafkaBatchPartition` in `adapters/kafka/batch_consumer.go` and tests (`revive`). Added `gocyclo` nolint directive to `processNATSBatch` in `adapters/nats/batch_consumer.go`. Decomposed `finalizeNATSNonDLQDeliveries` using `natsNonDLQCoordinator` and `natsNonDLQTasks` to reduce cognitive complexity (`gocognit`). Wrapped long observer closures in `adapters/nats/batch_consumer.go` (`lll`). Switched `testNATSBatchObserver` to exhaustive tagged switch in `adapters/nats/batch_consumer_internal_test.go` (`staticcheck`, `exhaustive`).
+
+## 2026-09-04 — PR #24 review round 6 fixes (Kafka ProduceSync watchdog bounds, observer rebalance boundary, NATS ACK error separation, fail-closed OperationHandle, context inheritance verification)
+
+- [P1 - Kafka ProduceSync bounded by watchdog and session context]: In `adapters/kafka/consumer.go` (`runWorker`) and `adapters/kafka/batch_consumer.go` (`runKafkaBatchWorker`), tied franz-go client lifecycle to worker session context via `kgo.WithContext(sessionCtx)`. In `commitTransactionalRecords`, added a watchdog goroutine that forcibly invokes `session.CloseAllowingRebalance()` if `brokerContext.Done()` triggers while `session.ProduceSync` is in-flight. This prevents unbounded hanging from franz-go idempotent record retries when broker connectivity is lost, unblocks `ProduceSync` with `ErrClientClosed`, allows group rebalance, and lets the worker supervisor recreate the session or allows shutdown to exit cleanly without goroutine leaks. Added regression test `TestKafkaBatchProduceSyncWatchdogBoundsProduceAndAllowsRebalance`.
+- [P2 - Kafka observers deferred until after AllowRebalance]: In `adapters/kafka/batch_consumer.go:processKafkaBatch`, queued all observations (`OperationHandle`, `OperationOffsetCommit`, `OperationRetryHandoff`, `OperationDLQHandoff`) into a pending list and ensured `session.AllowRebalance()` is strictly called before notifying user observers across all code paths (success, fail-closed, begin error, produce error, and commit error). Observers are now outside the rebalance budget and slow user callbacks cannot delay group rebalance. Added regression test `TestKafkaBatchObserversCalledOnlyAfterAllowRebalance`.
+- [P2 - NATS batch ACK confirmation error decoupled from fatal lifecycle]: In `adapters/nats/batch_consumer.go`, introduced `natsBatchFinalizationResult` separating `observationErr` from `fatalErr`. In `finalizeNATSBatchNonDLQ`, failed `AckSync` logs a warning and populates `observationErr`, but returns `fatalErr = nil` so the worker continues pulling; unacknowledged deliveries are safely deduplicated upon redelivery via completed Inbox identity. Replaced tight 25ms NAK retry loop with `c.waitForHandoffRetry(ctx, nakAttempt)` bounded backoff. Added regression test `TestNATSBatchAckSyncErrorDoesNotAbortWorker`.
+- [P2 - OperationHandle emitted for fail-closed handler invocations]: In both Kafka and NATS batch consumers, moved population of `invoked` items immediately before `c.batch.invoke`. In `batchruntime.IsFailClosed(handlerErr)` branches, generated `OperationHandle` observations with sanitized errors for all actually invoked items before exiting, ensuring per-item handler metrics match aggregate `BatchHandlerMessages`. Added regression tests for top-level `Permanent` and `ErrInvalidBatchResult`.
+- [P3 - context inheritance regression tests strengthened]: In `adapters/kafka/batch_consumer_internal_test.go` and `adapters/nats/batch_consumer_internal_test.go`, updated test backends to inject a sentinel context key/value into `transactionHandlerCtx` and verified the handler context inherits it directly rather than deriving from outer context. Added backend delay exceeding transaction timeout to verify handler deadline is inherited and bounded by transaction deadline.
+- [P3 - docs/contracts.md lifecycle clarification]: Updated transport-level contract to distinguish single-record consumer lifecycle (`AllowRebalance` before decode/inbox) from batch consumer lifecycle (`AllowRebalance` after commit/pause and before observers), and documented watchdog produce bounds.
+
+## 2026-09-04 — PR #24 review round 5 fixes (handler context inheritance, rebalance timeout & cleanup bounds, NATS finalization error handling, handler observation filtering)
+
+- [P2 - batch handler context inheritance]: In `adapters/kafka/batch_consumer.go` and `adapters/nats/batch_consumer.go`, derived `handlerCtx, cancelHandler := context.WithTimeout(transactionHandlerCtx, c.config.Timeout)`. This preserves the parent transaction's deadline, SQL transaction value, and cancellation while bounding handler execution time. Added regression tests verifying deadline inheritance and immediate handler cancellation on transaction abort.
+- [P2 - kafka rebalance timeout & cleanup bounds]: Sized `batchConsumerRebalanceTimeout` to budget `2 * operationTimeout` to cover `ProduceSync` timeout followed by `TryAbort` timeout during transactional handoff failure. Documented that timeout assumes bounded application codec execution. Reordered `processKafkaBatch` to invoke `session.AllowRebalance()` immediately after transaction commit and partition pause, prior to terminal cleanup. Replaced sequential 5-second per-item cleanup with deduplicated `(Key, Fingerprint)` cleanup under a single 5-second context tied to the worker context, cancelling immediately on forced shutdown.
+- [P2 - nats batch ACK/NAK finalization errors]: Abstracted JetStream message methods via internal `natsBatchBrokerMessage` interface (`AckSync`, `NakWithDelay`, `InProgress`). In `finalizeNATSBatchNonDLQ`, retried `NakWithDelay` in a loop with 25ms backoff while keeping the delivery in heartbeat until success or context cancellation. Removed successfully acknowledged or delayed-NAK deliveries from the batch heartbeat immediately. Aggregated non-DLQ and DLQ handoff errors in `finalizeNATSBatch` and propagated them to `processNATSBatch` and `observationErr`. Deduplicated terminal DLQ cleanup under a single 5-second context respecting forced shutdown. Added tests for NAK retry, NAK cancellation, ACK observation errors, and heartbeat eviction.
+- [P2 - filter uninvoked OperationHandle observations]: Tracked `invoked` items in both Kafka and NATS batch consumer callbacks and restricted `OperationHandle` emissions to actually invoked items or completed duplicates. Preflight, expired, and backend pre-handler failures no longer produce spurious individual `OperationHandle` observations. Added regression tests for pre-callback backend error (0 handler observations) and mixed expired/active batch (1 handler observation).
+- [P3 - ADR, test terminology, and notes synchronization]: Updated ADR-0005 to reflect durable Kafka retry on top-level failure and `2*OperationTimeout` in `RebalanceTimeout`. Aligned `docs/kafka.md`. Updated assertion failure messages in `adapters/kafka/batch_consumer_internal_test.go` from paused partition to durable retry commit. Restored missing round 3 heading in `implementation-notes.md`.
+
+## 2026-09-04 — PR #24 review round 4 fixes (bounded kafka alien partition collection, batch rebalance budget, transaction failure telemetry/logging, and fixed handoff observation latency)
+
+- [P2 - kafka collection bounded memory for alien partitions]: Removed `batch.all []*kgo.Record` in `adapters/kafka/batch_consumer.go`. Incremental poll iterations now update a bounded map `earliestOffsets map[string]map[int32]kgo.EpochOffset` and immediately release alien records. In `collectKafkaBatch`, fill terminates if a subsequent poll yields no records for the selected partition, bounding memory and poll attempts. Added regression test verifying 2 polls and bounded memory.
+- [P2 - kafka batch rebalance timeout budget]: Rebalance blocking is held across multi-poll fill, inbox attempt, batch handler, and Kafka transaction. Dynamically computed `RebalanceTimeout` via `batchConsumerRebalanceTimeout` covering `MaxWait + Timeout + FinalizationTimeout + OperationTimeout + 5s` safety margin, bounded by Kafka wire protocol limit (`math.MaxInt32` ms). Documented in `docs/kafka.md` and `docs/decisions/0005-batch-consumer.md`.
+- [P2 - decoupled handler telemetry & transaction logging]: In `processKafkaBatch`, emitted per-item `OperationHandle` immediately after handler execution before the Kafka transaction. On commit failure, emitted `OperationOffsetCommit`, `OperationRetryHandoff`, and `OperationDLQHandoff` with the finalization error. Reused `commitTransactionalRecords` in both single-record and batch consumers to guarantee identical transport failure logging for `Begin`, `ProduceSync`/abort, `End`, and uncommitted aborts. Fixed NATS batch DLQ failure path to emit `operationDLQHandoff` and `OperationHandle`. Added comprehensive tests for all transaction failure scenarios checking observers and transport logs.
+- [P3 - fixed handoff observation latency]: Computed `commitDuration := c.clock().UTC().Sub(commitStarted)` once upon transaction completion and passed it via `observeBoundaryWithDuration` to all offset commit, retry, and DLQ boundaries, preventing observer fan-out skew. Added regression test verifying identical duration with an advancing clock observer.
+- [Test remark - session2 pause and scheduler2 resume]: Expanded `TestKafkaBatchTopLevelErrorPersistsDurableRetryScheduleAcrossSessions` to verify partition pause on `session2` and release on `scheduler2.releaseDue`.
+
+## 2026-09-04 — PR #24 review round 3 fixes (durable kafka retry, batch fill bounds, commit latency, and observation errors)
+
+- [P2 - kafka durable top-level retry]: In `adapters/kafka/batch_consumer.go:processKafkaBatch`, top-level handler failures (`handlerErr != nil` and `!IsFailClosed`) now publish valid items to the durable retry tier with exact `notBefore` header, preserving canonical envelope bytes, keys, and `AttemptGeneration`, and commit offsets in the Kafka transaction. Preflight terminal DLQs are also published within the same transaction. Added `TestKafkaBatchTopLevelErrorPersistsDurableRetryScheduleAcrossSessions` verifying that upon session loss/recreation, a new session observes the persisted schedule and defers execution.
+- [P2 - kafka batch collection bounds]: In `adapters/kafka/batch_consumer.go:collectKafkaBatch`, the fill loop now exits immediately when `batch.selectionStopped` is true or `batch.bytes >= MaxBytes`. In `selectKafkaBatchRecords`, reaching `MaxBytes` marks `selectionStopped = true`. Added `TestKafkaBatchCollectStopsPollingWhenSelectionStopped` verifying with a fake session that `PollRecords` is called exactly once.
+- [P2 - kafka batch commit latency]: Captured `commitStarted` immediately before calling `commitKafkaBatch` so `operationOffsetCommit`, `operationRetryHandoff`, and `operationDLQHandoff` measure actual transaction execution time. Added `TestKafkaBatchFinalizationLatencyIncludesTransactionDuration`.
+- [P3 - kafka batch observation errors]: Centralized non-nil error returns in `processKafkaBatch` through `failObservation`, ensuring `observationErr` is always populated before deferred batch observation. Added `TestKafkaBatchObservationErrPopulatedOnHandoffError`.
+- [P3 - exact max bytes flush]: In `adapters/nats/batch_consumer.go`, changed `batch.bytes > MaxBytes` to `>=` so exact byte budget matches trigger an immediate flush without redundant empty fetch calls. In Kafka `collectKafkaBatch`, tightened fill loop check to `< MaxBytes`. Added `TestCollectNATSBatchExactMaxBytesFlushesImmediately`.
+
+## 2026-09-04 — PR #24 review round 2 fixes (batch atomicity, nats startup deadlock, builder fail-closed, and observability)
+
+- [P1 - inbox batch single transaction]: Removed batch partitioning from `adapters/inbox/pgsql` and `adapters/inbox/sqlite`. `ProcessBatchAttempt` now strictly executes in exactly one SQL transaction. Upfront validation in `Store.ProcessBatchAttempt` and backends rejects mixed attempt generations for the same logical identity before starting a transaction, returning an error wrapping `ErrInvalidBatchResult` without invoking the handler or committing partial state.
+- [P1 - nats batch startup fatal path]: In `adapters/nats/batch_consumer.go:runBatch`, reordered startup fatal handling so `forceCancel()` is invoked before `workers.Wait()`, preventing deadlocks when workers are blocked in handlers or retry loops awaiting `runContext` cancellation.
+- [P2 - BatchResultBuilder fail-closed]: Updated `BatchResultBuilder.Build()` to return `(BatchResult, error)`. `FailKey` and `OKKey` record a validation error wrapping `ErrInvalidBatchResult` when passed unknown keys. Updated `Error` and added `ErrorKey` to return `(error, bool)` to distinguish known successful items from unknown items.
+- [P2 - batch consumer observability]: Fixed `processErr` shadowing in `adapters/nats` and `adapters/kafka`. On top-level handler failures, valid item outcomes are populated with `BatchRetry` or `BatchDefer` and exact `RetryDelay`, and `observationErr` is preserved and reported to observers with `OperationBatchHandle`.
+- [P3 - BatchAttemptBackend]: Embedded `AttemptBackend` directly inside `inbox.BatchAttemptBackend`.
+
+## 2026-09-03 — PR #24 review fixes (batch consumer, lifecycle readiness, retry accounting, and workspace graph)
+
+- [P1 - Makefile]: Defaulted `CHECK_GOWORK ?= $(abspath go.work)` so standard branch gates and CI use the workspace graph while nested modules import unpublished packages (`internal/batchruntime`), adding `check-published` (`GOWORK=off`) to verify the published graph separately.
+- [P1 - batchruntime]: Context cancellation and timeouts now clear non-empty handler results and propagate context errors directly instead of wrapping in `ErrInvalidBatchResult`, preserving consumer rollback/retry semantics per ADR-0005.
+- [P2 - outbox]: Restored `RetryAt` on single `RelayJob` (reserving `DeferAt` for batch relay) so single relay continues consuming attempts and respects `MaxAttempts`/DLQ progression per ADR-0006:73.
+- [P2 - batchruntime]: Replaced plain boolean next-once guard with `atomic.Bool.CompareAndSwap(false, true)` in batch middleware invocation.
+- [P1 - kafka batch rewind]: In `runKafkaBatchSession`, when all messages are deferred, `rewindKafkaBatch(session, batch, batch.firstDeferred)` now rewinds all polled partitions in `batch.all` before pausing the deferred partition.
+- [P1 - kafka batch readiness]: Dynamic per-worker readiness tracking clears consumer readiness when batch workers encounter recoverable session failures and enter backoff, and re-establishes readiness once workers rejoin the consumer group.
+- [P1 - nats batch readiness]: Worker pull loop readiness in `runNATSBatchConsumer` now requires explicit signals from inside established pull loops, blocks until all workers are established, and immediately propagates fatal startup errors without reporting ready.
+- [P1 - attempt generation batch splitting]:
+  - In `adapters/kafka/batch_consumer.go`: record selection stops and leaves subsequent records unprocessed if a record for the same `(Source, MessageID)` arrives with a differing attempt generation.
+  - In `adapters/nats/batch_consumer.go`: `collectNATSBatch` calls `NakWithDelay` on messages for the same `(Source, MessageID)` with differing attempt generations, keeping them out of the active batch.
+  - In `adapters/inbox/pgsql` and `adapters/inbox/sqlite`: `ProcessBatchAttempt` partitions items into sub-batches by attempt generation, executing them sequentially without returning `ErrInvalidBatchResult` or failing closed.
+- Verified with `make check-workspace` (all modules build, vet, lint with 0 issues, race, checkptr, coverage, consumer, and E2E) and `make test-batch-integration`.
+
+## 2026-09-03 — published Outbox v0.13.0 integration and workspace gate verification
+
+- Pinned published Outbox `v0.13.0` across `adapters/outbox`, `testdata/consumer`,
+  `testdata/e2e`, and `examples/durable-postgres-nats`, including `backends/pgsql v0.13.0`
+  and `backends/sqlite v0.13.0`.
+- Verified that clean consumer and E2E modules resolve and pass tests under `GOWORK=off`
+  against published Outbox `v0.13.0`.
+- Confirmed that `make check-workspace` passes completely with zero lint issues, all unit,
+  race, and checkptr tests, and 91.1% root statement coverage.
+- Restored development `replace` directives in nested module `go.mod` files (as documented
+  in `docs/release.md`), allowing `make`, `make prepare`, and `make check` to run cleanly
+  during feature development before the release-wave `make release-ready` drops them.
+- Confirmed `make`, `make prepare`, `make check`, and `make check-workspace` all pass cleanly.
+
+## 2026-09-02 — bounded Outbox claims and connection-health evidence
+
+- Adopted the checkout-local Outbox byte-bounded claim capability in the
+  observed PostgreSQL repository wrapper, preserving claim-to-handler stage
+  attribution while reducing a true batch to one claim round trip.
+- Replaced `PrepareConn`/`AfterRelease` accounting with the balanced pgxpool
+  acquire/release tracer. Capacity report spec `2.1` records pool expansion,
+  replacement connections, cancelled acquires, unusable releases, and the
+  acquired-connection high-water mark for producer and relay pools. Any pool
+  churn makes a stage unsustainable and the proof verifier rejects missing
+  connection-health data.
+- The short Outbox screen now defaults to 1,500 msg/s, counts PostgreSQL
+  cancellation and broken/reset/lost-connection signatures in `compose.log`,
+  requires zero log and pool churn for both roles, and requires the candidate
+  to be sustainable with an average Outbox batch of at least 10. The control
+  remains a baseline and may be unsustainable; the result remains
+  `SCREEN_ONLY` and cannot support a `>=1.3x` claim.
+- Frontier and proof launchers now compact overlong generated capacity run IDs
+  to 64 characters with a stable hash suffix. The human-facing proof/frontier
+  IDs and paths remain unchanged while every container run satisfies the
+  capacity service's fail-closed ID bound.
+
+## 2026-09-02 — fail-closed true-batch capacity proof
+
+- Added a fixed PostgreSQL 18/NATS `o2-c2` proof workflow for `small` and
+  `mixed` payloads. It compares all four pipeline variants, requires three
+  fresh-volume frontier confirmations, and follows with three interleaved
+  matched common-rate repetitions.
+- Split Outbox and consumer maximum batch sizes in the frontier launcher so the
+  isolated `consumer-batch` to `relay-batch` comparison changes only the relay
+  path. One reusable cell launcher now owns variant, topology, and PostgreSQL
+  profile wiring.
+- Added a tested Go verdict aggregator. It rejects incomplete or dirty evidence,
+  provenance/configuration drift, less than 1.3x isolated or end-to-end
+  frontier improvement, missing actual batches, p95/PostgreSQL cost regression,
+  memory pressure or growth, and repeated WAL waits. It always writes compact
+  `proof.json` and `proof.md` artifacts before returning a failed verdict.
+- The multi-hour capacity workflow remains opt-in and local. Existing hosted
+  tests compile and exercise the aggregator without starting Docker capacity
+  runs.
+- The launcher owns the required pre-measurement gates: Outbox `make check-all`
+  and GoMessenger `make check-workspace` plus `make test-batch-integration`.
+  The proof manifest and both verdict formats explicitly identify the result as
+  `checkout-workspace` evidence and retain both clean checkout commits.
+- `make check-workspace` passed with zero lint findings, all module/race/checkptr
+  tests, 91.1% root coverage, and the durable E2E. The unchanged `make check`
+  still stops at the expected unpublished `internal/batchruntime` boundary.
+- Added a short Outbox-only development screen at a default 1,500 msg/s: one
+  30-second warm-up plus 60-second measured cell for singleton ingress/relay
+  and one for full-batch ingress/relay, with the consumer fixed in batch mode.
+  It permits dirty checkout iteration but records both commit/dirty identities,
+  verifies exact runtime modes, reconciliation, and an exercised candidate
+  batch, and emits only `SCREEN_ONLY` artifacts rather than a performance verdict.
+
+## 2026-09-01 — transactional producer/relay batches and capacity frontier
+
+- Added the transactional-Outbox-only `BatchRoute` facade with typed command
+  and event batch methods, bound DI interfaces, full metadata validation,
+  duplicate-ID rejection, one atomic unique staging call, and receipts in input
+  order. Existing local, NATS, Kafka, and Outbox single routes retain their
+  prior behavior; unsupported direct batch calls fail explicitly.
+- Added Outbox true-batch registration and execution. One homogeneous ordered
+  batch has count/payload/wait limits, one handler call, an exact keyed result,
+  top-level no-attempt backoff, capability-wide defer, one fenced atomic outcome
+  transaction, heartbeat coverage, and bounded drain-tail release. PostgreSQL,
+  MySQL, and SQLite implement atomic staging/finalization; Picodata supports the
+  singleton control and rejects a larger batch.
+- Added batch relay composition. NATS uses bounded async publication with one
+  deterministic message ID and PubAck future per item. Kafka publishes the
+  valid subset in one multi-record transaction and retries the subset after an
+  abort or commit failure. Retry delays from brokers map to no-attempt Outbox
+  defer.
+- Reworked the durable capacity demo to generate message IDs in the initial
+  business insert, bulk-stage up to 100 orders in one transaction, batch-insert
+  successful projections, and persist envelope measurements through a bounded
+  asynchronous UNLOGGED recorder whose failure invalidates the run without
+  changing delivery outcomes.
+- Capacity report spec 2.1 records runtime-confirmed ingress/relay/consumer
+  modes, actual handler/publish/finalization calls and batch sizes, outcomes,
+  normalized SQL/transaction/WAL/checkpoint costs, resource and image
+  provenance, pprof, and PostgreSQL `EXPLAIN (ANALYZE, BUFFERS, WAL)` evidence.
+  Frontier scripts compare the three fixed 2-vCPU/2-GiB topologies, four
+  pipeline variants, two payload profiles, and separately labelled stock/tuned
+  PostgreSQL 18 runs using ladder, bisection, and three fresh-volume
+  confirmations.
+- A five-second full-batch smoke exercised one producer, relay, and consumer
+  invocation per five messages and reconciled 105 business effects with no
+  retries, redeliveries, or DLQ. It is plumbing evidence only, not a frontier
+  or production-capacity claim. No commit, push, tag, release, or deployment was
+  performed.
+- Fixed the first normalized frontier run's measurement failure at 1,750 msg/s.
+  Live samples now use stage-local accepted, durable relay-success, and
+  committed-consumer counters instead of rescanning all business tables every
+  second. Exact load-window and post-drain SQL remains authoritative, while all
+  controller sessions set `max_parallel_workers_per_gather=0` so verifier
+  queries cannot exhaust Docker shared memory or occupy both SUT CPUs. Failed
+  incomplete reports now set `integrityPassed=false`; a completed exact run
+  that only misses an explicit minimum-rate gate preserves its integrity result.
+- A fresh-volume O1/C1, stock PostgreSQL 18, mixed-payload, full-batch diagnostic
+  repeated the formerly invalid 1,750 msg/s cell successfully: 210,100 accepted
+  and exactly reconciled messages, 1,748.33 relay/consumer msg/s, 227.22 ms
+  business p95, 0.846 s drain, zero drops/retries/redeliveries/DLQ, and batch
+  size 100 throughout. The growing business snapshot fell from 121 calls and
+  12.6 s aggregate execution in the failed warm-up to boundary-only queries;
+  the exact final integrity query completed serially. This is one dirty-checkout
+  diagnostic proving the harness fix, not the required clean 3/3 frontier claim.
+
+## 2026-09-01 — capacity single versus true consumer-batch A/B
+
+- Added an explicit capacity-demo selector: `CONSUMER_MODE=single` preserves
+  `NewEventConsumer`; `CONSUMER_MODE=batch` uses `NewBatchEventConsumer` with
+  configurable message, canonical-byte, and wait limits. No automatic handler
+  adapter or implicit migration was introduced.
+- `batch + MaxMessages=1` is the same-path control and `batch + 100` is the
+  real-batch candidate. Outbox reservation width remains an independent axis.
+- The batch handler classifies every item before executing projection SQL and
+  writes only the successful subset in the shared Inbox/business transaction.
+  The observing Inbox wrapper now forwards the optional batch capability.
+- Capacity report spec `1.4` records consumer mode and limits. The controller
+  verifies `/benchmark/stats` runtime configuration against its own environment
+  before starting load, preventing mislabeled A/B artifacts. Stage reports also
+  record actual batch-handler calls, average/maximum batch size, and handler
+  duration so configured and exercised batching are independently visible.
+- Three isolated 50 msg/s route-smokes reconciled exactly. Legacy `single`
+  reported zero batch calls; `batch + MaxMessages=1` handled 150 messages in
+  150 calls; `batch + MaxMessages=100` handled 151 messages in 29 calls with
+  average 5.21 and maximum 6. The two-second warm-up and three-second measured
+  window are deliberately too short for a capacity claim; these runs prove
+  routing, runtime labeling, actual batching, and reconciliation only.
+- Targeted demo/capacity tests, their race variants, example-module lint, and
+  all-module tests through the local workspace passed. The maximal local gate
+  is now `make check-workspace`; it resolves the unreleased root, Inbox, and
+  Outbox contracts through `go.work` and is the proof launcher's source
+  precondition. The original `make check` remains `GOWORK=off` and correctly
+  stops at the unpublished module boundary. An exact compatible Outbox release
+  and dependency-ordered GoMessenger tags are still required before that gate
+  and the clean release-consumer probe can establish published compatibility.
+
+## 2026-09-01 — Supported end-to-end batch consumers
+
+- Accepted ADR-0005 and added a separate consumer-only batch API. Existing
+  single-message handlers, constructors, producers, Outbox staging, and relay
+  behavior remain source-compatible.
+- The root contract now includes exact keyed results, batch-only middleware,
+  zero-value batch bounds, `DeferAfter`, and bounded batch observations.
+- Inbox exposes an optional `BatchAttemptBackend` without expanding the older
+  backend interfaces. PostgreSQL uses deterministic locks plus set-based
+  `unnest`; SQLite uses one serializable transaction with bounded multi-row
+  statements. Both implement coalescing, completed/terminal prefiltering,
+  individual attempts, partial outcomes, and full rollback for top-level
+  failures. Singleton `ProcessAttempt` now also preserves attempts on defer.
+- NATS batches commands and native/structured/binary events by count, canonical
+  bytes, or wait. One heartbeat owns a batch, drain flushes partial work, ACK
+  confirmation is bounded to 16 parallel operations, and deterministic
+  publish-confirmed DLQ handoff remains per slot.
+- Kafka batches only an ascending contiguous range from one topic-partition.
+  Other polled records are rewound, rebalances remain blocked through the
+  outcome boundary, and one Kafka transaction publishes retry/DLQ records with
+  the processed offset. Top-level failures rewind without consuming attempts;
+  unusable sessions are recreated by the worker supervisor.
+- Added root, Inbox, NATS, Kafka, clean-consumer, and full
+  Outbox-to-NATS-to-SQLite batch coverage, including a batch-1 versus real-batch
+  invocation control. The supported gate is `make test-batch-integration`.
+- Removed the checkout-local `batchexperiment` implementation and its capacity
+  runner so there is one maintained engine. The old performance report remains
+  explicitly historical and its earlier throughput/WAL/RSS thresholds are not
+  an API completion gate.
+
+## 2026-08-31 — Experimental NATS/PostgreSQL batch consumer
+
+Superseded by the supported implementation above. This section records the
+prototype work as history.
+
+- Started the Proposed ADR-0005 experiment without changing the public facade,
+  `HandlerConfig`, supported adapters, migrations, release tags, or hosted CI.
+- The implementation lives only under the durable example's `internal` tree
+  and tests one native `orders.created` descriptor. It uses the existing
+  namespaced PostgreSQL Inbox tables with a distinct consumer identity.
+- The key correctness boundary is explicit: successful members may commit in
+  one transaction, but the handler must leave no business writes for failed or
+  deferred members. Batch-wide failures roll back the handler savepoint.
+- The JetStream collector uses bounded pull requests rather than iterator
+  prefetch: one message starts `MaxWait`, then the remaining request carries
+  both message and byte limits. One heartbeat loop is owned by each active
+  batch slot.
+- Inbox identity insert, deterministic lock/read, attempt increments, completed
+  markers, and terminal markers are set-based PostgreSQL statements. Handler
+  input is restored to broker order after the sorted lock phase; the benchmark
+  handler uses one `INSERT ... SELECT FROM unnest` for its successful subset.
+- Added opt-in `make test-batch-experiment`, `make capacity-batch-postgres`, and
+  `make capacity-batch-nats` paths. `make capacity-batch-experiment` now runs
+  the complete resumable control/candidate/mixed workflow, while
+  `make capacity-batch-verdict` re-evaluates retained evidence. Their Docker
+  stacks exclude Outbox and keep raw provenance, reports, Compose logs,
+  resource samples, and aggregate verdicts only under ignored
+  `tmp/capacity/<run-id>`.
+- Live PostgreSQL/NATS correctness covers exact and middleware result
+  validation, broker-order restoration, lost-ACK duplicate suppression,
+  interrupted-DLQ terminal replay, identity conflicts, mixed
+  ACK/retry/defer/DLQ, batch-wide rollback, attempt exhaustion, all three
+  collector limits, singleton oversize dispatch, startup failure, partial
+  drain, forced-cancellation rollback/redelivery, heartbeat, concurrency
+  bounds, and trace links. The isolated Compose gate passes. Its canonical-byte
+  test also exposed and fixed legacy NATS `FetchBatch` returning the normal
+  `MaxBytes` boundary as an immediate error. The live Docker correctness binary
+  is built and run with the race detector.
+- Added an internal broker-finalization seam used only by live tests. The gate
+  now loses the first ACK and observes real broker redelivery with one handler
+  call, interrupts source ACK after confirmed DLQ publication and verifies
+  deterministic JetStream deduplication after restart, and blocks one DLQ slot
+  while the second slot commits. Atomic active-worker and active-heartbeat
+  gauges are asserted at zero after normal and forced shutdown.
+- Direct NATS artifact spec 1.2 persists every case, including partial failure,
+  with exact measurement timestamps, ACK/handler reconciliation, and explicit
+  sustainability reasons. PostgreSQL and NATS reports include a checkout-state
+  SHA-256 covering tracked diff plus untracked source. The verdict aggregator
+  rejects provenance drift, incomplete repetitions, missing boundary brackets,
+  latency/RSS gaps, and duplicate case evidence instead of inferring success.
+- A full-matrix rehearsal exposed that an expected overloaded control case at
+  the candidate target stopped the process before later batch sizes ran. The
+  NATS runner now persists that failed case, continues every remaining matrix
+  cell and repetition, then returns the joined case errors only after the
+  report is complete. A deterministic unit test fixes the continuation and
+  alternating-order contract.
+- The first complete direct-NATS matrix then correctly failed closed on its
+  evidence harness: ambient `CAPACITY_GIT_*` values labeled NATS reports with
+  an earlier checkout, and the verdict case key treated required
+  screening/candidate/common repetitions as duplicates. Batch launchers now
+  overwrite provenance from the actual checkout and host, reports carry an
+  explicit evidence phase, and every gate selects only its phase. A poisoned
+  ambient-environment live probe proved the recorded commit, dirty-state hash,
+  host, and phase match the checkout rather than the caller environment.
+- The final checkout-local PostgreSQL matrix completed 24/24 exactly reconciled
+  cells with one provenance tuple. Median throughput for batch 16 was 25.64x
+  the batch-1 control at concurrency 1 and 9.69x at concurrency 4; batch 16 is
+  the smallest size that clears the PostgreSQL 2x gate.
+- Direct-NATS control screening completed the concurrency-1 bracket at 690
+  msg/s sustainable 3/3 and 750 msg/s failing 1/3. Concurrency 4 was sustainable
+  3/3 at 1,000 msg/s, but its upper bracket was not refined to 10%. At the
+  user's request the remaining long candidate/common/mixed run was stopped;
+  its raw partial artifacts remain ignored under `tmp/capacity`, and the
+  aggregator correctly reports `deferred` with the missing evidence listed.
+  ADR-0005 stays Proposed and the public API remains absent.
+- Closed the batch measurement gap by reusing the existing `pgtelemetry`
+  snapshotter through a separate one-connection probe pool. Both PostgreSQL-only
+  and direct-NATS cells now record `before/loadEnd/afterDrain` statement,
+  database, WAL and I/O deltas; workload-scoped statement WAL bytes/message,
+  MiB/s and records/message; cluster write/sync cost; and bounded aggregated
+  wait samples. This split avoids the publication lag of global `pg_stat_wal`
+  counters on short cells while keeping global WAL pressure visible.
+  PostgreSQL-only sampling uses 100 ms and direct-NATS load/drain sampling uses
+  one second. The verdict fails closed on missing spec-1.2 telemetry, WAL
+  amplification, write+sync wall fraction at or above 80%, or three consecutive
+  `WALWrite`/`WALSync` samples. Direct-NATS drain duration now covers the whole
+  post-load catch-up plus consumer shutdown instead of shutdown alone.
+- Live PostgreSQL 17 smoke cells verified report spec 1.2 and non-zero
+  workload-scoped WAL: 32 messages produced 1,462 B/message for batch 1 and
+  1,411 B/message for batch 16 with exact reconciliation. A direct JetStream
+  smoke at 100 msg/s reconciled 120/120 for batch 1 and batch 4, recorded all
+  three telemetry boundaries, load/drain wait samples, and non-zero WAL and
+  write/sync metrics. These tiny runs validate instrumentation only and are not
+  performance evidence.
+
 ## 2026-08-29 — v0.2.2 release preparation
 
 - Published the complete synchronized `v0.2.2` module graph and GitHub Release.

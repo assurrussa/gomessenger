@@ -35,4 +35,7 @@ var (
 	ErrRuntimeClosed = errors.New("messenger: runtime closed")
 	// ErrEnvelopeTooLarge reports an envelope beyond the configured wire limit.
 	ErrEnvelopeTooLarge = errors.New("messenger: envelope too large")
+	// ErrInvalidBatchResult reports a missing, duplicate, unknown, or otherwise
+	// inconsistent item in a batch handler result.
+	ErrInvalidBatchResult = errors.New("messenger: invalid batch result")
 )

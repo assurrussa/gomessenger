@@ -16,3 +16,7 @@ require (
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 )
+
+replace github.com/assurrussa/gomessenger => ../..
+
+replace github.com/assurrussa/gomessenger/adapters/inbox => ../inbox

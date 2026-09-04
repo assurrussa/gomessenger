@@ -55,6 +55,7 @@ const (
 	testProducerSource       = "urn:service:producer"
 	testHostOwner            = "host"
 	testTopologyConsumerName = "worker"
+	testOutboxSource         = "urn:service:outbox"
 )
 
 func TestTopologyPlanApplyAndRejectDrift(t *testing.T) {
@@ -287,7 +288,7 @@ func TestRoutePublishesPersistedEnvelopeWithOriginalMessageID(t *testing.T) {
 	}
 	metadata := messenger.Metadata{
 		ID: id, Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
-		Source: "urn:service:outbox", Time: time.Unix(1_700_000_000, 0).UTC(),
+		Source: testOutboxSource, Time: time.Unix(1_700_000_000, 0).UTC(),
 		CorrelationID: id, ContentType: testContentType,
 	}
 	envelope, err := messenger.EncodeEventEnvelope(event, metadata, testPayload{JobID: 42})
@@ -311,6 +312,111 @@ func TestRoutePublishesPersistedEnvelopeWithOriginalMessageID(t *testing.T) {
 	}
 	if info.State.Msgs != 1 {
 		t.Fatalf("stream messages = %d, want 1", info.State.Msgs)
+	}
+}
+
+func TestRoutePublishesEnvelopeBatchWithPerItemPubAckAndDeduplication(t *testing.T) {
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	event := messenger.MustEvent(testEventName, 1, messenger.JSON[testPayload]())
+	route, err := nats.NewRoute(connection, nats.RouteConfig{
+		Name: "nats.batch.relay", Namespace: testNamespace, WireMode: nats.WireNative,
+	})
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	payloads := make([][]byte, 3)
+	ids := []messenger.MessageID{
+		mustID(t, "018f4f2c-4a00-7000-8000-000000000011"),
+		mustID(t, "018f4f2c-4a00-7000-8000-000000000012"),
+	}
+	for index, id := range ids {
+		payloads[index], err = messenger.EncodeEventEnvelope(event, messenger.Metadata{
+			ID: id, Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
+			Source: testOutboxSource, Time: time.Unix(1_700_000_000, int64(index)).UTC(),
+			CorrelationID: id, ContentType: testContentType,
+		}, testPayload{JobID: int64(index + 1)})
+		if err != nil {
+			t.Fatalf("encode %d: %v", index, err)
+		}
+	}
+	payloads[2] = []byte(`{"invalid":true}`)
+
+	for invocation := range 2 {
+		receipts, itemErrors, batchErr := route.PublishEnvelopeBatch(t.Context(), payloads)
+		if batchErr != nil || len(receipts) != 3 || len(itemErrors) != 3 {
+			t.Fatalf("batch %d lengths/error = %d/%d/%v", invocation, len(receipts), len(itemErrors), batchErr)
+		}
+		for index, id := range ids {
+			if itemErrors[index] != nil || receipts[index].MessageID != id ||
+				receipts[index].State != messenger.ReceiptBrokerConfirmed {
+				t.Fatalf("batch %d item %d = %#v/%v", invocation, index, receipts[index], itemErrors[index])
+			}
+		}
+		if itemErrors[2] == nil || !receipts[2].MessageID.IsZero() {
+			t.Fatalf("invalid item = %#v/%v", receipts[2], itemErrors[2])
+		}
+	}
+
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	stream, err := js.Stream(t.Context(), testStreamName)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	info, err := stream.Info(t.Context())
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	if info.State.Msgs != 2 {
+		t.Fatalf("stream messages = %d, want 2", info.State.Msgs)
+	}
+}
+
+func TestRoutePublishEnvelopeBatchChunksAcrossPublishWindow(t *testing.T) {
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	event := messenger.MustEvent(testEventName, 1, messenger.JSON[testPayload]())
+	route, err := nats.NewRoute(connection, nats.RouteConfig{
+		Name:          "nats.batch.relay.chunks",
+		Namespace:     testNamespace,
+		WireMode:      nats.WireNative,
+		PublishWindow: 2,
+	})
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+
+	payloads := make([][]byte, 5)
+	ids := make([]messenger.MessageID, 5)
+	for i := range payloads {
+		ids[i] = mustID(t, fmt.Sprintf("018f4f2c-4a00-7000-8000-%012x", i+20))
+		payloads[i], err = messenger.EncodeEventEnvelope(event, messenger.Metadata{
+			ID: ids[i], Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
+			Source: testOutboxSource, Time: time.Now().UTC(),
+			CorrelationID: ids[i], ContentType: testContentType,
+		}, testPayload{JobID: int64(i + 1)})
+		if err != nil {
+			t.Fatalf("encode %d: %v", i, err)
+		}
+	}
+
+	receipts, itemErrors, batchErr := route.PublishEnvelopeBatch(t.Context(), payloads)
+	if batchErr != nil {
+		t.Fatalf("batchErr = %v", batchErr)
+	}
+	if len(receipts) != 5 || len(itemErrors) != 5 {
+		t.Fatalf("receipts/itemErrors length = %d/%d, want 5", len(receipts), len(itemErrors))
+	}
+	for i := range payloads {
+		if itemErrors[i] != nil {
+			t.Fatalf("item %d error = %v", i, itemErrors[i])
+		}
+		if receipts[i].MessageID != ids[i] || receipts[i].State != messenger.ReceiptBrokerConfirmed {
+			t.Fatalf("item %d receipt = %#v", i, receipts[i])
+		}
 	}
 }
 
@@ -986,6 +1092,215 @@ func TestConsumerRetryAfterDelaysSecondAttempt(t *testing.T) {
 	}
 	cancel()
 	<-runDone
+}
+
+func TestConsumerDeferAfterDoesNotConsumeAttempt(t *testing.T) {
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	store := openInbox(t)
+	command := messenger.MustCommand("media.deferred", 1, messenger.JSON[testPayload]())
+	attempts := make(chan time.Time, 2)
+	var calls atomic.Int32
+	config := testHandlerConfig("media-defer-worker")
+	config.MaxAttempts = 1
+	consumer, err := nats.NewCommandConsumer(
+		connection,
+		store,
+		command,
+		func(context.Context, messenger.Message[testPayload]) error {
+			attempts <- time.Now()
+			if calls.Add(1) == 1 {
+				return messenger.DeferAfter(errors.New("not ready"), 150*time.Millisecond)
+			}
+			return nil
+		},
+		config,
+	)
+	if err != nil {
+		t.Fatalf("consumer: %v", err)
+	}
+	runContext, cancel := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() { runDone <- consumer.Run(runContext) }()
+	waitReady(t, consumer)
+	publishCommand(t, connection, command, "018f4f2c-4a00-7000-8000-000000000031", "defer-1")
+	first := <-attempts
+	second := <-attempts
+	if delay := second.Sub(first); delay < 120*time.Millisecond {
+		t.Fatalf("defer delay = %s", delay)
+	}
+	waitForConsumerEmpty(t, connection, config.ConsumerID)
+	if calls.Load() != 2 {
+		t.Fatalf("handler calls = %d, want 2 with MaxAttempts=1", calls.Load())
+	}
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+func TestBatchCommandConsumerBatchOneVersusOneHundred(t *testing.T) {
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	command := messenger.MustCommand("batch.command", 1, messenger.JSON[testPayload]())
+	for index := range 100 {
+		id := fmt.Sprintf("018f4f2c-4a00-7000-8000-%012x", index+1)
+		publishCommand(t, connection, command, id, fmt.Sprintf("batch-%d", index))
+	}
+
+	run := func(consumerID string, maxMessages int) []int {
+		t.Helper()
+		store := openInbox(t)
+		batches := make(chan int, 4)
+		consumer, err := nats.NewBatchCommandConsumer(
+			connection, store, command,
+			func(_ context.Context, messages []messenger.Message[testPayload]) (messenger.BatchResult, error) {
+				batches <- len(messages)
+				result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+				for index, message := range messages {
+					result.Items[index].Key = messenger.BatchItemKey{
+						Source: message.Metadata.Source, MessageID: message.Metadata.ID,
+					}
+				}
+				return result, nil
+			},
+			testHandlerConfig(consumerID),
+			messenger.BatchConfig{MaxMessages: maxMessages, MaxWait: 50 * time.Millisecond},
+		)
+		if err != nil {
+			t.Fatalf("NewBatchCommandConsumer() error = %v", err)
+		}
+		runCtx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- consumer.Run(runCtx) }()
+		waitReady(t, consumer)
+		var sizes []int
+		messages := 0
+		deadline := time.After(15 * time.Second)
+		for messages < 100 {
+			select {
+			case size := <-batches:
+				sizes = append(sizes, size)
+				messages += size
+			case <-deadline:
+				cancel()
+				t.Fatalf("processed %d/100 messages in batches %v", messages, sizes)
+			}
+		}
+		consumer.BeginDrain()
+		shutdownCtx, shutdownCancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer shutdownCancel()
+		if err := consumer.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		return sizes
+	}
+
+	if sizes := run("batch-one-hundred-worker", 100); len(sizes) != 1 || sizes[0] != 100 {
+		t.Fatalf("batch-100 sizes = %v, want [100]", sizes)
+	}
+	if sizes := run("batch-one-worker", 1); len(sizes) != 100 {
+		t.Fatalf("batch-1 invocation count = %d, want 100", len(sizes))
+	} else {
+		for index, size := range sizes {
+			if size != 1 {
+				t.Fatalf("batch-1 size at invocation %d = %d, want 1", index, size)
+			}
+		}
+	}
+}
+
+func TestBatchEventConsumerAcrossWireModes(t *testing.T) {
+	for _, wireMode := range []nats.WireMode{
+		nats.WireNative,
+		nats.WireCloudEventsStructured,
+		nats.WireCloudEventsBinary,
+	} {
+		t.Run(string(wireMode), func(t *testing.T) {
+			testBatchEventConsumerWireMode(t, wireMode)
+		})
+	}
+}
+
+func testBatchEventConsumerWireMode(t *testing.T, wireMode nats.WireMode) {
+	t.Helper()
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	event := messenger.MustEvent("batch.event", 1, messenger.JSON[testPayload]())
+	handled := make(chan []messenger.Message[testPayload], 1)
+	config := testHandlerConfig("batch-event-" + string(wireMode))
+	config.WireMode = wireMode
+	config.Propagator = testTracePropagator{}
+	consumer, err := nats.NewBatchEventConsumer(
+		connection,
+		openInbox(t),
+		event,
+		func(ctx context.Context, messages []messenger.Message[testPayload]) (messenger.BatchResult, error) {
+			if ctx.Value(traceContextKey{}) != nil {
+				return messenger.BatchResult{}, errors.New("batch context inherited one item trace")
+			}
+			handled <- messages
+			result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+			for index, message := range messages {
+				result.Items[index].Key = messenger.BatchItemKey{
+					Source: message.Metadata.Source, MessageID: message.Metadata.ID,
+				}
+			}
+			return result, nil
+		},
+		config,
+		messenger.BatchConfig{MaxMessages: 2, MaxWait: 100 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatalf("NewBatchEventConsumer() error = %v", err)
+	}
+	runCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- consumer.Run(runCtx) }()
+	waitReady(t, consumer)
+
+	route, err := nats.NewRoute(connection, nats.RouteConfig{
+		Name: "batch.event.route", Namespace: testNamespace, WireMode: wireMode,
+	})
+	if err != nil {
+		t.Fatalf("NewRoute() error = %v", err)
+	}
+	builder := messenger.NewBuilder(
+		messenger.WithSource(testSource),
+		messenger.WithContextPropagator(testTracePropagator{}),
+	)
+	builder.RouteEvent(event, route)
+	bus, _, err := builder.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	for index := range 2 {
+		if _, err := bus.Publish(t.Context(), event, testPayload{JobID: int64(index + 1)}); err != nil {
+			t.Fatalf("Publish(%d) error = %v", index, err)
+		}
+	}
+	select {
+	case messages := <-handled:
+		if len(messages) != 2 || messages[0].Payload.JobID != 1 || messages[1].Payload.JobID != 2 {
+			t.Fatalf("handled messages = %#v", messages)
+		}
+		for _, message := range messages {
+			if message.Metadata.Headers["traceparent"] != testTraceParent {
+				t.Fatalf("trace headers = %#v", message.Metadata.Headers)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("batch event handler did not run")
+	}
+	waitForConsumerEmpty(t, connection, config.ConsumerID)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
 }
 
 func startJetStream(t *testing.T) *natsio.Conn {

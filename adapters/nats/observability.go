@@ -84,6 +84,9 @@ func extractDeliveryContext(
 	config HandlerConfig,
 	headers map[string]string,
 ) context.Context {
+	if nilValue(config.Propagator) {
+		return parent
+	}
 	extracted := config.Propagator.Extract(parent, headers)
 	if extracted != nil {
 		return extracted

@@ -366,3 +366,68 @@ func newTestTransport(t *testing.T) *Transport {
 	t.Cleanup(transport.closeClient)
 	return transport
 }
+
+func TestTransportStartingRejectsWorkUntilStartupCompletes(t *testing.T) {
+	transport := newTestTransport(t)
+	startupStarted := make(chan struct{})
+	releaseStartup := make(chan struct{})
+
+	transport.startupCheck = func(_ context.Context, _ time.Duration, _ transactionalReadinessClient) error {
+		close(startupStarted)
+		<-releaseStartup
+		return nil
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- transport.Run(t.Context()) }()
+
+	<-startupStarted
+
+	if err := transport.ensureRunning(); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("ensureRunning while starting = %v, want ErrRuntimeNotRunning", err)
+	}
+	if err := transport.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("Readiness while starting = %v, want ErrRuntimeNotRunning", err)
+	}
+	if err := transport.acquireTransaction(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("acquireTransaction while starting = %v, want ErrRuntimeNotRunning", err)
+	}
+
+	close(releaseStartup)
+
+	for range 100 {
+		if transport.ensureRunning() == nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := transport.ensureRunning(); err != nil {
+		t.Fatalf("ensureRunning after startup = %v, want nil", err)
+	}
+
+	transport.BeginDrain()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit after BeginDrain")
+	}
+}
+
+func TestTransportStartingFailureClosesTransport(t *testing.T) {
+	transport := newTestTransport(t)
+	startupErr := errors.New("startup broker failure")
+	transport.startupCheck = func(_ context.Context, _ time.Duration, _ transactionalReadinessClient) error {
+		return startupErr
+	}
+
+	err := transport.Run(t.Context())
+	if !errors.Is(err, startupErr) {
+		t.Fatalf("Run error = %v, want %v", err, startupErr)
+	}
+	if err := transport.ensureRunning(); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("ensureRunning after failed startup = %v, want ErrTransportClosed", err)
+	}
+}

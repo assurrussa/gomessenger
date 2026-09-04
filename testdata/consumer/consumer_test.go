@@ -3,6 +3,7 @@ package consumer_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -61,6 +62,29 @@ func (backend) Process(
 }
 
 func (backend) Prune(_ context.Context, _ time.Time, _ int) (int64, error) { return 0, nil }
+
+func (backend) ProcessAttempt(
+	ctx context.Context,
+	_ inbox.Key,
+	_ inbox.Fingerprint,
+	_ uint64,
+	handler inbox.Handler,
+) (inbox.Result, error) {
+	return inbox.Result{Attempt: 1}, handler(ctx)
+}
+
+func (backend) ForgetAttempt(context.Context, inbox.Key, inbox.Fingerprint) error { return nil }
+
+func (backend) ProcessBatchAttempt(
+	ctx context.Context,
+	items []inbox.BatchItem,
+	_ uint64,
+	handler inbox.BatchHandler,
+) (inbox.BatchProcessResult, error) {
+	result, err := handler(ctx, items)
+	return inbox.BatchProcessResult{Items: make([]inbox.BatchItemOutcome, len(result.Items)),
+		HandlerMessages: len(items)}, err
+}
 
 func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 	command := messenger.MustCommand("download.job", 1, messenger.JSON[downloadJob]())
@@ -121,6 +145,35 @@ func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 	if err != nil || store == nil {
 		t.Fatalf("inbox store = %#v, %v", store, err)
 	}
+	batchHandler := messenger.BatchHandler[downloadJob](func(
+		_ context.Context,
+		messages []messenger.Message[downloadJob],
+	) (messenger.BatchResult, error) {
+		result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+		for index, message := range messages {
+			result.Items[index].Key = messenger.BatchItemKey{
+				Source: message.Metadata.Source, MessageID: message.Metadata.ID,
+			}
+		}
+		return result, nil
+	})
+	batchConfig := messenger.BatchConfig{Middlewares: []messenger.BatchMiddleware{func(
+		ctx context.Context,
+		_ []messenger.Metadata,
+		_ string,
+		next messenger.BatchHandlerFunc,
+	) (messenger.BatchResult, error) {
+		return next(ctx)
+	}}}
+	_, _ = natsadapter.NewBatchCommandConsumer(nil, store, command, batchHandler,
+		natsadapter.HandlerConfig{}, batchConfig)
+	_, _ = natsadapter.NewBatchEventConsumer(nil, store, event, batchHandler,
+		natsadapter.HandlerConfig{}, batchConfig)
+	_, _ = kafkaadapter.NewBatchCommandConsumer(nil, store, command, batchHandler,
+		kafkaadapter.HandlerConfig{}, batchConfig)
+	_, _ = kafkaadapter.NewBatchEventConsumer(nil, store, event, batchHandler,
+		kafkaadapter.HandlerConfig{}, batchConfig)
+	_ = messenger.DeferAfter(errors.New("later"), time.Second)
 	if err := natsadapter.ValidateTopology(natsadapter.Topology{
 		SpecVersion: "1.0",
 		Streams: []natsadapter.StreamSpec{
@@ -164,4 +217,6 @@ func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
 var (
 	_ coreoutbox.UniqueVersionedPutter = putter{}
 	_ inbox.Backend                    = backend{}
+	_ inbox.AttemptBackend             = backend{}
+	_ inbox.BatchAttemptBackend        = backend{}
 )

@@ -28,8 +28,11 @@ type PGXPoolStats struct {
 	AcquiredConnections    int32 `json:"acquiredConnections"`
 	IdleConnections        int32 `json:"idleConnections"`
 	AcquireCount           int64 `json:"acquireCount"`
+	CanceledAcquireCount   int64 `json:"canceledAcquireCount"`
 	EmptyAcquireCount      int64 `json:"emptyAcquireCount"`
 	AcquireDurationNanos   int64 `json:"acquireDurationNanos"`
+	NewConnectionsCount    int64 `json:"newConnectionsCount"`
+	UnusableReleaseCount   int64 `json:"unusableReleaseCount"`
 	MaxAcquiredConnections int32 `json:"maxAcquiredConnections"`
 }
 
@@ -65,11 +68,66 @@ type OperationStats struct {
 	P99Millis float64 `json:"p99Millis"`
 }
 
-// ConsumerObservationStats separates Inbox transaction time from broker ACK time.
+// ConsumerObservationStats separates Inbox, broker ACK, and typed batch-handler measurements.
 type ConsumerObservationStats struct {
-	InboxHandle OperationStats `json:"inboxHandle"`
-	BrokerAck   OperationStats `json:"brokerAck"`
-	Duplicates  int64          `json:"duplicates"`
+	InboxHandle OperationStats    `json:"inboxHandle"`
+	BrokerAck   OperationStats    `json:"brokerAck"`
+	Batch       BatchHandlerStats `json:"batch"`
+	Duplicates  int64             `json:"duplicates"`
+}
+
+// BatchHandlerStats reports actual typed batch-handler invocations for one stage.
+type BatchHandlerStats struct {
+	Invocations     int64          `json:"invocations"`
+	Messages        int64          `json:"messages"`
+	AverageMessages float64        `json:"averageMessages"`
+	MaxMessages     int            `json:"maxMessages"`
+	Handler         OperationStats `json:"handler"`
+}
+
+// ConsumerRuntimeStats identifies the consumer path exercised by a capacity run.
+type ConsumerRuntimeStats struct {
+	Mode               ConsumerMode `json:"mode"`
+	Concurrency        int          `json:"concurrency"`
+	BatchMaxMessages   int          `json:"batchMaxMessages"`
+	BatchMaxBytes      int          `json:"batchMaxBytes"`
+	BatchMaxWaitMillis float64      `json:"batchMaxWaitMillis"`
+}
+
+// OutboxRuntimeStats identifies the ingress and relay paths exercised by a run.
+type OutboxRuntimeStats struct {
+	IngressMode        OutboxMode `json:"ingressMode"`
+	RelayMode          OutboxMode `json:"relayMode"`
+	BatchMaxMessages   int        `json:"batchMaxMessages"`
+	BatchMaxBytes      int        `json:"batchMaxBytes"`
+	BatchMaxWaitMillis float64    `json:"batchMaxWaitMillis"`
+}
+
+// BatchOutcomeStats counts durable relay decisions after handler classification.
+type BatchOutcomeStats struct {
+	Success int64 `json:"success"`
+	Retry   int64 `json:"retry"`
+	Defer   int64 `json:"defer"`
+	DLQ     int64 `json:"dlq"`
+}
+
+// OutboxExecutionStats separates handler, broker publication, and fenced SQL
+// finalization observations for one benchmark stage.
+type OutboxExecutionStats struct {
+	Handler      BatchHandlerStats `json:"handler"`
+	Publish      BatchHandlerStats `json:"publish"`
+	Finalization BatchHandlerStats `json:"finalization"`
+	Outcomes     BatchOutcomeStats `json:"outcomes"`
+}
+
+// BenchmarkProgressStats provides low-overhead stage-local progress for live
+// sampling. Durable SQL remains the source of truth at load and reconciliation
+// boundaries.
+type BenchmarkProgressStats struct {
+	Accepted  int64 `json:"accepted"`
+	Staged    int64 `json:"staged"`
+	Published int64 `json:"published"`
+	Committed int64 `json:"committed"`
 }
 
 // AppStats is returned by the capacity-only diagnostic endpoint.
@@ -83,7 +141,11 @@ type AppStats struct {
 	RelayDB         PGXPoolStats             `json:"relayDb"`
 	Publications    PublicationRecorderStats `json:"publicationRecorder"`
 	InboxDuplicates int64                    `json:"inboxDuplicates"`
+	ConsumerRuntime ConsumerRuntimeStats     `json:"consumerRuntime"`
+	OutboxRuntime   OutboxRuntimeStats       `json:"outboxRuntime"`
+	OutboxExecution OutboxExecutionStats     `json:"outboxExecution"`
 	Consumer        ConsumerObservationStats `json:"consumer"`
+	Benchmark       BenchmarkProgressStats   `json:"benchmarkProgress"`
 }
 
 // Stats reads a point-in-time application and pool snapshot.
@@ -99,6 +161,9 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 	dbStats := a.db.Stats()
 	producerPool := a.outbox.ProducerClient().DB().Pool()
 	relayPool := a.outbox.RelayClient().DB().Pool()
+	outboxExecution := a.outbox.ObservationStats(labels)
+	benchmark := a.observations.progress(labels)
+	benchmark.Published = outboxExecution.Outcomes.Success
 	result := AppStats{
 		ObservedAt: queue.ObservedAt,
 		Ready:      readyErr == nil,
@@ -111,11 +176,15 @@ func (a *Application) Stats(ctx context.Context, labels BenchmarkLabels) (AppSta
 			WaitCount:          dbStats.WaitCount,
 			WaitDurationNanos:  dbStats.WaitDuration.Nanoseconds(),
 		},
-		ProducerDB:      poolStats(producerPool, a.outbox.ProducerMaxAcquired()),
-		RelayDB:         poolStats(relayPool, a.outbox.RelayMaxAcquired()),
+		ProducerDB:      poolStats(producerPool, a.outbox.producerAcquisitions),
+		RelayDB:         poolStats(relayPool, a.outbox.relayAcquisitions),
 		Publications:    a.publications.Stats(),
 		InboxDuplicates: a.duplicates.Load(),
+		ConsumerRuntime: a.consumerRuntime,
+		OutboxRuntime:   a.outboxRuntime,
+		OutboxExecution: outboxExecution,
 		Consumer:        a.observations.stats(labels),
+		Benchmark:       benchmark,
 	}
 	if readyErr != nil {
 		result.ReadinessError = readyErr.Error()
@@ -169,13 +238,13 @@ func ageSeconds(observedAt, availableAt time.Time) float64 {
 	return age
 }
 
-func poolStats(pool *pgxpool.Pool, maxAcquired *atomic.Int32) PGXPoolStats {
+func poolStats(pool *pgxpool.Pool, observer *poolAcquireObserver) PGXPoolStats {
 	stats := pool.Stat()
-	observeMaxAcquired(pool, maxAcquired)
+	observeMaxAcquired(pool, &observer.maximum)
 	// A completed acquisition proves a high-water mark of at least one even
 	// when point-in-time sampling happens between short queries.
-	if stats.AcquireCount() > 0 && maxAcquired.Load() == 0 {
-		maxAcquired.CompareAndSwap(0, 1)
+	if stats.AcquireCount() > 0 && observer.maximum.Load() == 0 {
+		observer.maximum.CompareAndSwap(0, 1)
 	}
 	acquired := stats.AcquiredConns()
 	return PGXPoolStats{
@@ -184,9 +253,12 @@ func poolStats(pool *pgxpool.Pool, maxAcquired *atomic.Int32) PGXPoolStats {
 		AcquiredConnections:    acquired,
 		IdleConnections:        stats.IdleConns(),
 		AcquireCount:           stats.AcquireCount(),
+		CanceledAcquireCount:   stats.CanceledAcquireCount(),
 		EmptyAcquireCount:      stats.EmptyAcquireCount(),
 		AcquireDurationNanos:   stats.AcquireDuration().Nanoseconds(),
-		MaxAcquiredConnections: maxAcquired.Load(),
+		NewConnectionsCount:    stats.NewConnsCount(),
+		UnusableReleaseCount:   observer.unusableReleases.Load(),
+		MaxAcquiredConnections: observer.maximum.Load(),
 	}
 }
 

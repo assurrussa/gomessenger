@@ -18,6 +18,7 @@ import (
 	outboxadapter "github.com/assurrussa/gomessenger/adapters/outbox"
 	outboxmigrator "github.com/assurrussa/outbox/backends/pgsql/migrator"
 	outboxstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
+	coreoutbox "github.com/assurrussa/outbox/outbox"
 	outboxlogger "github.com/assurrussa/outbox/outbox/logger"
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the host-owned business pool driver.
 	natsio "github.com/nats-io/nats.go"
@@ -29,6 +30,24 @@ import (
 //nolint:gosec // This is an isolated local example credential.
 const defaultPostgresDSN = "postgres://gomessenger:gomessenger@127.0.0.1:5432/gomessenger?sslmode=disable"
 
+// ConsumerMode selects the durable consumer implementation used by the demo.
+type ConsumerMode string
+
+const (
+	// ConsumerModeSingle uses the established one-message consumer path.
+	ConsumerModeSingle ConsumerMode = "single"
+	// ConsumerModeBatch uses the real BatchHandler consumer path.
+	ConsumerModeBatch ConsumerMode = "batch"
+)
+
+// OutboxMode selects the legacy single or real batch ingress/relay path.
+type OutboxMode string
+
+const (
+	OutboxModeSingle OutboxMode = "single"
+	OutboxModeBatch  OutboxMode = "batch"
+)
+
 // Config controls one shared demo application runtime.
 type Config struct {
 	PostgresDSN                string
@@ -38,7 +57,16 @@ type Config struct {
 	OutboxReservationBatchSize int
 	OutboxProducerMaxConns     int
 	OutboxRelayMaxConns        int
+	OutboxIngressMode          OutboxMode
+	OutboxRelayMode            OutboxMode
+	OutboxBatchMaxMessages     int
+	OutboxBatchMaxBytes        int
+	OutboxBatchMaxWait         time.Duration
 	ConsumerConcurrency        int
+	ConsumerMode               ConsumerMode
+	ConsumerBatchMaxMessages   int
+	ConsumerBatchMaxBytes      int
+	ConsumerBatchMaxWait       time.Duration
 	DBMaxOpenConns             int
 	FileStorage                bool
 	Logger                     *slog.Logger
@@ -52,7 +80,15 @@ func CorrectnessConfig(logger *slog.Logger) Config {
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-durable-demo",
 		OutboxWorkers: 1, OutboxReservationBatchSize: 1,
 		OutboxProducerMaxConns: 1, OutboxRelayMaxConns: 1,
-		ConsumerConcurrency: 1, DBMaxOpenConns: 5, Logger: logger,
+		OutboxIngressMode: OutboxModeSingle, OutboxRelayMode: OutboxModeSingle,
+		OutboxBatchMaxMessages: 100, OutboxBatchMaxBytes: 4 << 20, OutboxBatchMaxWait: 25 * time.Millisecond,
+		ConsumerConcurrency:      1,
+		ConsumerMode:             ConsumerModeSingle,
+		ConsumerBatchMaxMessages: messenger.DefaultBatchMaxMessages,
+		ConsumerBatchMaxBytes:    messenger.DefaultBatchMaxBytes,
+		ConsumerBatchMaxWait:     messenger.DefaultBatchMaxWait,
+		DBMaxOpenConns:           5,
+		Logger:                   logger,
 	}
 }
 
@@ -63,24 +99,34 @@ func CapacityConfig(logger *slog.Logger) Config {
 		NATSURL:     EnvOr("NATS_URL", natsio.DefaultURL), ConnectionName: "gomessenger-capacity-api",
 		OutboxWorkers: 4, OutboxReservationBatchSize: 1,
 		OutboxProducerMaxConns: 9, OutboxRelayMaxConns: 1,
-		ConsumerConcurrency: 4, DBMaxOpenConns: 32,
-		FileStorage: true, Logger: logger,
+		OutboxIngressMode: OutboxModeSingle, OutboxRelayMode: OutboxModeSingle,
+		OutboxBatchMaxMessages: 100, OutboxBatchMaxBytes: 4 << 20, OutboxBatchMaxWait: 25 * time.Millisecond,
+		ConsumerConcurrency:      4,
+		ConsumerMode:             ConsumerModeSingle,
+		ConsumerBatchMaxMessages: messenger.DefaultBatchMaxMessages,
+		ConsumerBatchMaxBytes:    messenger.DefaultBatchMaxBytes,
+		ConsumerBatchMaxWait:     messenger.DefaultBatchMaxWait,
+		DBMaxOpenConns:           32,
+		FileStorage:              true,
+		Logger:                   logger,
 	}
 }
 
 // Application owns the database, Outbox relay, NATS connection, and durable consumer.
 type Application struct {
-	log          *slog.Logger
-	db           *sql.DB
-	connection   *natsio.Conn
-	outbox       *splitOutboxRuntime
-	consumer     *natsadapter.Consumer
-	bus          *messenger.Messenger
-	event        messenger.Event[OrderCreated]
-	attempts     *attemptTracker
-	duplicates   *atomic.Int64
-	observations *benchmarkObservationRecorder
-	publications *publicationRecorder
+	log             *slog.Logger
+	db              *sql.DB
+	connection      *natsio.Conn
+	outbox          *splitOutboxRuntime
+	consumer        *natsadapter.Consumer
+	bus             *messenger.Messenger
+	event           messenger.Event[OrderCreated]
+	attempts        *attemptTracker
+	duplicates      *atomic.Int64
+	observations    *benchmarkObservationRecorder
+	publications    *publicationRecorder
+	consumerRuntime ConsumerRuntimeStats
+	outboxRuntime   OutboxRuntimeStats
 
 	publicationRunner *runner
 	outboxRunner      *runner
@@ -103,6 +149,18 @@ func Open(ctx context.Context, config Config) (application *Application, openErr
 	application = &Application{
 		log: config.Logger, runtimeStopped: runtimeCtx.Done(), cancelRuntime: cancelRuntime,
 		runtimeCause: func() error { return context.Cause(runtimeCtx) },
+		consumerRuntime: ConsumerRuntimeStats{
+			Mode: config.ConsumerMode, Concurrency: config.ConsumerConcurrency,
+			BatchMaxMessages:   config.ConsumerBatchMaxMessages,
+			BatchMaxBytes:      config.ConsumerBatchMaxBytes,
+			BatchMaxWaitMillis: float64(config.ConsumerBatchMaxWait) / float64(time.Millisecond),
+		},
+		outboxRuntime: OutboxRuntimeStats{
+			IngressMode: config.OutboxIngressMode, RelayMode: config.OutboxRelayMode,
+			BatchMaxMessages:   config.OutboxBatchMaxMessages,
+			BatchMaxBytes:      config.OutboxBatchMaxBytes,
+			BatchMaxWaitMillis: float64(config.OutboxBatchMaxWait) / float64(time.Millisecond),
+		},
 	}
 	defer func() {
 		if openErr == nil {
@@ -212,6 +270,10 @@ func (a *Application) StageOrder(
 	if err != nil {
 		return messenger.Receipt{}, fmt.Errorf("encode order items: %w", err)
 	}
+	messageID, err := messenger.UUIDv7Generator().New()
+	if err != nil {
+		return messenger.Receipt{}, fmt.Errorf("generate order message ID: %w", err)
+	}
 
 	var receipt messenger.Receipt
 	registeredObservation := false
@@ -221,17 +283,18 @@ func (a *Application) StageOrder(
 			return errors.New("missing Outbox business transaction")
 		}
 		if _, err := tx.Exec(txCtx, `INSERT INTO demo.orders (
-			id, customer_id, currency, items, amount, note, scenario, run_id, stage_id, offered_at
-		) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+			id, customer_id, currency, items, amount, note, scenario, run_id, stage_id,
+			message_id, offered_at, accepted_at
+		) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, clock_timestamp())`,
 			payload.OrderID, payload.CustomerID, payload.Currency, string(items), payload.Amount,
-			payload.Note, payload.Scenario, labels.RunID, labels.StageID, offeredAt,
+			payload.Note, payload.Scenario, labels.RunID, labels.StageID, messageID.String(), offeredAt,
 		); err != nil {
 			return fmt.Errorf("insert business order: %w", err)
 		}
 		var publishErr error
 		receipt, publishErr = a.bus.PublishMessage(txCtx, a.event, messenger.Outgoing[OrderCreated]{
 			Payload:  payload,
-			Metadata: messenger.OutgoingMetadata{Key: payload.OrderID, Headers: headers},
+			Metadata: messenger.OutgoingMetadata{ID: messageID, Key: payload.OrderID, Headers: headers},
 		})
 		if publishErr != nil {
 			return publishErr
@@ -239,15 +302,6 @@ func (a *Application) StageOrder(
 		if labels != (BenchmarkLabels{}) {
 			a.observations.register(receipt.MessageID.String(), labels)
 			registeredObservation = true
-		}
-		tag, err := tx.Exec(txCtx, `UPDATE demo.orders
-			SET message_id = $2, accepted_at = clock_timestamp() WHERE id = $1`,
-			payload.OrderID, receipt.MessageID.String())
-		if err != nil {
-			return fmt.Errorf("attach message identity to business order: %w", err)
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("business order disappeared before commit")
 		}
 		return nil
 	})
@@ -257,6 +311,7 @@ func (a *Application) StageOrder(
 		}
 		return messenger.Receipt{}, fmt.Errorf("commit business order and Outbox event: %w", err)
 	}
+	a.observations.recordAccepted(labels, 1)
 	if receipt.State != messenger.ReceiptStaged || receipt.MessageID.IsZero() {
 		return messenger.Receipt{}, fmt.Errorf("unexpected Outbox receipt: %#v", receipt)
 	}
@@ -265,6 +320,110 @@ func (a *Application) StageOrder(
 			"order_id", payload.OrderID, "message_id", receipt.MessageID.String())
 	}
 	return receipt, nil
+}
+
+// StageOrders atomically inserts up to 100 business orders and stages one
+// typed producer batch. Receipts retain request order.
+func (a *Application) StageOrders(
+	ctx context.Context,
+	payloads []OrderCreated,
+	labels BenchmarkLabels,
+	offeredAt time.Time,
+) ([]messenger.Receipt, error) {
+	if a == nil || a.outbox == nil || a.bus == nil {
+		return nil, errors.New("demo application is not initialized")
+	}
+	if a.draining.Load() {
+		return nil, errors.New("demo application is draining")
+	}
+	if len(payloads) < 1 || len(payloads) > 100 {
+		return nil, errors.New("order batch must contain 1..100 orders")
+	}
+	if labels != (BenchmarkLabels{}) {
+		if err := labels.Validate(); err != nil {
+			return nil, fmt.Errorf("validate benchmark labels: %w", err)
+		}
+	}
+	if offeredAt.IsZero() {
+		offeredAt = time.Now().UTC()
+	}
+	headers := map[string]string(nil)
+	if labels != (BenchmarkLabels{}) {
+		headers = map[string]string{BenchmarkRunHeader: labels.RunID, BenchmarkStageHeader: labels.StageID}
+	}
+	orderIDs := make([]string, len(payloads))
+	customerIDs := make([]string, len(payloads))
+	currencies := make([]string, len(payloads))
+	itemsJSON := make([]string, len(payloads))
+	amounts := make([]int64, len(payloads))
+	notes := make([]string, len(payloads))
+	scenarios := make([]string, len(payloads))
+	messageIDs := make([]string, len(payloads))
+	outgoing := make([]messenger.Outgoing[OrderCreated], len(payloads))
+	for index, payload := range payloads {
+		encodedItems, err := json.Marshal(payload.Items)
+		if err != nil {
+			return nil, fmt.Errorf("encode order batch item %d: %w", index, err)
+		}
+		messageID, err := messenger.UUIDv7Generator().New()
+		if err != nil {
+			return nil, fmt.Errorf("generate order batch message ID %d: %w", index, err)
+		}
+		orderIDs[index], customerIDs[index], currencies[index] = payload.OrderID, payload.CustomerID, payload.Currency
+		itemsJSON[index] = string(encodedItems)
+		amounts[index] = payload.Amount
+		notes[index] = payload.Note
+		scenarios[index] = payload.Scenario
+		messageIDs[index] = messageID.String()
+		outgoing[index] = messenger.Outgoing[OrderCreated]{
+			Payload:  payload,
+			Metadata: messenger.OutgoingMetadata{ID: messageID, Key: payload.OrderID, Headers: headers},
+		}
+	}
+
+	var receipts []messenger.Receipt
+	registered := make([]string, 0, len(payloads))
+	err := a.outbox.ProducerTransactor().RunInTx(ctx, func(txCtx context.Context) error {
+		tx := outboxstorage.GetTx(txCtx)
+		if tx == nil {
+			return errors.New("missing Outbox business transaction")
+		}
+		if _, err := tx.Exec(txCtx, `INSERT INTO demo.orders (
+			id, customer_id, currency, items, amount, note, scenario, run_id, stage_id,
+			message_id, offered_at, accepted_at
+		)
+		SELECT id, customer_id, currency, items::jsonb, amount, note, scenario,
+			$8, $9, message_id, $10, clock_timestamp()
+		FROM unnest(
+			$1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
+			$6::text[], $7::text[], $11::uuid[]
+		) AS input(id, customer_id, currency, items, amount, note, scenario, message_id)`,
+			orderIDs, customerIDs, currencies, itemsJSON, amounts, notes, scenarios,
+			labels.RunID, labels.StageID, offeredAt, messageIDs,
+		); err != nil {
+			return fmt.Errorf("insert business order batch: %w", err)
+		}
+		var err error
+		receipts, err = a.bus.PublishMessageBatch(txCtx, a.event, outgoing)
+		if err != nil {
+			return err
+		}
+		if labels != (BenchmarkLabels{}) {
+			for _, receipt := range receipts {
+				a.observations.register(receipt.MessageID.String(), labels)
+				registered = append(registered, receipt.MessageID.String())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		for _, messageID := range registered {
+			a.observations.unregister(messageID)
+		}
+		return nil, fmt.Errorf("commit business order and Outbox event batch: %w", err)
+	}
+	a.observations.recordAccepted(labels, len(payloads))
+	return receipts, nil
 }
 
 // Readiness checks every resource required to accept and complete an order.
@@ -362,6 +521,9 @@ func (a *Application) superviseRunner(name string, runtimeRunner *runner) {
 		if runErr == nil {
 			runErr = errors.New("runtime stopped without an error")
 		}
+		if a.log != nil {
+			a.log.Error("required runtime stopped unexpectedly", "runtime", name, "error", runErr)
+		}
 		a.draining.Store(true)
 		a.cancelRuntime(fmt.Errorf("%s runtime stopped unexpectedly: %w", name, runErr))
 	}()
@@ -425,9 +587,45 @@ func normalizeConfig(config *Config) error {
 	if config.OutboxRelayMaxConns < 1 || config.OutboxRelayMaxConns > 1_024 {
 		return errors.New("outbox relay max connections must be in 1..1024")
 	}
+	if config.OutboxIngressMode == "" {
+		config.OutboxIngressMode = OutboxModeSingle
+	}
+	if config.OutboxRelayMode == "" {
+		config.OutboxRelayMode = OutboxModeSingle
+	}
+	if config.OutboxIngressMode != OutboxModeSingle && config.OutboxIngressMode != OutboxModeBatch {
+		return errors.New("outbox ingress mode must be single or batch")
+	}
+	if config.OutboxRelayMode != OutboxModeSingle && config.OutboxRelayMode != OutboxModeBatch {
+		return errors.New("outbox relay mode must be single or batch")
+	}
+	if _, err := (coreoutbox.BatchConfig{
+		MaxMessages: config.OutboxBatchMaxMessages,
+		MaxBytes:    config.OutboxBatchMaxBytes,
+		MaxWait:     config.OutboxBatchMaxWait,
+	}).Normalize(); err != nil {
+		return fmt.Errorf("normalize Outbox batch config: %w", err)
+	}
 	if config.ConsumerConcurrency < 1 || config.ConsumerConcurrency > 128 {
 		return errors.New("consumer concurrency must be in 1..128")
 	}
+	if config.ConsumerMode == "" {
+		config.ConsumerMode = ConsumerModeSingle
+	}
+	if config.ConsumerMode != ConsumerModeSingle && config.ConsumerMode != ConsumerModeBatch {
+		return fmt.Errorf("consumer mode must be %q or %q", ConsumerModeSingle, ConsumerModeBatch)
+	}
+	batchConfig, err := (messenger.BatchConfig{
+		MaxMessages: config.ConsumerBatchMaxMessages,
+		MaxBytes:    config.ConsumerBatchMaxBytes,
+		MaxWait:     config.ConsumerBatchMaxWait,
+	}).Normalize(config.ConsumerConcurrency)
+	if err != nil {
+		return fmt.Errorf("normalize consumer batch config: %w", err)
+	}
+	config.ConsumerBatchMaxMessages = batchConfig.MaxMessages
+	config.ConsumerBatchMaxBytes = batchConfig.MaxBytes
+	config.ConsumerBatchMaxWait = batchConfig.MaxWait
 	if config.DBMaxOpenConns < config.ConsumerConcurrency+2 || config.DBMaxOpenConns > 1_024 {
 		return errors.New("business DB max open connections must cover consumer concurrency plus two")
 	}
@@ -491,29 +689,55 @@ func buildMessaging(
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil, err
 	}
-	relay, err := outboxadapter.NewRelayJob(publisher, outboxadapter.RelayJobConfig{
-		ExecutionTimeout: 5 * time.Second,
-		MaxAttempts:      3,
-	})
+	publisher.observations = outboxRuntime.observations
+	relayConfig := outboxadapter.RelayJobConfig{ExecutionTimeout: 5 * time.Second, MaxAttempts: 3}
+	switch config.OutboxRelayMode {
+	case OutboxModeSingle:
+		relay, createErr := outboxadapter.NewRelayJob(publisher, relayConfig)
+		if createErr != nil {
+			err = createErr
+		} else {
+			err = outboxRuntime.registerJob(observedRelayJob{
+				delegate: relay, recorder: outboxRuntime.observations,
+			})
+		}
+	case OutboxModeBatch:
+		relay, createErr := outboxadapter.NewBatchRelayJob(publisher, relayConfig)
+		if createErr != nil {
+			err = createErr
+		} else {
+			err = outboxRuntime.registerBatchJob(observedBatchRelayJob{
+				delegate: relay, recorder: outboxRuntime.observations,
+			}, coreoutbox.BatchConfig{
+				MaxMessages: config.OutboxBatchMaxMessages,
+				MaxBytes:    config.OutboxBatchMaxBytes,
+				MaxWait:     config.OutboxBatchMaxWait,
+			})
+		}
+	}
 	if err != nil {
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
-			fmt.Errorf("create Outbox relay: %w", err)
+			fmt.Errorf("create/register Outbox relay: %w", err)
 	}
-	if err := outboxRuntime.registerJob(relay); err != nil {
-		closeOutbox()
-		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
-			fmt.Errorf("register Outbox relay: %w", err)
+
+	var producer messenger.Route
+	switch config.OutboxIngressMode {
+	case OutboxModeSingle:
+		producer, err = outboxadapter.NewProducer(outboxRuntime.Service(), outboxadapter.ProducerConfig{
+			Name: "outbox.demo.events",
+		})
+	case OutboxModeBatch:
+		producer, err = outboxadapter.NewBatchProducer(outboxRuntime.Service(), outboxadapter.ProducerConfig{
+			Name: "outbox.demo.events",
+		})
 	}
-	producer, err := outboxadapter.NewProducer(outboxRuntime.Service(), outboxadapter.ProducerConfig{
-		Name: "outbox.demo.events",
-	})
 	if err != nil {
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
 			fmt.Errorf("create Outbox producer: %w", err)
 	}
-	measuredProducer, err := newMeasurementRoute(producer)
+	measuredProducer, err := newAsyncMeasurementRoute(producer, publications.RecordMeasurement)
 	if err != nil {
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil, err
@@ -544,23 +768,35 @@ func buildMessaging(
 			fmt.Errorf("observe PostgreSQL inbox: %w", err)
 	}
 	attempts := newAttemptTracker()
-	application := &handlerApplication{log: config.Logger, attempts: attempts}
 	observations := newBenchmarkObservationRecorder()
-	consumer, err := natsadapter.NewEventConsumer(
-		connection,
-		store,
-		event,
-		application.handleOrder,
-		natsadapter.HandlerConfig{
-			Stream: Stream, Namespace: Namespace, ConsumerID: ConsumerID,
-			WireMode: natsadapter.WireNative, Concurrency: config.ConsumerConcurrency,
-			Timeout: 5 * time.Second, FinalizationTimeout: 2 * time.Second, MaxAttempts: 3,
-			BaseRetry: 250 * time.Millisecond, MaxRetry: 500 * time.Millisecond,
-			AckWait: 2 * time.Second, DLQSubject: DLQSubject, Replicas: 1,
-			MemoryStorage: !config.FileStorage, Logger: messenger.AdaptSlog(config.Logger),
-			Observers: []messenger.Observer{observations},
-		},
-	)
+	application := &handlerApplication{
+		log: config.Logger, attempts: attempts, observations: observations,
+	}
+	handlerConfig := natsadapter.HandlerConfig{
+		Stream: Stream, Namespace: Namespace, ConsumerID: ConsumerID,
+		WireMode: natsadapter.WireNative, Concurrency: config.ConsumerConcurrency,
+		Timeout: 5 * time.Second, FinalizationTimeout: 2 * time.Second, MaxAttempts: 3,
+		BaseRetry: 250 * time.Millisecond, MaxRetry: 500 * time.Millisecond,
+		AckWait: 2 * time.Second, DLQSubject: DLQSubject, Replicas: 1,
+		MemoryStorage: !config.FileStorage, Logger: messenger.AdaptSlog(config.Logger),
+		Observers: []messenger.Observer{observations},
+	}
+	var consumer *natsadapter.Consumer
+	switch config.ConsumerMode {
+	case ConsumerModeSingle:
+		consumer, err = natsadapter.NewEventConsumer(
+			connection, store, event, application.handleOrder, handlerConfig,
+		)
+	case ConsumerModeBatch:
+		consumer, err = natsadapter.NewBatchEventConsumer(
+			connection, store, event, application.handleOrderBatch, handlerConfig,
+			messenger.BatchConfig{
+				MaxMessages: config.ConsumerBatchMaxMessages,
+				MaxBytes:    config.ConsumerBatchMaxBytes,
+				MaxWait:     config.ConsumerBatchMaxWait,
+			},
+		)
+	}
 	if err != nil {
 		closeOutbox()
 		return nil, nil, nil, messenger.Event[OrderCreated]{}, nil, nil, nil, nil,
@@ -570,8 +806,9 @@ func buildMessaging(
 }
 
 type handlerApplication struct {
-	log      *slog.Logger
-	attempts *attemptTracker
+	log          *slog.Logger
+	attempts     *attemptTracker
+	observations *benchmarkObservationRecorder
 }
 
 func (a *handlerApplication) handleOrder(ctx context.Context, message messenger.Message[OrderCreated]) error {
@@ -623,6 +860,113 @@ func (a *handlerApplication) handleOrder(ctx context.Context, message messenger.
 	return nil
 }
 
+type batchOrderDecision struct {
+	message messenger.Message[OrderCreated]
+	attempt int
+	labels  BenchmarkLabels
+}
+
+func (a *handlerApplication) handleOrderBatch(
+	ctx context.Context,
+	messages []messenger.Message[OrderCreated],
+) (result messenger.BatchResult, processErr error) {
+	startedAt := time.Now()
+	var batchLabels BenchmarkLabels
+	batchLabelsConsistent := true
+	defer func() {
+		if batchLabelsConsistent {
+			a.observations.recordBatch(batchLabels, len(messages), time.Since(startedAt), processErr)
+		}
+	}()
+
+	tx, ok := inbox.SQLTxFromContext(ctx)
+	if !ok {
+		return messenger.BatchResult{}, errors.New("missing Inbox transaction")
+	}
+	builder := messenger.NewBatchResultBuilder(messages)
+	successful := make([]batchOrderDecision, 0, len(messages))
+	for _, message := range messages {
+		decision, itemErr := a.classifyBatchOrder(message)
+		if decision.labels != (BenchmarkLabels{}) {
+			if batchLabels == (BenchmarkLabels{}) {
+				batchLabels = decision.labels
+			} else if batchLabels != decision.labels {
+				batchLabelsConsistent = false
+			}
+		}
+		if itemErr != nil {
+			builder.Fail(message, itemErr)
+		} else {
+			successful = append(successful, decision)
+		}
+	}
+
+	if len(successful) > 0 {
+		orderIDs := make([]string, len(successful))
+		messageIDs := make([]string, len(successful))
+		amounts := make([]int64, len(successful))
+		attempts := make([]int32, len(successful))
+		runIDs := make([]string, len(successful))
+		stageIDs := make([]string, len(successful))
+		for index, decision := range successful {
+			orderIDs[index] = decision.message.Payload.OrderID
+			messageIDs[index] = decision.message.Metadata.ID.String()
+			amounts[index] = decision.message.Payload.Amount
+			attempts[index] = int32(decision.attempt) //nolint:gosec // attempts are bounded by handler config.
+			runIDs[index] = decision.labels.RunID
+			stageIDs[index] = decision.labels.StageID
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO demo.order_projection (
+			order_id, message_id, amount, handler_attempt, run_id, stage_id, handled_at
+		)
+		SELECT order_id, message_id, amount, handler_attempt, run_id, stage_id, clock_timestamp()
+		FROM unnest(
+			$1::text[], $2::uuid[], $3::bigint[], $4::integer[], $5::text[], $6::text[]
+		) AS projection(order_id, message_id, amount, handler_attempt, run_id, stage_id)`,
+			orderIDs, messageIDs, amounts, attempts, runIDs, stageIDs,
+		); err != nil {
+			return messenger.BatchResult{}, fmt.Errorf("write batch order projection: %w", err)
+		}
+	}
+	return builder.Build()
+}
+
+func (a *handlerApplication) classifyBatchOrder(
+	message messenger.Message[OrderCreated],
+) (batchOrderDecision, error) {
+	payload := message.Payload
+	attempt := 1
+	if payload.Scenario != ScenarioSuccess {
+		attempt = a.attempts.next(payload.OrderID)
+	}
+	labels, measured, err := benchmarkLabels(message.Metadata.Headers)
+	if err != nil {
+		return batchOrderDecision{}, messenger.Permanent(err)
+	}
+	if !measured {
+		labels = BenchmarkLabels{}
+	}
+	decision := batchOrderDecision{message: message, attempt: attempt, labels: labels}
+	switch payload.Scenario {
+	case ScenarioSuccess:
+		return decision, nil
+	case ScenarioRetry:
+		if attempt == 1 {
+			return decision, messenger.RetryAfter(
+				errors.New("inventory temporarily unavailable"), 300*time.Millisecond,
+			)
+		}
+		return decision, nil
+	case ScenarioDLQ:
+		if attempt == 1 {
+			return decision, messenger.Permanent(errors.New("unsupported order for demo"))
+		}
+		return decision, nil
+	default:
+		return decision, messenger.Permanent(fmt.Errorf("unknown demo scenario %q", payload.Scenario))
+	}
+}
+
 type attemptTracker struct {
 	mu     sync.Mutex
 	values map[string]int
@@ -650,6 +994,8 @@ type observingInbox struct {
 	duplicates atomic.Int64
 }
 
+var _ inbox.BatchAttemptBackend = (*observingInbox)(nil)
+
 func (b *observingInbox) Process(
 	ctx context.Context,
 	key inbox.Key,
@@ -673,6 +1019,23 @@ func (b *observingInbox) ProcessAttempt(
 	result, err := b.delegate.ProcessAttempt(ctx, key, fingerprint, maxAttempts, handler)
 	if err == nil && result.Duplicate {
 		b.duplicates.Add(1)
+	}
+	return result, err
+}
+
+func (b *observingInbox) ProcessBatchAttempt(
+	ctx context.Context,
+	items []inbox.BatchItem,
+	maxAttempts uint64,
+	handler inbox.BatchHandler,
+) (inbox.BatchProcessResult, error) {
+	result, err := b.delegate.ProcessBatchAttempt(ctx, items, maxAttempts, handler)
+	if err == nil {
+		for _, item := range result.Items {
+			if item.Duplicate {
+				b.duplicates.Add(1)
+			}
+		}
 	}
 	return result, err
 }
@@ -764,7 +1127,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		ON demo.order_projection (run_id, stage_id)`); err != nil {
 		return fmt.Errorf("index demo projection capacity labels: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS demo.envelope_measurements (
+	if _, err := db.ExecContext(ctx, `CREATE UNLOGGED TABLE IF NOT EXISTS demo.envelope_measurements (
 		message_id UUID PRIMARY KEY,
 		run_id TEXT NOT NULL,
 		stage_id TEXT NOT NULL,

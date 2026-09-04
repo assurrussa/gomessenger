@@ -193,6 +193,10 @@ func (recorder *consumerSessionRecorder) Begin() error {
 	return nil
 }
 
+func (recorder *consumerSessionRecorder) CloseAllowingRebalance() {
+	recorder.allowRebalanceCalls.Add(1)
+}
+
 func (*consumerSessionRecorder) ProduceSync(context.Context, ...*kgo.Record) kgo.ProduceResults {
 	return nil
 }

@@ -136,12 +136,19 @@ The example also contains an opt-in open-loop NATS capacity experiment over
 ```sh
 make capacity-nats
 make capacity-nats-site
+make capacity-nats-site-single
+make capacity-nats-site-batch-1
+make capacity-nats-site-batch-100
+make capacity-frontier
+make capacity-frontier-matrix
 make capacity-inbox-postgres
 ```
 
-The default command retains the four-Outbox/four-consumer PostgreSQL 18 profile. The site-shaped command uses
-PostgreSQL 17 with two Outbox workers, reservation batch `1`, one consumer, isolated Outbox producer/relay pools fixed at `9 + 1`, and a
-separate ten-connection Inbox/measurement pool; the PostgreSQL-only command
+The legacy quick and site-shaped commands remain screening tools. The
+normalized frontier commands use PostgreSQL 18 and compare three fixed two-CPU
+topologies, four runtime-confirmed ingress/relay/consumer variants, `small` and
+`mixed` payloads, and stock versus separately labelled tuned database
+profiles. The PostgreSQL-only command
 isolates the real Inbox `ProcessAttempt` transaction without Outbox or NATS. They report unique committed business
 effects, canonical envelope bytes, Inbox/ACK latency, and PostgreSQL statement/WAL/I/O telemetry. See the
 [example capacity contract](examples/durable-postgres-nats#capacity-experiment). Results describe only the recorded
@@ -149,15 +156,59 @@ checkout, host, and local Docker topology; they are not production benchmark cla
 
 Set `OUTBOX_RESERVATION_BATCH_SIZE=16` (valid `1..1000`) to A/B only the
 reservation/prefetch width. The default remains `1`. Each Outbox worker still
-publishes and acknowledges jobs sequentially, so this does not multiply
-handler concurrency. Capacity report spec `1.3` records the batch and exact
-Outbox module version in JSON and Markdown. It reports relay throughput from
+publishes and acknowledges those prefetched jobs sequentially. True relay
+batching is selected separately with `OUTBOX_RELAY_MODE=batch` and
+`OUTBOX_BATCH_MAX_MESSAGES=1|100`; true ingress batching requires
+`OUTBOX_INGRESS_MODE=batch` and the bulk HTTP path. Select the consumer with
+`CONSUMER_MODE=single|batch`. Batch mode accepts
+`CONSUMER_BATCH_MAX_MESSAGES`, `CONSUMER_BATCH_MAX_BYTES`, and
+`CONSUMER_BATCH_MAX_WAIT`; use `batch + 1` as the same-path control and
+`batch + 100` for real batching. Capacity report spec `2.1` records the
+runtime-confirmed ingress, relay, and consumer selections, actual batch calls
+and sizes, Outbox handler/publish/finalization latency and outcomes, image
+digests, limits, pool connection health, SQL calls, transactions/message, WAL/message, checkpoints,
+pprof, and PostgreSQL plans. It reports relay throughput from
 published envelopes, consumer throughput and MiB/s from committed projections,
 and separates `staged - published` Outbox lag from `published - committed`
 consumer lag. Warm-up and drain remain outside every throughput denominator.
 
 Versioned capacity baselines, raw-evidence rules, and defensible claim
 boundaries are recorded in the [performance evidence registry](docs/performance/README.md).
+
+## Transactional producer and relay batches
+
+Producer batching is explicit and Outbox-only. `NewBatchProducer` stages one
+ordered set atomically in the caller's business transaction; direct broker and
+local routes return `ErrUnsupportedCapability` from the batch facade. Existing
+single-message producers and relay jobs do not change.
+
+```go
+producer, err := outboxadapter.NewBatchProducer(outboxService, outboxadapter.ProducerConfig{
+	Name: "orders-outbox",
+})
+if err != nil {
+	return err
+}
+
+builder := messenger.NewBuilder(messenger.WithSource("urn:service:orders"))
+builder.RouteEvent(orderCreated, producer)
+app, _, err := builder.Build()
+if err != nil {
+	return err
+}
+
+receipts, err := app.PublishMessageBatch(ctx, orderCreated, []messenger.Outgoing[OrderCreated]{
+	{Payload: first, Metadata: messenger.OutgoingMetadata{ID: firstID}},
+	{Payload: second, Metadata: messenger.OutgoingMetadata{ID: secondID}},
+})
+```
+
+Register `outboxadapter.NewBatchRelayJob` with Outbox
+`RegisterBatchJob`. Its zero `outbox.BatchConfig` means 100 jobs, 4 MiB of
+payload, and 25 ms; `MaxMessages=1` is the same-path control. NATS confirms one
+asynchronous publish future per item. Kafka sends the valid subset in one
+multi-record transaction. Result and retry semantics are defined by
+[ADR-0006](docs/decisions/0006-producer-relay-batching.md).
 
 ## Guarantees
 
@@ -168,6 +219,8 @@ The durable contract is **at-least-once**:
 - a direct Kafka route reports success only after its producer transaction commits;
 - a durable consumer acknowledges only after its Inbox transaction and handler commit;
 - stable message identity and an Inbox suppress a second execution of the same committed consumer transaction;
+- a batch consumer invokes one typed handler and one Inbox/business transaction
+  for each real batch while retaining individual ACK/retry/defer/DLQ outcomes;
 - concurrency, envelopes, headers, handler attempts, retry delays, and shutdown waits are bounded by explicit
   configuration or documented limits.
 
@@ -384,6 +437,54 @@ if err != nil {
 }
 ```
 
+For true consumer batching, select the separate constructor and return one
+keyed result for every message passed to the handler. Classify the complete
+batch before writing the successful subset:
+
+```go
+batchConsumer, err := natsadapter.NewBatchEventConsumer(
+	natsConnection,
+	store,
+	mediaResized,
+	func(ctx context.Context, messages []messenger.Message[MediaResized]) (messenger.BatchResult, error) {
+		result := messenger.BatchResult{Items: make([]messenger.BatchItemResult, len(messages))}
+		successes := make([]messenger.Message[MediaResized], 0, len(messages))
+		for i, message := range messages {
+			itemErr := validateMedia(message.Payload)
+			result.Items[i] = messenger.BatchItemResult{
+				Key: messenger.BatchItemKey{Source: message.Metadata.Source, MessageID: message.Metadata.ID},
+				Err: itemErr,
+			}
+			if itemErr == nil {
+				successes = append(successes, message)
+			}
+		}
+		tx, ok := inbox.SQLTxFromContext(ctx)
+		if !ok {
+			return messenger.BatchResult{}, errors.New("missing inbox transaction")
+		}
+		if err := projection.ApplyBatchTx(ctx, tx, successes); err != nil {
+			return messenger.BatchResult{}, err
+		}
+		return result, nil
+	},
+	natsadapter.HandlerConfig{
+		Stream: "MESSAGES", Namespace: "prod", ConsumerID: "media-batch-projection",
+		WireMode: natsadapter.WireNative, Concurrency: 4, Timeout: 30 * time.Second,
+		AckWait: 30 * time.Second, MaxAttempts: 10, DLQSubject: "prod.dlq",
+	},
+	messenger.BatchConfig{}, // 100 messages, 4 MiB canonical bytes, 25 ms
+)
+```
+
+`MaxMessages=1` is a control for the same batch path. `DeferAfter` requests an
+exact delayed retry without consuming an attempt; `RetryAfter` consumes one.
+An ordinary top-level error rolls back the whole handler transaction and
+retries the batch without changing item attempts. A top-level `Permanent`
+error or an inexact result fails the consumer closed. Kafka exposes matching
+`NewBatchCommandConsumer` and `NewBatchEventConsumer` constructors; each Kafka
+batch is confined to one contiguous topic-partition range.
+
 Run the embedded additive inbox migrations explicitly with `inboxpgsql.Migrate` or `inboxsqlite.Migrate` before
 constructing consumers. They include the durable handler-attempt count and permanent-outcome state required by durable
 consumers. Hosts own database connections, migration ordering, NATS connections, credentials, and process supervision.
@@ -459,8 +560,10 @@ infrastructure state only and never logs record keys, payloads, message bodies, 
 Recovered handler panic values and stacks are dropped by default; ordinary errors satisfy the transport-neutral
 `HandlerPanicError` interface and can be classified with `errors.As` across independently versioned adapters.
 Configure `WithPanicReporter` (or the corresponding durable consumer field) only for a trusted diagnostic sink.
-Consumer observations and DLQ errors use the conservative `DefaultFailureSanitizer` unless the host explicitly supplies
-another sanitizer.
+Consumer observations and operational logs use the conservative `DefaultFailureSanitizer` unless the host explicitly
+supplies another sanitizer. In batch consumers, durable DLQ wire text strictly retains the built-in conservative
+sanitizer to ensure rebalance and finalization boundaries remain bounded, while configured host sanitizers apply to
+observations and logs. Custom sanitizers must execute promptly without blocking.
 
 The observability propagator carries only W3C `traceparent` and `tracestate`. It works through native envelopes,
 CloudEvents structured/binary modes, and transactional Outbox storage. Baggage is intentionally not supported yet.
@@ -530,7 +633,7 @@ Retry may be overtaken by later source records, so ordering is guaranteed only b
 
 The next maturity level is an operational messaging platform, not a workflow framework. Work is ordered evidence-first:
 pilot and performance baseline, schema compatibility, broker capability declarations, partition-key and ordering
-semantics, batching only when profiling justifies it, then load, soak, and chaos validation. Saga engines, workflow
+semantics, batch capacity validation, then load, soak, and chaos validation. Saga engines, workflow
 orchestration, and generic distributed request/reply remain out of scope.
 
 See the [Level 2 roadmap](docs/roadmap.md) for workstreams and exit criteria.
@@ -581,16 +684,24 @@ permissions when producers can access subjects directly.
 
 ```sh
 make prepare
-make check
+make check-workspace
 make test-e2e
 make test-integration
+make test-batch-integration
 make test-kafka
 GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres
 make bench-all
 ```
 
-`make check` covers every module, static lint, race and checkptr builds, a 90% root coverage gate, an isolated
-clean-consumer module, and the Docker-free durable pipeline E2E. `make test-e2e` reruns only that full
+`make check-workspace` covers every module, static lint, race and checkptr
+builds, a 90% root coverage gate, the checkout-consumer module, and the
+Docker-free durable pipeline E2E against the local `go.work` graph, including
+the sibling Outbox checkout. It is the maximal pre-publication source gate.
+`make check` runs the same gate with `GOWORK=off`; it intentionally remains
+blocked while a required GoMessenger or Outbox contract has not been published
+and pinned. `release-readiness` plus
+`make test-consumer-release VERSION=vX.Y.Z` is the separate no-replacement
+publication proof. `make test-e2e` reruns only the full
 Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the local Docker entry point against official Kafka 4.1.2
 and 4.3.1 images; hosted CI runs each version in an independent matrix job. Run the full source gate before publishing
 the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
@@ -598,9 +709,8 @@ Inbox-dependent transports, and finally the CLI and checkout fixtures. After the
 resolve through the Go proxy, finalize and check the complete graph:
 
 ```sh
-make check
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.12.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
 make check
 ```
 

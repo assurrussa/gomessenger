@@ -18,6 +18,7 @@ type statements struct {
 	deleteAttempt                      string
 	deleteAttemptGeneration            string
 	hasAttempts                        string
+	inspectAttempts                    string
 	deleteIncompleteIdentity           string
 	pruneAttemptGenerations            string
 	pruneAttempts                      string
@@ -97,6 +98,16 @@ func newStatements(names namespace) statements {
             WHERE consumer_id = $1 AND source = $2 AND message_id = $3)
         OR EXISTS(SELECT 1 FROM {{attempt_generations}}
             WHERE consumer_id = $1 AND source = $2 AND message_id = $3)`),
+		inspectAttempts: names.render(`SELECT
+        COALESCE(MAX(CASE WHEN terminal THEN 1 ELSE 0 END), 0),
+        COUNT(*)
+        FROM (
+            SELECT terminal FROM {{attempts}}
+            WHERE consumer_id = $1 AND source = $2 AND message_id = $3
+            UNION ALL
+            SELECT terminal FROM {{attempt_generations}}
+            WHERE consumer_id = $1 AND source = $2 AND message_id = $3
+        ) AS existing_attempts`),
 		deleteIncompleteIdentity: names.render(`DELETE FROM {{inbox}}
         WHERE consumer_id = $1 AND source = $2 AND message_id = $3 AND completed_at IS NULL`),
 		pruneAttemptGenerations: names.render(`WITH doomed AS (

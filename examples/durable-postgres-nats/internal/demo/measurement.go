@@ -9,7 +9,6 @@ import (
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
-	outboxstorage "github.com/assurrussa/outbox/backends/pgsql/storage"
 )
 
 type envelopeMeasurement struct {
@@ -26,8 +25,17 @@ type measurementRoute struct {
 	record   measurementRecorder
 }
 
-func newMeasurementRoute(delegate messenger.Route) (*measurementRoute, error) {
-	return newMeasurementRouteWithRecorder(delegate, recordEnvelopeMeasurement)
+func newAsyncMeasurementRoute(
+	delegate messenger.Route,
+	record func(envelopeMeasurement),
+) (*measurementRoute, error) {
+	if record == nil {
+		return nil, errors.New("capacity async measurement recorder is required")
+	}
+	return newMeasurementRouteWithRecorder(delegate, func(_ context.Context, measurement envelopeMeasurement) error {
+		record(measurement)
+		return nil
+	})
 }
 
 func newMeasurementRouteWithRecorder(
@@ -75,42 +83,54 @@ func (r *measurementRoute) Deliver(
 	return receipt, nil
 }
 
-func recordEnvelopeMeasurement(ctx context.Context, measurement envelopeMeasurement) error {
-	tx := outboxstorage.GetTx(ctx)
-	if tx == nil {
-		return errors.New("missing Outbox business transaction")
+func (r *measurementRoute) DeliverBatch(
+	ctx context.Context,
+	deliveries []messenger.Delivery,
+) ([]messenger.Receipt, error) {
+	delegate, ok := r.delegate.(messenger.BatchRoute)
+	if !ok {
+		return nil, fmt.Errorf("%w: route %s does not support measured batches", messenger.ErrUnsupportedCapability, r.delegate.Name())
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO demo.envelope_measurements (
-		message_id, run_id, stage_id, envelope_bytes, envelope_sha256
-	) VALUES ($1, $2, $3, $4, $5)
-	ON CONFLICT (message_id) DO UPDATE SET message_id = EXCLUDED.message_id
-	WHERE demo.envelope_measurements.run_id = EXCLUDED.run_id
-	  AND demo.envelope_measurements.stage_id = EXCLUDED.stage_id
-	  AND demo.envelope_measurements.envelope_bytes = EXCLUDED.envelope_bytes
-	  AND demo.envelope_measurements.envelope_sha256 = EXCLUDED.envelope_sha256`,
-		measurement.MessageID,
-		measurement.Labels.RunID,
-		measurement.Labels.StageID,
-		measurement.EnvelopeBytes,
-		measurement.SHA256,
-	)
-	if err != nil {
-		return fmt.Errorf("insert envelope measurement: %w", err)
+	for index, delivery := range deliveries {
+		if delivery == nil {
+			return nil, fmt.Errorf("capacity measurement batch received nil delivery at index %d", index)
+		}
+		metadata := delivery.Metadata()
+		labels, measured, err := benchmarkLabels(metadata.Headers)
+		if err != nil {
+			return nil, err
+		}
+		if !measured {
+			continue
+		}
+		envelope, err := delivery.MarshalEnvelope()
+		if err != nil {
+			return nil, fmt.Errorf("marshal measured envelope %d: %w", index, err)
+		}
+		digest := sha256.Sum256(envelope)
+		// Recorder failures invalidate the run out of band and never alter the
+		// transactional delivery result.
+		_ = r.record(ctx, envelopeMeasurement{
+			MessageID: metadata.ID.String(), Labels: labels, EnvelopeBytes: int64(len(envelope)),
+			SHA256: hex.EncodeToString(digest[:]),
+		})
 	}
-	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("message %s conflicts with a different envelope measurement", measurement.MessageID)
-	}
-	return nil
+	return delegate.DeliverBatch(ctx, deliveries)
 }
 
 type confirmedEnvelopePublisher interface {
 	PublishEnvelope(ctx context.Context, payload []byte) (messenger.Receipt, error)
 }
 
+type confirmedBatchEnvelopePublisher interface {
+	PublishEnvelopeBatch(ctx context.Context, payloads [][]byte) ([]messenger.Receipt, []error, error)
+}
+
 type measurementPublisher struct {
-	delegate confirmedEnvelopePublisher
-	record   func(publicationConfirmation)
-	now      func() time.Time
+	delegate     confirmedEnvelopePublisher
+	record       func(publicationConfirmation)
+	now          func() time.Time
+	observations *outboxObservationRecorder
 }
 
 func newMeasurementPublisher(
@@ -151,7 +171,9 @@ func (p *measurementPublisher) PublishEnvelope(
 			SHA256: hex.EncodeToString(digest[:]),
 		}
 	}
+	started := time.Now()
 	receipt, err := p.delegate.PublishEnvelope(ctx, payload)
+	p.observations.recordPublish([][]byte{payload}, time.Since(started), []error{err}, nil)
 	if err != nil {
 		return messenger.Receipt{}, err
 	}
@@ -162,6 +184,54 @@ func (p *measurementPublisher) PublishEnvelope(
 		p.record(confirmation)
 	}
 	return receipt, nil
+}
+
+func (p *measurementPublisher) PublishEnvelopeBatch(
+	ctx context.Context,
+	payloads [][]byte,
+) ([]messenger.Receipt, []error, error) {
+	delegate, ok := p.delegate.(confirmedBatchEnvelopePublisher)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: measured publisher does not support batches", messenger.ErrUnsupportedCapability)
+	}
+	confirmations := make([]publicationConfirmation, len(payloads))
+	measured := make([]bool, len(payloads))
+	for index, payload := range payloads {
+		envelope, err := messenger.UnmarshalEnvelope(payload)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decode batch envelope %d before broker publish: %w", index, err)
+		}
+		labels, isMeasured, err := benchmarkLabels(envelope.Headers)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !isMeasured {
+			continue
+		}
+		digest := sha256.Sum256(payload)
+		confirmations[index].envelopeMeasurement = envelopeMeasurement{
+			MessageID: envelope.ID.String(), Labels: labels, EnvelopeBytes: int64(len(payload)),
+			SHA256: hex.EncodeToString(digest[:]),
+		}
+		measured[index] = true
+	}
+	started := time.Now()
+	receipts, errs, err := delegate.PublishEnvelopeBatch(ctx, payloads)
+	p.observations.recordPublish(payloads, time.Since(started), errs, err)
+	if err != nil {
+		return receipts, errs, err
+	}
+	if len(receipts) != len(payloads) || len(errs) != len(payloads) {
+		return receipts, errs, errors.New("capacity measured batch publisher returned an invalid result length")
+	}
+	now := p.now().UTC()
+	for index := range payloads {
+		if measured[index] && errs[index] == nil {
+			confirmations[index].PublishedAt = now
+			p.record(confirmations[index])
+		}
+	}
+	return receipts, errs, nil
 }
 
 func benchmarkLabels(headers map[string]string) (BenchmarkLabels, bool, error) {

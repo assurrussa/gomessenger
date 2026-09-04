@@ -148,6 +148,19 @@ func (o *Observer) Observe(ctx context.Context, observation messenger.Observatio
 		attributes = append(attributes,
 			attribute.Int64("messaging.message.retry_delay_ms", observation.RetryDelay.Milliseconds()))
 	}
+	if observation.BatchSize != 0 {
+		attributes = append(attributes,
+			attribute.Int("messaging.batch.size", observation.BatchSize),
+			attribute.Int("messaging.batch.bytes", observation.BatchBytes),
+			attribute.Int("messaging.batch.handler_messages", observation.BatchHandlerMessages),
+			attribute.Int("messaging.batch.acks", observation.BatchACKs),
+			attribute.Int("messaging.batch.retries", observation.BatchRetries),
+			attribute.Int("messaging.batch.deferrals", observation.BatchDeferrals),
+			attribute.Int("messaging.batch.dlqs", observation.BatchDLQs),
+			attribute.Int64("messaging.batch.fill_duration_ms", observation.BatchFillDuration.Milliseconds()),
+			attribute.Int64("messaging.batch.handler_duration_ms", observation.BatchHandlerDuration.Milliseconds()),
+		)
+	}
 	_, span := o.tracer.Start(
 		ctx,
 		"messenger."+string(observation.Operation),

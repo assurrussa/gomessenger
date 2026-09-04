@@ -45,7 +45,42 @@ func realMain() int {
 		log.Error("invalid capacity service configuration", "error", err)
 		return 2
 	}
+	config.OutboxIngressMode = demo.OutboxMode(demo.EnvOr("OUTBOX_INGRESS_MODE", string(config.OutboxIngressMode)))
+	config.OutboxRelayMode = demo.OutboxMode(demo.EnvOr("OUTBOX_RELAY_MODE", string(config.OutboxRelayMode)))
+	config.OutboxBatchMaxMessages, err = envInt("OUTBOX_BATCH_MAX_MESSAGES", config.OutboxBatchMaxMessages)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.OutboxBatchMaxBytes, err = envInt("OUTBOX_BATCH_MAX_BYTES", config.OutboxBatchMaxBytes)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.OutboxBatchMaxWait, err = envDuration("OUTBOX_BATCH_MAX_WAIT", config.OutboxBatchMaxWait)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
 	config.ConsumerConcurrency, err = envInt("NATS_CONSUMER_CONCURRENCY", config.ConsumerConcurrency)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.ConsumerMode = demo.ConsumerMode(demo.EnvOr("CONSUMER_MODE", string(config.ConsumerMode)))
+	config.ConsumerBatchMaxMessages, err = envInt(
+		"CONSUMER_BATCH_MAX_MESSAGES", config.ConsumerBatchMaxMessages,
+	)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.ConsumerBatchMaxBytes, err = envInt("CONSUMER_BATCH_MAX_BYTES", config.ConsumerBatchMaxBytes)
+	if err != nil {
+		log.Error("invalid capacity service configuration", "error", err)
+		return 2
+	}
+	config.ConsumerBatchMaxWait, err = envDuration("CONSUMER_BATCH_MAX_WAIT", config.ConsumerBatchMaxWait)
 	if err != nil {
 		log.Error("invalid capacity service configuration", "error", err)
 		return 2
@@ -93,6 +128,18 @@ func envInt(name string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 {
 		return 0, fmt.Errorf("%s must be a positive integer, got %q", name, value)
+	}
+	return parsed, nil
+}
+
+func envDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration, got %q", name, value)
 	}
 	return parsed, nil
 }

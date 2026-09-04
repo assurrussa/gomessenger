@@ -78,7 +78,7 @@ func TestHTTPCreateOrderReturnsAcceptedReceipt(t *testing.T) {
 	if service.payload.Scenario != ScenarioSuccess || len(service.payload.Items) != 50 {
 		t.Fatalf("payload = %#v", service.payload)
 	}
-	if service.offeredAt != time.Date(2026, 8, 27, 8, 0, 0, 123_000_000, time.UTC) {
+	if !service.offeredAt.Equal(time.Date(2026, 8, 27, 8, 0, 0, 123_000_000, time.UTC)) {
 		t.Fatalf("offeredAt = %s", service.offeredAt)
 	}
 }

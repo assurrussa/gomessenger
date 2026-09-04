@@ -132,12 +132,13 @@ Exit criteria:
 - documented retry-overtaking behavior;
 - load results showing bounded memory and no cross-key head-of-line blocking.
 
-## Workstream 4: batching based on measured need
+## Workstream 4: end-to-end consumer batching
 
-Broker-native producer batching already exists below GoMessenger. A public consumer batch API must not be added until
-profiling shows that per-message SQL or handler overhead is the limiting factor.
+Implemented on 2026-09-01. Broker-native producer batching remains below GoMessenger; the supported API adds only a
+consumer batch boundary. [ADR-0005](decisions/0005-batch-consumer.md) defines the accepted NATS/Kafka and
+PostgreSQL/SQLite contract. The earlier prototype report remains historical evidence, not a release gate.
 
-Before implementation, define:
+The accepted contract defines:
 
 - maximum records, bytes, and wait time for a batch;
 - whether a batch may span partitions or descriptors;
@@ -147,15 +148,18 @@ Before implementation, define:
 - ordering and cancellation semantics;
 - memory and shutdown bounds.
 
-The default durable contract remains message-oriented. Batch support should be optional and capability-checked, with a
-safe per-message fallback where semantics permit it.
+The existing single-message API remains supported. Batch support is optional and capability-checked; backends without
+the required partial-result transaction capability fail closed and never silently loop through singleton handlers.
 
-Exit criteria:
+Completed exit criteria:
 
-- profiling evidence that batching materially improves the target pipeline;
 - an ADR defining partial-failure and transaction semantics;
 - correctness tests for mixed success, retry, permanent failure, duplicate delivery, and drain;
-- throughput gains reported together with latency and memory costs.
+- NATS and Kafka command/event parity, PostgreSQL and SQLite parity, and clean external-consumer compilation;
+- a supported batch-1 versus real-batch invocation/transaction control.
+
+Any new throughput, latency, WAL, or RSS claim remains a separate evidence task with clean provenance and fixed
+resources.
 
 ## Workstream 5: operational validation
 
@@ -186,7 +190,7 @@ Exit criteria:
 1. Complete the real-project pilot and baseline the current system.
 2. Introduce schema identity/compatibility and the broker capability model.
 3. Design partition-key semantics using pilot ordering requirements.
-4. Add batching only when profiling demonstrates a material bottleneck.
+4. Validate the supported batch consumer against real-service workload and capacity evidence.
 5. Promote individual guarantees to supported status only after load/soak/chaos evidence exists.
 
 This ordering deliberately avoids speculative APIs. Pilot evidence may change the priority, but it must not weaken the

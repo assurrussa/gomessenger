@@ -24,6 +24,12 @@ type Route struct {
 	clock     func() time.Time
 }
 
+type batchRouteRecord struct {
+	index    int
+	metadata messenger.Metadata
+	record   *kgo.Record
+}
+
 // NewRoute constructs a route backed by the managed transport.
 func NewRoute(transport *Transport, config RouteConfig) (*Route, error) {
 	if transport == nil || config.Name == "" {
@@ -157,6 +163,120 @@ func (r *Route) publishEnvelope(
 		State:     messenger.ReceiptBrokerConfirmed,
 		At:        r.clock().UTC(),
 	}, nil
+}
+
+// PublishEnvelopeBatch validates each canonical envelope and publishes the
+// valid subset in one Kafka transaction. Any produce or commit failure is
+// reported for every member of that subset because none of it committed.
+func (r *Route) PublishEnvelopeBatch(
+	ctx context.Context,
+	payloads [][]byte,
+) ([]messenger.Receipt, []error, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("%w: nil publish context", ErrInvalidConfig)
+	}
+	if len(payloads) == 0 {
+		return nil, nil, fmt.Errorf("%w: empty publish batch", ErrInvalidConfig)
+	}
+	receipts := make([]messenger.Receipt, len(payloads))
+	errs := make([]error, len(payloads))
+	valid := make([]batchRouteRecord, 0, len(payloads))
+	for index, payload := range payloads {
+		canonical, err := messenger.CanonicalizeEnvelope(payload)
+		if err != nil {
+			errs[index] = err
+			continue
+		}
+		envelope, err := messenger.UnmarshalEnvelope(canonical)
+		if err != nil {
+			errs[index] = err
+			continue
+		}
+		metadata := envelope.Metadata()
+		now := r.clock().UTC()
+		if !metadata.ExpiresAt.IsZero() && !metadata.ExpiresAt.After(now) {
+			errs[index] = messenger.Permanent(ErrMessageExpired)
+			continue
+		}
+		if !metadata.NotBefore.IsZero() && metadata.NotBefore.After(now) {
+			errs[index] = messenger.RetryAfter(ErrMessageNotReady, metadata.NotBefore.Sub(now))
+			continue
+		}
+		topic, err := Topic(r.namespace, messenger.DescriptorInfo{
+			Kind: metadata.Kind, Name: metadata.Name, SchemaVersion: metadata.SchemaVersion,
+		})
+		if err != nil {
+			errs[index] = messenger.Permanent(err)
+			continue
+		}
+		valid = append(valid, batchRouteRecord{
+			index: index, metadata: metadata, record: newRouteRecord(topic, metadata, canonical),
+		})
+	}
+	if len(valid) == 0 {
+		return receipts, errs, nil
+	}
+	if err := r.transport.ensureRunning(); err != nil {
+		markKafkaBatchFailure(valid, errs, messenger.RetryAfter(err, time.Second))
+		return receipts, errs, nil
+	}
+	if err := r.transport.acquireTransaction(ctx); err != nil {
+		markKafkaBatchFailure(valid, errs, messenger.RetryAfter(err, time.Second))
+		return receipts, errs, nil
+	}
+	defer r.transport.releaseTransaction()
+
+	active := valid[:0]
+	for _, item := range valid {
+		now := r.clock().UTC()
+		if !item.metadata.ExpiresAt.IsZero() && !item.metadata.ExpiresAt.After(now) {
+			errs[item.index] = messenger.Permanent(ErrMessageExpired)
+			continue
+		}
+		active = append(active, item)
+	}
+	if len(active) == 0 {
+		return receipts, errs, nil
+	}
+	brokerCtx, cancel := r.transport.brokerContext(ctx)
+	defer cancel()
+	if err := r.transport.client.BeginTransaction(); err != nil {
+		failure := fmt.Errorf("messenger/kafka: begin batch publish transaction: %w", err)
+		markKafkaBatchFailure(active, errs, messenger.RetryAfter(failure, time.Second))
+		return receipts, errs, nil
+	}
+	records := make([]*kgo.Record, len(active))
+	for index := range active {
+		records[index] = active[index].record
+	}
+	if err := r.transport.client.ProduceSync(brokerCtx, records...).FirstErr(); err != nil {
+		abortErr := abortTransaction(ctx, r.transport.config.OperationTimeout, r.transport.client)
+		failure := errors.Join(fmt.Errorf("messenger/kafka: publish batch: %w", err), abortErr)
+		markKafkaBatchFailure(active, errs, messenger.RetryAfter(failure, time.Second))
+		return receipts, errs, nil
+	}
+	if err := r.transport.client.EndTransaction(brokerCtx, kgo.TryCommit); err != nil {
+		abortErr := abortTransaction(ctx, r.transport.config.OperationTimeout, r.transport.client)
+		failure := errors.Join(fmt.Errorf("messenger/kafka: commit publish batch: %w", err), abortErr)
+		markKafkaBatchFailure(active, errs, messenger.RetryAfter(failure, time.Second))
+		return receipts, errs, nil
+	}
+	now := r.clock().UTC()
+	for _, item := range active {
+		receipts[item.index] = messenger.Receipt{
+			MessageID: item.metadata.ID,
+			Route:     r.name,
+			State:     messenger.ReceiptBrokerConfirmed,
+			At:        now,
+		}
+	}
+	return receipts, errs, nil
+}
+
+func markKafkaBatchFailure(items []batchRouteRecord, errs []error, err error) {
+	for _, item := range items {
+		errs[item.index] = err
+	}
 }
 
 func newRouteRecord(topic string, metadata messenger.Metadata, native []byte) *kgo.Record {

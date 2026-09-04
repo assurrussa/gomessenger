@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"example.com/gomessenger-durable-postgres-nats/internal/demo"
 	"example.com/gomessenger-durable-postgres-nats/internal/pgtelemetry"
 )
 
@@ -15,23 +16,24 @@ const (
 )
 
 type stageReportInput struct {
-	config         Config
-	stageID        string
-	warmup         bool
-	rate           int
-	loadStartedAt  time.Time
-	loadEndedAt    time.Time
-	drainDuration  time.Duration
-	drainCompleted bool
-	initial        Sample
-	loadEnd        Sample
-	final          Sample
-	samples        []Sample
-	k6             K6Result
-	latency        LatencyStats
-	envelopes      EnvelopeStats
-	integrity      IntegrityResult
-	postgres       pgtelemetry.Timeline
+	config             Config
+	stageID            string
+	warmup             bool
+	rate               int
+	loadStartedAt      time.Time
+	loadEndedAt        time.Time
+	drainDuration      time.Duration
+	drainCompleted     bool
+	initial            Sample
+	loadEnd            Sample
+	final              Sample
+	samples            []Sample
+	k6                 K6Result
+	latency            LatencyStats
+	envelopes          EnvelopeStats
+	integrity          IntegrityResult
+	postgres           pgtelemetry.Timeline
+	loadSampleFailures int
 }
 
 func buildStageReport(input stageReportInput) StageReport {
@@ -78,16 +80,23 @@ func buildStageReport(input stageReportInput) StageReport {
 		Latency:                 input.latency,
 		InboxHandle:             input.final.Application.Consumer.InboxHandle,
 		BrokerAck:               input.final.Application.Consumer.BrokerAck,
+		ConsumerBatch:           input.final.Application.Consumer.Batch,
+		OutboxExecution:         input.final.Application.OutboxExecution,
 		Envelopes:               input.envelopes,
 		PostgreSQL:              input.postgres,
-		K6:                      input.k6,
-		Integrity:               input.integrity,
+		OutboxDatabase: outboxDatabaseStats(
+			input.initial.Application,
+			input.final.Application,
+		),
+		K6:        input.k6,
+		Integrity: input.integrity,
 		InboxDuplicates: nonNegativeDelta(
 			input.final.Application.InboxDuplicates,
 			input.initial.Application.InboxDuplicates,
 		),
 		DLQMessages: safeUintDelta(input.final.Broker.DLQMessages, input.initial.Broker.DLQMessages),
 	}
+	report.PostgreSQLNormalized = normalizePostgreSQLCost(report.PostgreSQL.LoadDelta, loadCounts.Committed)
 	for _, sample := range input.samples {
 		backlog := sample.Business.Accepted - sample.Business.Committed
 		if backlog > report.MaxBusinessBacklog {
@@ -105,8 +114,64 @@ func buildStageReport(input stageReportInput) StageReport {
 	}
 	report.Integrity = evaluateIntegrity(report.Integrity, report.AfterDrain, report.DLQMessages)
 	report.UnsustainableReasons = sustainabilityReasons(input.config, report)
+	if input.loadSampleFailures != 0 {
+		report.UnsustainableReasons = append(report.UnsustainableReasons, fmt.Sprintf(
+			"application telemetry was unavailable for %d load samples", input.loadSampleFailures,
+		))
+	}
 	report.Sustainable = report.Integrity.Passed && len(report.UnsustainableReasons) == 0
 	return report
+}
+
+func outboxDatabaseStats(initial, final demo.AppStats) OutboxDatabaseStats {
+	return OutboxDatabaseStats{
+		Producer: pgxPoolStageStats(initial.ProducerDB, final.ProducerDB),
+		Relay:    pgxPoolStageStats(initial.RelayDB, final.RelayDB),
+	}
+}
+
+func pgxPoolStageStats(initial, final demo.PGXPoolStats) PGXPoolStageStats {
+	newConnections := nonNegativeDelta(final.NewConnectionsCount, initial.NewConnectionsCount)
+	normalExpansion := int64(final.MaxAcquiredConnections - initial.TotalConnections)
+	if normalExpansion < 0 {
+		normalExpansion = 0
+	}
+	if maximum := int64(final.MaxConnections - initial.TotalConnections); normalExpansion > maximum && maximum >= 0 {
+		normalExpansion = maximum
+	}
+	replacements := newConnections - normalExpansion
+	if replacements < 0 {
+		replacements = 0
+	}
+	return PGXPoolStageStats{
+		MaxConnections:         final.MaxConnections,
+		MaxAcquiredConnections: final.MaxAcquiredConnections,
+		NewConnections:         newConnections,
+		ReplacementConnections: replacements,
+		CanceledAcquires:       nonNegativeDelta(final.CanceledAcquireCount, initial.CanceledAcquireCount),
+		UnusableReleases:       nonNegativeDelta(final.UnusableReleaseCount, initial.UnusableReleaseCount),
+	}
+}
+
+func normalizePostgreSQLCost(delta pgtelemetry.Delta, committed int64) PostgreSQLNormalizedStats {
+	var calls int64
+	for _, statement := range delta.Statements {
+		if statement.Classification != "probe" {
+			calls += statement.Calls
+		}
+	}
+	transactions := int64(delta.Database["xact_commit"] + delta.Database["xact_rollback"])
+	walBytes := delta.WAL["wal_bytes"]
+	checkpoints := int64(delta.Checkpointer["num_timed"] + delta.Checkpointer["num_requested"])
+	result := PostgreSQLNormalizedStats{
+		SQLCalls: calls, Transactions: transactions, WALBytes: walBytes,
+		CompletedCheckpoints: checkpoints,
+	}
+	if committed > 0 {
+		result.TransactionsPerMessage = float64(transactions) / float64(committed)
+		result.WALBytesPerMessage = walBytes / float64(committed)
+	}
+	return result
 }
 
 func evaluateIntegrity(result IntegrityResult, counts StageCounts, dlqMessages int64) IntegrityResult {
@@ -138,7 +203,7 @@ func evaluateIntegrity(result IntegrityResult, counts StageCounts, dlqMessages i
 }
 
 func sustainabilityReasons(config Config, report StageReport) []string {
-	reasons := make([]string, 0, 8)
+	reasons := make([]string, 0, 10)
 	if report.K6.ExitCode != 0 {
 		reasons = append(reasons, fmt.Sprintf("k6 exited with code %d", report.K6.ExitCode))
 	}
@@ -205,6 +270,57 @@ func sustainabilityReasons(config Config, report StageReport) []string {
 		reasons = append(reasons, fmt.Sprintf(
 			"consumer observations contain errors (handle=%d broker_ack=%d)",
 			report.InboxHandle.Errors, report.BrokerAck.Errors,
+		))
+	}
+	if report.OutboxExecution.Handler.Handler.Errors != 0 ||
+		report.OutboxExecution.Publish.Handler.Errors != 0 ||
+		report.OutboxExecution.Finalization.Handler.Errors != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox observations contain errors (handler=%d publish=%d finalization=%d)",
+			report.OutboxExecution.Handler.Handler.Errors,
+			report.OutboxExecution.Publish.Handler.Errors,
+			report.OutboxExecution.Finalization.Handler.Errors,
+		))
+	}
+	if report.OutboxExecution.Outcomes.Retry != 0 ||
+		report.OutboxExecution.Outcomes.Defer != 0 ||
+		report.OutboxExecution.Outcomes.DLQ != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"unexpected Outbox outcomes observed (retry=%d defer=%d dlq=%d)",
+			report.OutboxExecution.Outcomes.Retry,
+			report.OutboxExecution.Outcomes.Defer,
+			report.OutboxExecution.Outcomes.DLQ,
+		))
+	}
+	reasons = appendPoolSustainabilityReasons(reasons, "producer", report.OutboxDatabase.Producer)
+	reasons = appendPoolSustainabilityReasons(reasons, "relay", report.OutboxDatabase.Relay)
+	return reasons
+}
+
+func appendPoolSustainabilityReasons(
+	reasons []string,
+	role string,
+	stats PGXPoolStageStats,
+) []string {
+	if stats.ReplacementConnections != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox %s pool replaced %d connections", role, stats.ReplacementConnections,
+		))
+	}
+	if stats.CanceledAcquires != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox %s pool canceled %d acquires", role, stats.CanceledAcquires,
+		))
+	}
+	if stats.UnusableReleases != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox %s pool released %d unusable connections", role, stats.UnusableReleases,
+		))
+	}
+	if stats.MaxAcquiredConnections > stats.MaxConnections {
+		reasons = append(reasons, fmt.Sprintf(
+			"Outbox %s pool acquired high-water %d exceeds max %d",
+			role, stats.MaxAcquiredConnections, stats.MaxConnections,
 		))
 	}
 	return reasons
