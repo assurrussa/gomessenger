@@ -121,6 +121,14 @@ func (m *Messenger) deliverBatch(
 	route BatchRoute,
 	deliveries []Delivery,
 ) ([]Receipt, error) {
+	for index, delivery := range deliveries {
+		if delivery == nil {
+			return nil, fmt.Errorf("%w: nil delivery at index %d", ErrInvalidMessage, index)
+		}
+		if _, err := delivery.MarshalEnvelope(); err != nil {
+			return nil, fmt.Errorf("batch delivery %d: %w", index, err)
+		}
+	}
 	started := m.clock().UTC()
 	receipts, err := route.DeliverBatch(ctx, deliveries)
 	if err == nil && len(receipts) != len(deliveries) {

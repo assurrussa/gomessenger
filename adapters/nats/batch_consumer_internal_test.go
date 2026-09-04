@@ -1831,3 +1831,172 @@ func TestNATSBatchReadinessSucceedsOnlyAfterAllWorkersEstablishPullBoundary(t *t
 	cancel()
 	<-runDone
 }
+
+func TestNATSBatchHeartbeatStartsBeforeDecodingAndEvictsOnImmediateNak(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("test.heartbeat.decode", 1, messenger.JSON[string]())
+	subject, err := Subject("heartbeat-decode", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "HEARTBEAT_DECODE"
+	dlqSubject := "heartbeat-decode.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("HEARTBEAT_DECODE_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	id1, err := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-0000000000f1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta1 := messenger.Metadata{
+		ID: id1, Source: testNATSSource, Kind: messenger.KindCommand,
+		Name: command.Info().Name, SchemaVersion: 1, Time: time.Now().UTC(),
+		ContentType: testDLQContentType, CorrelationID: id1,
+	}
+	data1, err := messenger.EncodeCommandEnvelope(command, meta1, "payload1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id2, err := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-0000000000f2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta2 := messenger.Metadata{
+		ID: id2, Source: testNATSSource, Kind: messenger.KindCommand,
+		Name: command.Info().Name, SchemaVersion: 1, Time: time.Now().UTC(),
+		ContentType: testDLQContentType, CorrelationID: id2,
+	}
+	data2, err := messenger.EncodeCommandEnvelope(command, meta2, "payload2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(t.Context(), subject, data1, jetstream.WithMsgID(id1.String())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(t.Context(), subject, data2, jetstream.WithMsgID(id2.String())); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "heartbeat-decode-worker"
+	_, err = js.CreateOrUpdateConsumer(t.Context(), streamName, jetstream.ConsumerConfig{
+		Durable: consumerID, AckPolicy: jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := conn.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := legacy.PullSubscribe(subject, "", natsio.Bind(streamName, consumerID), natsio.ManualAck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	var capturedHeartbeat *natsBatchHeartbeat
+	var decodeCalls atomic.Int32
+	var heartbeatCountsDuringDecode []int
+	var mu sync.Mutex
+
+	decode := func(data []byte, _ natsio.Header, _ time.Time) (decodedMessage, error) {
+		canonical, err := messenger.CanonicalizeEnvelope(data)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+		msg, err := messenger.DecodeCommand(command, canonical)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+
+		decodeCalls.Add(1)
+		mu.Lock()
+		if capturedHeartbeat != nil {
+			capturedHeartbeat.mu.Lock()
+			heartbeatCountsDuringDecode = append(heartbeatCountsDuringDecode, len(capturedHeartbeat.messages))
+			capturedHeartbeat.mu.Unlock()
+		}
+		mu.Unlock()
+
+		if msg.Metadata.ID == id2 {
+			// Simulate canonical bytes exceeding remaining batch capacity
+			canonical = make([]byte, 2000)
+		}
+
+		return decodedMessage{
+			metadata: msg.Metadata, canonical: canonical, value: msg,
+		}, nil
+	}
+
+	consumer := &Consumer{
+		config: HandlerConfig{
+			ConsumerID: consumerID,
+			AckWait:    30 * time.Second,
+		},
+		descriptor: command.Info(),
+		decode:     decode,
+		clock:      time.Now,
+		heartbeatHook: func(hb *natsBatchHeartbeat) {
+			mu.Lock()
+			capturedHeartbeat = hb
+			mu.Unlock()
+		},
+		batch: &batchConsumer{
+			config: messenger.BatchConfig{
+				MaxMessages: 10,
+				MaxBytes:    1000,
+				MaxWait:     200 * time.Millisecond,
+			},
+		},
+	}
+
+	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub)
+	if err != nil {
+		t.Fatalf("collectNATSBatch error = %v", err)
+	}
+	if batch == nil {
+		t.Fatal("expected non-nil batch")
+	}
+	defer batch.heartbeat.Stop()
+
+	if decodeCalls.Load() != 2 {
+		t.Fatalf("decodeCalls = %d, want 2", decodeCalls.Load())
+	}
+
+	mu.Lock()
+	counts := append([]int(nil), heartbeatCountsDuringDecode...)
+	mu.Unlock()
+	if len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
+		t.Fatalf("heartbeat counts during decode = %v, want [1, 2]", counts)
+	}
+
+	if len(batch.deliveries) != 1 {
+		t.Fatalf("len(batch.deliveries) = %d, want 1", len(batch.deliveries))
+	}
+	if batch.deliveries[0].decoded.metadata.ID != id1 {
+		t.Fatalf("batch delivery ID = %s, want %s", batch.deliveries[0].decoded.metadata.ID, id1)
+	}
+
+	batch.heartbeat.mu.Lock()
+	finalHeartbeatCount := len(batch.heartbeat.messages)
+	batch.heartbeat.mu.Unlock()
+	if finalHeartbeatCount != 1 {
+		t.Fatalf("final heartbeat count = %d, want 1 (message 2 should have been evicted)", finalHeartbeatCount)
+	}
+}

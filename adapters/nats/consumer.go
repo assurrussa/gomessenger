@@ -101,6 +101,8 @@ type Consumer struct {
 	beforeShutdownTransition func()
 	// collectBatchHook intercepts batch collection in package tests.
 	collectBatchHook func(runContext, admissionCtx context.Context, subscription *natsio.Subscription) (*natsBatch, error)
+	// heartbeatHook intercepts batch heartbeat creation in package tests.
+	heartbeatHook func(heartbeat *natsBatchHeartbeat)
 }
 
 // NewCommandConsumer constructs a native-envelope durable command consumer.

@@ -3,6 +3,7 @@ package messenger_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	messenger "github.com/assurrussa/gomessenger"
@@ -304,6 +305,73 @@ func batchPublishUnknown(
 ) error {
 	_, err := instance.PublishBatch(ctx, event, []processPayload{{}})
 	return err
+}
+
+type failingBatchCodec struct{}
+
+func (failingBatchCodec) Encode(value processPayload) ([]byte, error) {
+	if value.JobID < 0 {
+		return nil, errors.New("cannot encode negative job id")
+	}
+	return []byte(fmt.Sprintf(`{"jobId":%d}`, value.JobID)), nil
+}
+
+func (failingBatchCodec) Decode([]byte) (processPayload, error) {
+	return processPayload{}, nil
+}
+
+func (failingBatchCodec) ContentType() string              { return testContentType }
+func (failingBatchCodec) Encoding() messenger.DataEncoding { return messenger.DataJSON }
+
+func TestBatchFacadeCanonicalizesDeliveriesBeforeRouteInvocation(t *testing.T) {
+	t.Parallel()
+
+	command := messenger.MustCommand("batch.fail.create", 1, failingBatchCodec{})
+	event := messenger.MustEvent("batch.fail.created", 1, failingBatchCodec{})
+	route := &recordingBatchRoute{name: outboxBatchRouteName}
+	builder := messenger.NewBuilder(messenger.WithSource(testSource))
+	builder.RouteCommand(command, route)
+	builder.RouteEvent(event, route)
+	instance, _, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. SendMessageBatch with unencodable item fails before route invocation.
+	_, err = instance.SendMessageBatch(t.Context(), command, []messenger.Outgoing[processPayload]{
+		{Payload: processPayload{JobID: 10}},
+		{Payload: processPayload{JobID: -1}},
+	})
+	if err == nil {
+		t.Fatal("expected error on unencodable command item, got nil")
+	}
+	if route.batchCalls != 0 {
+		t.Fatalf("route was invoked %d times on unencodable command item, want 0", route.batchCalls)
+	}
+
+	// 2. PublishMessageBatch with unencodable item fails before route invocation.
+	_, err = instance.PublishMessageBatch(t.Context(), event, []messenger.Outgoing[processPayload]{
+		{Payload: processPayload{JobID: 20}},
+		{Payload: processPayload{JobID: -2}},
+	})
+	if err == nil {
+		t.Fatal("expected error on unencodable event item, got nil")
+	}
+	if route.batchCalls != 0 {
+		t.Fatalf("route was invoked %d times on unencodable event item, want 0", route.batchCalls)
+	}
+
+	// 3. Valid batch succeeds and invokes route once.
+	receipts, err := instance.SendMessageBatch(t.Context(), command, []messenger.Outgoing[processPayload]{
+		{Payload: processPayload{JobID: 10}},
+		{Payload: processPayload{JobID: 20}},
+	})
+	if err != nil {
+		t.Fatalf("valid send message batch failed: %v", err)
+	}
+	if route.batchCalls != 1 || len(receipts) != 2 {
+		t.Fatalf("expected 1 route call with 2 receipts, got calls=%d, receipts=%d", route.batchCalls, len(receipts))
+	}
 }
 
 var _ messenger.BatchRoute = (*recordingBatchRoute)(nil)

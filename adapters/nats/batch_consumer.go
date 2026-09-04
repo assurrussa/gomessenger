@@ -373,10 +373,10 @@ func (c *Consumer) collectNATSBatch(
 		return nil, nil //nolint:nilnil // Empty pulls are a normal admission boundary.
 	}
 	batch := &natsBatch{startedAt: c.clock().UTC(), heartbeat: newNATSBatchHeartbeat(runContext, c)}
+	batch.heartbeat.Add(first)
 	firstDelivery := c.decodeNATSBatchDelivery(first)
 	batch.deliveries = append(batch.deliveries, firstDelivery)
 	batch.bytes = firstDelivery.canonicalBytes
-	batch.heartbeat.Add(firstDelivery.brokerMessage())
 	if firstDelivery.decodeErr != nil || !natsBatchEligible(firstDelivery.decoded.metadata, c.clock().UTC()) ||
 		c.batch.config.MaxMessages == 1 || batch.bytes >= c.batch.config.MaxBytes {
 		return batch, nil
@@ -396,18 +396,20 @@ func (c *Consumer) collectNATSBatch(
 		return nil, fmt.Errorf("messenger/nats: fill batch: %w", err)
 	}
 	for message := range result.Messages() {
+		batch.heartbeat.Add(message)
 		delivery := c.decodeNATSBatchDelivery(message)
 		if hasNATSBatchConflictingGeneration(batch.deliveries, delivery) {
+			batch.heartbeat.Remove(message)
 			_ = message.NakWithDelay(c.batch.config.MaxWait)
 			continue
 		}
 		if delivery.canonicalBytes > c.batch.config.MaxBytes-batch.bytes {
+			batch.heartbeat.Remove(message)
 			_ = message.NakWithDelay(c.batch.config.MaxWait)
 			continue
 		}
 		batch.deliveries = append(batch.deliveries, delivery)
 		batch.bytes += delivery.canonicalBytes
-		batch.heartbeat.Add(delivery.brokerMessage())
 	}
 	if fetchErr := result.Error(); fetchErr != nil && !normalNATSBatchBoundary(fillCtx, fetchErr) {
 		batch.heartbeat.Stop()
@@ -1178,6 +1180,9 @@ func newNATSBatchHeartbeat(ctx context.Context, consumer *Consumer) *natsBatchHe
 		done: make(chan struct{}), finished: make(chan struct{}),
 	}
 	go heartbeat.run(context.WithoutCancel(ctx))
+	if consumer != nil && consumer.heartbeatHook != nil {
+		consumer.heartbeatHook(heartbeat)
+	}
 	return heartbeat
 }
 
