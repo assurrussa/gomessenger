@@ -55,6 +55,7 @@ const (
 	testProducerSource       = "urn:service:producer"
 	testHostOwner            = "host"
 	testTopologyConsumerName = "worker"
+	testOutboxSource         = "urn:service:outbox"
 )
 
 func TestTopologyPlanApplyAndRejectDrift(t *testing.T) {
@@ -287,7 +288,7 @@ func TestRoutePublishesPersistedEnvelopeWithOriginalMessageID(t *testing.T) {
 	}
 	metadata := messenger.Metadata{
 		ID: id, Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
-		Source: "urn:service:outbox", Time: time.Unix(1_700_000_000, 0).UTC(),
+		Source: testOutboxSource, Time: time.Unix(1_700_000_000, 0).UTC(),
 		CorrelationID: id, ContentType: testContentType,
 	}
 	envelope, err := messenger.EncodeEventEnvelope(event, metadata, testPayload{JobID: 42})
@@ -332,7 +333,7 @@ func TestRoutePublishesEnvelopeBatchWithPerItemPubAckAndDeduplication(t *testing
 	for index, id := range ids {
 		payloads[index], err = messenger.EncodeEventEnvelope(event, messenger.Metadata{
 			ID: id, Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
-			Source: "urn:service:outbox", Time: time.Unix(1_700_000_000, int64(index)).UTC(),
+			Source: testOutboxSource, Time: time.Unix(1_700_000_000, int64(index)).UTC(),
 			CorrelationID: id, ContentType: testContentType,
 		}, testPayload{JobID: int64(index + 1)})
 		if err != nil {
@@ -371,6 +372,51 @@ func TestRoutePublishesEnvelopeBatchWithPerItemPubAckAndDeduplication(t *testing
 	}
 	if info.State.Msgs != 2 {
 		t.Fatalf("stream messages = %d, want 2", info.State.Msgs)
+	}
+}
+
+func TestRoutePublishEnvelopeBatchChunksAcrossPublishWindow(t *testing.T) {
+	connection := startJetStream(t)
+	ensureTestStream(t, connection)
+	event := messenger.MustEvent(testEventName, 1, messenger.JSON[testPayload]())
+	route, err := nats.NewRoute(connection, nats.RouteConfig{
+		Name:          "nats.batch.relay.chunks",
+		Namespace:     testNamespace,
+		WireMode:      nats.WireNative,
+		PublishWindow: 2,
+	})
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+
+	payloads := make([][]byte, 5)
+	ids := make([]messenger.MessageID, 5)
+	for i := range payloads {
+		ids[i] = mustID(t, fmt.Sprintf("018f4f2c-4a00-7000-8000-%012x", i+20))
+		payloads[i], err = messenger.EncodeEventEnvelope(event, messenger.Metadata{
+			ID: ids[i], Kind: messenger.KindEvent, Name: testEventName, SchemaVersion: 1,
+			Source: testOutboxSource, Time: time.Now().UTC(),
+			CorrelationID: ids[i], ContentType: testContentType,
+		}, testPayload{JobID: int64(i + 1)})
+		if err != nil {
+			t.Fatalf("encode %d: %v", i, err)
+		}
+	}
+
+	receipts, itemErrors, batchErr := route.PublishEnvelopeBatch(t.Context(), payloads)
+	if batchErr != nil {
+		t.Fatalf("batchErr = %v", batchErr)
+	}
+	if len(receipts) != 5 || len(itemErrors) != 5 {
+		t.Fatalf("receipts/itemErrors length = %d/%d, want 5", len(receipts), len(itemErrors))
+	}
+	for i := range payloads {
+		if itemErrors[i] != nil {
+			t.Fatalf("item %d error = %v", i, itemErrors[i])
+		}
+		if receipts[i].MessageID != ids[i] || receipts[i].State != messenger.ReceiptBrokerConfirmed {
+			t.Fatalf("item %d receipt = %#v", i, receipts[i])
+		}
 	}
 }
 

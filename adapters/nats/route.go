@@ -23,21 +23,26 @@ const (
 	WireCloudEventsBinary WireMode = "cloudevents-binary"
 )
 
+const defaultPublishAsyncMaxPending = 100
+
 // RouteConfig declares one direct JetStream producer route.
 type RouteConfig struct {
-	Name      string
-	Namespace string
-	WireMode  WireMode
+	Name          string
+	Namespace     string
+	WireMode      WireMode
+	PublishWindow int
 }
 
 // Route synchronously publishes and waits for a JetStream PubAck.
 type Route struct {
-	name       string
-	namespace  string
-	mode       WireMode
-	connection *natsio.Conn
-	js         jetstream.JetStream
-	clock      func() time.Time
+	name                string
+	namespace           string
+	mode                WireMode
+	publishWindow       int
+	connection          *natsio.Conn
+	js                  jetstream.JetStream
+	clock               func() time.Time
+	publishMsgAsyncHook func(preparedBatchMessage) (jetstream.PubAckFuture, error)
 }
 
 type preparedBatchMessage struct {
@@ -48,7 +53,7 @@ type preparedBatchMessage struct {
 
 // NewRoute constructs a producer from a host-owned NATS connection.
 func NewRoute(connection *natsio.Conn, config RouteConfig) (*Route, error) {
-	if connection == nil || config.Name == "" || config.Namespace == "" || !config.WireMode.valid() {
+	if connection == nil || config.Name == "" || config.Namespace == "" || !config.WireMode.valid() || config.PublishWindow < 0 {
 		return nil, fmt.Errorf("%w: producer route", ErrInvalidConfig)
 	}
 	if _, err := Subject(config.Namespace, messenger.DescriptorInfo{
@@ -62,7 +67,8 @@ func NewRoute(connection *natsio.Conn, config RouteConfig) (*Route, error) {
 	}
 	return &Route{
 		name: config.Name, namespace: config.Namespace, mode: config.WireMode,
-		connection: connection, js: js, clock: time.Now,
+		publishWindow: config.PublishWindow,
+		connection:    connection, js: js, clock: time.Now,
 	}, nil
 }
 
@@ -182,38 +188,96 @@ func (r *Route) PublishEnvelopeBatch(
 	if len(valid) == 0 {
 		return receipts, errs, nil
 	}
+	windowSize := r.publishWindow
+	if windowSize <= 0 {
+		windowSize = defaultPublishAsyncMaxPending
+	}
+	maxPending := min(len(valid), windowSize)
+
 	async, err := jetstream.New(
 		r.connection,
-		jetstream.WithPublishAsyncMaxPending(min(len(valid), 100)),
+		jetstream.WithPublishAsyncMaxPending(maxPending),
 		jetstream.WithPublishAsyncTimeout(30*time.Second),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("messenger/nats: create batch publisher: %w", err)
 	}
 	defer async.CleanupPublisher()
-	futures := make([]jetstream.PubAckFuture, len(valid))
-	for index, item := range valid {
-		future, publishErr := async.PublishMsgAsync(item.message, jetstream.WithMsgID(item.metadata.ID.String()))
+
+	markRemaining := func(fromValidIndex int) {
+		for pendingIndex := fromValidIndex; pendingIndex < len(valid); pendingIndex++ {
+			itemIndex := valid[pendingIndex].index
+			if errs[itemIndex] == nil {
+				errs[itemIndex] = ctx.Err()
+			}
+		}
+	}
+
+	for chunkStart := 0; chunkStart < len(valid); chunkStart += windowSize {
+		chunkEnd := min(chunkStart+windowSize, len(valid))
+		chunk := valid[chunkStart:chunkEnd]
+
+		futures, canceled := r.enqueueBatchChunk(ctx, async, chunk, errs)
+		if canceled {
+			async.CleanupPublisher()
+			markRemaining(chunkStart)
+			return receipts, errs, nil
+		}
+
+		if failedAt, canceled := r.awaitBatchChunk(ctx, chunk, futures, receipts, errs); canceled {
+			async.CleanupPublisher()
+			markRemaining(chunkStart + failedAt)
+			return receipts, errs, nil
+		}
+	}
+	return receipts, errs, nil
+}
+
+func (r *Route) enqueueBatchChunk(
+	ctx context.Context,
+	async jetstream.JetStream,
+	chunk []preparedBatchMessage,
+	errs []error,
+) ([]jetstream.PubAckFuture, bool) {
+	futures := make([]jetstream.PubAckFuture, len(chunk))
+	for i, item := range chunk {
+		select {
+		case <-ctx.Done():
+			return nil, true
+		default:
+		}
+
+		var future jetstream.PubAckFuture
+		var publishErr error
+		if r.publishMsgAsyncHook != nil {
+			future, publishErr = r.publishMsgAsyncHook(item)
+		} else {
+			future, publishErr = async.PublishMsgAsync(item.message, jetstream.WithMsgID(item.metadata.ID.String()))
+		}
 		if publishErr != nil {
 			errs[item.index] = fmt.Errorf("messenger/nats: enqueue %s: %w", item.message.Subject, publishErr)
 			continue
 		}
-		futures[index] = future
+		futures[i] = future
 	}
-	for index, future := range futures {
+	return futures, false
+}
+
+func (r *Route) awaitBatchChunk(
+	ctx context.Context,
+	chunk []preparedBatchMessage,
+	futures []jetstream.PubAckFuture,
+	receipts []messenger.Receipt,
+	errs []error,
+) (int, bool) {
+	for i, future := range futures {
 		if future == nil {
 			continue
 		}
-		item := valid[index]
+		item := chunk[i]
 		select {
 		case <-ctx.Done():
-			async.CleanupPublisher()
-			for pendingIndex := index; pendingIndex < len(futures); pendingIndex++ {
-				if futures[pendingIndex] != nil && errs[valid[pendingIndex].index] == nil {
-					errs[valid[pendingIndex].index] = ctx.Err()
-				}
-			}
-			return receipts, errs, nil
+			return i, true
 		case ack := <-future.Ok():
 			if ack == nil || ack.Stream == "" {
 				errs[item.index] = errors.New("messenger/nats: broker returned an empty publish acknowledgement")
@@ -229,7 +293,7 @@ func (r *Route) PublishEnvelopeBatch(
 			errs[item.index] = fmt.Errorf("messenger/nats: publish %s: %w", item.message.Subject, publishErr)
 		}
 	}
-	return receipts, errs, nil
+	return len(chunk), false
 }
 
 func (r *Route) prepareEnvelopeBatch(
