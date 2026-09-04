@@ -100,7 +100,9 @@ type Consumer struct {
 	// beforeShutdownTransition synchronizes the locked transition in package tests.
 	beforeShutdownTransition func()
 	// collectBatchHook intercepts batch collection in package tests.
-	collectBatchHook func(runContext, admissionCtx context.Context, subscription *natsio.Subscription) (*natsBatch, error)
+	collectBatchHook func(
+		runContext, admissionCtx context.Context, subscription *natsio.Subscription, ready func(),
+	) (*natsBatch, error)
 	// heartbeatHook intercepts batch heartbeat creation in package tests.
 	heartbeatHook func(heartbeat *natsBatchHeartbeat)
 }

@@ -321,12 +321,20 @@ func (c *Consumer) runNATSBatchWorker(
 ) {
 	var topLevelStreak uint64
 	var readyOnce sync.Once
+	signalReady := func() {
+		if admissionCtx.Err() == nil {
+			readyOnce.Do(ready)
+		}
+	}
 	for admissionCtx.Err() == nil {
 		collect := c.collectNATSBatch
+		var batch *natsBatch
+		var err error
 		if c.collectBatchHook != nil {
-			collect = c.collectBatchHook
+			batch, err = c.collectBatchHook(runContext, admissionCtx, subscription, signalReady)
+		} else {
+			batch, err = collect(runContext, admissionCtx, subscription, signalReady)
 		}
-		batch, err := collect(runContext, admissionCtx, subscription)
 		if err != nil {
 			if !normalNATSBatchBoundary(admissionCtx, err) {
 				select {
@@ -336,9 +344,7 @@ func (c *Consumer) runNATSBatchWorker(
 				return
 			}
 		}
-		if admissionCtx.Err() == nil {
-			readyOnce.Do(ready)
-		}
+		signalReady()
 		if err != nil || batch == nil {
 			continue
 		}
@@ -356,10 +362,14 @@ func (c *Consumer) collectNATSBatch(
 	runContext context.Context,
 	admissionCtx context.Context,
 	subscription *natsio.Subscription,
+	ready func(),
 ) (*natsBatch, error) {
 	firstResult, err := subscription.FetchBatch(1, natsio.Context(admissionCtx))
 	if err != nil {
 		return nil, fmt.Errorf("messenger/nats: fetch first batch delivery: %w", err)
+	}
+	if ready != nil {
+		ready()
 	}
 	var first *natsio.Msg
 	for message := range firstResult.Messages() {
@@ -382,10 +392,15 @@ func (c *Consumer) collectNATSBatch(
 		return batch, nil
 	}
 
+	elapsed := c.clock().UTC().Sub(batch.startedAt)
+	if elapsed >= c.batch.config.MaxWait {
+		return batch, nil
+	}
+	remainingWait := c.batch.config.MaxWait - elapsed
+	fillCtx, cancelFill := context.WithTimeout(admissionCtx, remainingWait)
+	defer cancelFill()
 	remainingMessages := c.batch.config.MaxMessages - 1
 	remainingBytes := c.batch.config.MaxBytes - batch.bytes
-	fillCtx, cancelFill := context.WithTimeout(admissionCtx, c.batch.config.MaxWait)
-	defer cancelFill()
 	result, err := subscription.FetchBatch(remainingMessages,
 		natsio.Context(fillCtx), natsio.PullMaxBytes(remainingBytes))
 	if err != nil {

@@ -630,7 +630,7 @@ func TestCollectNATSBatchExactMaxBytesFlushesImmediately(t *testing.T) {
 	}
 
 	start := time.Now()
-	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub)
+	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub, nil)
 	duration := time.Since(start)
 	if err != nil {
 		t.Fatalf("collectNATSBatch error = %v", err)
@@ -1710,7 +1710,7 @@ func TestNATSBatchReadinessFailsClosedOnWorkerFatalFirstFetch(t *testing.T) {
 		t.Fatal("consumer marked pull loop ready despite fatal worker first fetch")
 	}
 
-	consumer.collectBatchHook = func(runCtx, admissionCtx context.Context, _ *natsio.Subscription) (*natsBatch, error) {
+	consumer.collectBatchHook = func(runCtx, admissionCtx context.Context, _ *natsio.Subscription, _ func()) (*natsBatch, error) {
 		idx := workerCount.Add(1)
 		if idx == 1 {
 			return nil, fatalErr
@@ -1788,14 +1788,20 @@ func TestNATSBatchReadinessSucceedsOnlyAfterAllWorkersEstablishPullBoundary(t *t
 	}
 
 	var workerCount atomic.Int32
-	consumer.collectBatchHook = func(_, _ context.Context, _ *natsio.Subscription) (*natsBatch, error) {
+	consumer.collectBatchHook = func(_, _ context.Context, _ *natsio.Subscription, ready func()) (*natsBatch, error) {
 		idx := workerCount.Add(1)
 		if idx == 1 {
 			worker1Pulled.Store(true)
+			if ready != nil {
+				ready()
+			}
 			return nil, nil //nolint:nilnil // Empty pulls are a normal admission boundary.
 		}
 		<-worker2Proceed
 		worker2Pulled.Store(true)
+		if ready != nil {
+			ready()
+		}
 		return nil, nil //nolint:nilnil // Empty pulls are a normal admission boundary.
 	}
 
@@ -1966,7 +1972,7 @@ func TestNATSBatchHeartbeatStartsBeforeDecodingAndEvictsOnImmediateNak(t *testin
 		},
 	}
 
-	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub)
+	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub, nil)
 	if err != nil {
 		t.Fatalf("collectNATSBatch error = %v", err)
 	}
@@ -1998,5 +2004,215 @@ func TestNATSBatchHeartbeatStartsBeforeDecodingAndEvictsOnImmediateNak(t *testin
 	batch.heartbeat.mu.Unlock()
 	if finalHeartbeatCount != 1 {
 		t.Fatalf("final heartbeat count = %d, want 1 (message 2 should have been evicted)", finalHeartbeatCount)
+	}
+}
+
+func TestNATSBatchReadinessReportsReadyOnEmptyStream(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("test.empty.stream.ready", 1, messenger.JSON[string]())
+	subject, err := Subject("empty-ready", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "EMPTY_READY_STREAM"
+	dlqSubject := "empty-ready.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("EMPTY_READY_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "empty-ready-consumer"
+	var handled atomic.Int64
+	store, _ := inbox.New(&testNATSBatchBackend{})
+	consumer, err := NewBatchCommandConsumer(
+		conn,
+		store,
+		command,
+		func(_ context.Context, msgs []messenger.Message[string]) (messenger.BatchResult, error) {
+			handled.Add(int64(len(msgs)))
+			return messenger.BatchResult{}, nil
+		},
+		HandlerConfig{
+			Stream: streamName, Namespace: "empty-ready", ConsumerID: consumerID,
+			WireMode: WireNative, Concurrency: 2, Timeout: time.Second,
+			FinalizationTimeout: time.Second, MaxAttempts: 3, BaseRetry: 10 * time.Millisecond,
+			MaxRetry: time.Second, AckWait: time.Second, DLQSubject: dlqSubject,
+		},
+		messenger.BatchConfig{MaxMessages: 10, MaxBytes: 1024, MaxWait: 50 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- consumer.Run(runCtx)
+	}()
+
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer readyCancel()
+
+	for consumer.Readiness(readyCtx) != nil {
+		if readyCtx.Err() != nil {
+			cancel()
+			t.Fatalf("consumer failed to report ready on empty stream: %v", consumer.Readiness(t.Context()))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	id, _ := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-0000000000a1")
+	meta := messenger.Metadata{
+		ID: id, Source: testNATSSource, Kind: messenger.KindCommand,
+		Name: command.Info().Name, SchemaVersion: 1, Time: time.Now().UTC(),
+		ContentType: testDLQContentType, CorrelationID: id,
+	}
+	data, err := messenger.EncodeCommandEnvelope(command, meta, "payload-after-ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(t.Context(), subject, data, jetstream.WithMsgID(id.String())); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for handled.Load() == 0 {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("message was not handled after readiness on empty stream")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-runDone
+}
+
+func TestNATSBatchFillSubtractsFirstDecodeTimeAndFlushesImmediatelyWhenElapsed(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("test.decode.subtract", 1, messenger.JSON[string]())
+	subject, err := Subject("decode-subtract", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "DECODE_SUBTRACT_STREAM"
+	dlqSubject := "decode-subtract.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("DECODE_SUBTRACT_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	id1, _ := messenger.ParseMessageID("018f4f2c-4a00-7000-8000-0000000000b1")
+	meta1 := messenger.Metadata{
+		ID: id1, Source: testNATSSource, Kind: messenger.KindCommand,
+		Name: command.Info().Name, SchemaVersion: 1, Time: time.Now().UTC(),
+		ContentType: testDLQContentType, CorrelationID: id1,
+	}
+	data1, err := messenger.EncodeCommandEnvelope(command, meta1, "payload1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(t.Context(), subject, data1, jetstream.WithMsgID(id1.String())); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "decode-subtract-consumer"
+	_, err = js.CreateOrUpdateConsumer(t.Context(), streamName, jetstream.ConsumerConfig{
+		Durable: consumerID, AckPolicy: jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := conn.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := legacy.PullSubscribe(subject, "", natsio.Bind(streamName, consumerID), natsio.ManualAck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	var simulatedNow time.Time
+	var mu sync.Mutex
+	baseTime := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	simulatedNow = baseTime
+
+	decode := func(data []byte, _ natsio.Header, _ time.Time) (decodedMessage, error) {
+		canonical, err := messenger.CanonicalizeEnvelope(data)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+		msg, err := messenger.DecodeCommand(command, canonical)
+		if err != nil {
+			return decodedMessage{}, err
+		}
+		mu.Lock()
+		simulatedNow = simulatedNow.Add(100 * time.Millisecond)
+		mu.Unlock()
+		return decodedMessage{
+			metadata: msg.Metadata, canonical: canonical, value: msg,
+		}, nil
+	}
+
+	consumer := &Consumer{
+		config: HandlerConfig{
+			ConsumerID: consumerID,
+			AckWait:    30 * time.Second,
+		},
+		descriptor: command.Info(),
+		decode:     decode,
+		clock: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return simulatedNow
+		},
+		batch: &batchConsumer{
+			config: messenger.BatchConfig{
+				MaxMessages: 10,
+				MaxBytes:    1024,
+				MaxWait:     100 * time.Millisecond,
+			},
+		},
+	}
+
+	start := time.Now()
+	batch, err := consumer.collectNATSBatch(t.Context(), t.Context(), sub, nil)
+	duration := time.Since(start)
+	if err != nil {
+		t.Fatalf("collectNATSBatch error = %v", err)
+	}
+	if batch == nil || len(batch.deliveries) != 1 {
+		t.Fatalf("expected batch with 1 delivery, got %v", batch)
+	}
+	defer batch.heartbeat.Stop()
+
+	if duration >= 500*time.Millisecond {
+		t.Fatalf("collectNATSBatch took %v, want immediate flush", duration)
 	}
 }
