@@ -276,6 +276,10 @@ func (c *Consumer) runBatch(runContext context.Context) error {
 			}
 			workers.Wait()
 			return runErr
+		case <-admissionCtx.Done():
+			cancelAdmission()
+			workers.Wait()
+			return nil
 		case <-runContext.Done():
 			cancelAdmission()
 			workers.Wait()

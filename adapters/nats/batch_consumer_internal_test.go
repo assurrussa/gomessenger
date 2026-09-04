@@ -2216,3 +2216,77 @@ func TestNATSBatchFillSubtractsFirstDecodeTimeAndFlushesImmediatelyWhenElapsed(t
 		t.Fatalf("collectNATSBatch took %v, want immediate flush", duration)
 	}
 }
+
+func TestNATSBatchStartupExitsOnAdmissionCancellation(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("test.drain.startup", 1, messenger.JSON[string]())
+	subject, err := Subject("drain-startup", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "DRAIN_STARTUP_STREAM"
+	dlqSubject := "drain-startup.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("DRAIN_STARTUP_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "drain-startup-consumer"
+	store, _ := inbox.New(&testNATSBatchBackend{})
+	consumer, err := NewBatchCommandConsumer(
+		conn,
+		store,
+		command,
+		func(_ context.Context, _ []messenger.Message[string]) (messenger.BatchResult, error) {
+			return messenger.BatchResult{}, nil
+		},
+		HandlerConfig{
+			Stream: streamName, Namespace: "drain-startup", ConsumerID: consumerID,
+			WireMode: WireNative, Concurrency: 2, Timeout: time.Second,
+			FinalizationTimeout: time.Second, MaxAttempts: 3, BaseRetry: 10 * time.Millisecond,
+			MaxRetry: time.Second, AckWait: time.Second, DLQSubject: dlqSubject,
+		},
+		messenger.BatchConfig{MaxMessages: 10, MaxBytes: 1024, MaxWait: 50 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var workersStarted atomic.Int32
+	consumer.collectBatchHook = func(_, admissionCtx context.Context, _ *natsio.Subscription, _ func()) (*natsBatch, error) {
+		workersStarted.Add(1)
+		<-admissionCtx.Done()
+		return nil, admissionCtx.Err()
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- consumer.Run(t.Context())
+	}()
+
+	for workersStarted.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	consumer.BeginDrain()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run error on admission cancel = %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("consumer Run did not terminate on admission cancellation during startup")
+	}
+
+	if err := consumer.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("Readiness = %v, want ErrRuntimeNotRunning", err)
+	}
+}
