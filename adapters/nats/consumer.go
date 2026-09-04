@@ -99,6 +99,8 @@ type Consumer struct {
 	beforePullLoopReady func()
 	// beforeShutdownTransition synchronizes the locked transition in package tests.
 	beforeShutdownTransition func()
+	// collectBatchHook intercepts batch collection in package tests.
+	collectBatchHook func(runContext, admissionCtx context.Context, subscription *natsio.Subscription) (*natsBatch, error)
 }
 
 // NewCommandConsumer constructs a native-envelope durable command consumer.

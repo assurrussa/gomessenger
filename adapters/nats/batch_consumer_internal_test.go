@@ -1583,3 +1583,251 @@ func TestNATSBatchDLQConstructionFailureFailsClosed(t *testing.T) {
 		t.Fatalf("delivery was unexpectedly acknowledged: %d ack calls", brokerMsg.ackCalls.Load())
 	}
 }
+
+func TestNATSBatchWorkerFatalFirstFetchDoesNotSignalReady(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("batch.worker.fatal.test", 1, messenger.JSON[string]())
+	subject, err := Subject("worker-fatal", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "WORKER_FATAL_STREAM"
+	dlqSubject := "worker-fatal.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("WORKER_FATAL_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "worker-fatal-consumer"
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = js.CreateOrUpdateConsumer(t.Context(), streamName, jetstream.ConsumerConfig{
+		Durable: consumerID, AckPolicy: jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := conn.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := legacy.PullSubscribe(subject, "", natsio.Bind(streamName, consumerID), natsio.ManualAck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unsubscribe to ensure the first fetch encounters a fatal ErrBadSubscription / ErrSubscriptionClosed.
+	_ = sub.Unsubscribe()
+
+	consumer := &Consumer{
+		config: HandlerConfig{
+			Stream:     streamName,
+			ConsumerID: consumerID,
+		},
+		clock: time.Now,
+		batch: &batchConsumer{
+			config: messenger.BatchConfig{MaxMessages: 10, MaxBytes: 1024, MaxWait: 50 * time.Millisecond},
+		},
+	}
+
+	var readyCalled atomic.Bool
+	fatal := make(chan error, 1)
+
+	consumer.runNATSBatchWorker(t.Context(), t.Context(), sub, func() {
+		readyCalled.Store(true)
+	}, fatal)
+
+	if readyCalled.Load() {
+		t.Fatal("worker signaled ready on fatal first fetch")
+	}
+	select {
+	case err := <-fatal:
+		if err == nil {
+			t.Fatal("expected non-nil fatal error")
+		}
+	default:
+		t.Fatal("expected fatal error to be reported")
+	}
+}
+
+func TestNATSBatchReadinessFailsClosedOnWorkerFatalFirstFetch(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("batch.coord.fatal.test", 1, messenger.JSON[string]())
+	subject, err := Subject("coord-fatal", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "COORD_FATAL_STREAM"
+	dlqSubject := "coord-fatal.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("COORD_FATAL_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "coord-fatal-consumer"
+	fatalErr := errors.New("fatal simulated first fetch error")
+	var workerCount atomic.Int32
+	worker2Blocked := make(chan struct{})
+	defer close(worker2Blocked)
+
+	store, _ := inbox.New(&testNATSBatchBackend{})
+	consumer, err := NewBatchCommandConsumer(
+		conn,
+		store,
+		command,
+		func(_ context.Context, _ []messenger.Message[string]) (messenger.BatchResult, error) {
+			return messenger.BatchResult{}, nil
+		},
+		HandlerConfig{
+			Stream: streamName, Namespace: "coord-fatal", ConsumerID: consumerID,
+			WireMode: WireNative, Concurrency: 2, Timeout: time.Second,
+			FinalizationTimeout: time.Second, MaxAttempts: 3, BaseRetry: 10 * time.Millisecond,
+			MaxRetry: time.Second, AckWait: time.Second, DLQSubject: dlqSubject,
+		},
+		messenger.BatchConfig{MaxMessages: 10, MaxBytes: 1024, MaxWait: 50 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	consumer.beforePullLoopReady = func() {
+		t.Fatal("consumer marked pull loop ready despite fatal worker first fetch")
+	}
+
+	consumer.collectBatchHook = func(runCtx, admissionCtx context.Context, _ *natsio.Subscription) (*natsBatch, error) {
+		idx := workerCount.Add(1)
+		if idx == 1 {
+			return nil, fatalErr
+		}
+		select {
+		case <-admissionCtx.Done():
+			return nil, admissionCtx.Err()
+		case <-worker2Blocked:
+			return nil, runCtx.Err()
+		}
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- consumer.Run(t.Context())
+	}()
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, fatalErr) {
+			t.Fatalf("Run error = %v, want %v", err, fatalErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer Run did not terminate on fatal worker startup error")
+	}
+
+	if err := consumer.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		t.Fatalf("Readiness after startup failure = %v, want ErrRuntimeNotRunning", err)
+	}
+}
+
+func TestNATSBatchReadinessSucceedsOnlyAfterAllWorkersEstablishPullBoundary(t *testing.T) {
+	conn, cleanup := startInternalNATSServer(t)
+	defer cleanup()
+
+	command := messenger.MustCommand("batch.coord.success.test", 1, messenger.JSON[string]())
+	subject, err := Subject("coord-success", command.Info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamName := "COORD_SUCCESS_STREAM"
+	dlqSubject := "coord-success.dlq"
+	if _, err := ApplyTopology(t.Context(), conn, Topology{
+		SpecVersion: TopologySpecVersion,
+		Streams: []StreamSpec{
+			DevStream(streamName, subject),
+			DevDLQStream("COORD_SUCCESS_DLQ", dlqSubject),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerID := "coord-success-consumer"
+	var worker1Pulled, worker2Pulled atomic.Bool
+	worker2Proceed := make(chan struct{})
+
+	store, _ := inbox.New(&testNATSBatchBackend{})
+	consumer, err := NewBatchCommandConsumer(
+		conn,
+		store,
+		command,
+		func(_ context.Context, _ []messenger.Message[string]) (messenger.BatchResult, error) {
+			return messenger.BatchResult{}, nil
+		},
+		HandlerConfig{
+			Stream: streamName, Namespace: "coord-success", ConsumerID: consumerID,
+			WireMode: WireNative, Concurrency: 2, Timeout: time.Second,
+			FinalizationTimeout: time.Second, MaxAttempts: 3, BaseRetry: 10 * time.Millisecond,
+			MaxRetry: time.Second, AckWait: time.Second, DLQSubject: dlqSubject,
+		},
+		messenger.BatchConfig{MaxMessages: 10, MaxBytes: 1024, MaxWait: 50 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var workerCount atomic.Int32
+	consumer.collectBatchHook = func(_, _ context.Context, _ *natsio.Subscription) (*natsBatch, error) {
+		idx := workerCount.Add(1)
+		if idx == 1 {
+			worker1Pulled.Store(true)
+			return nil, nil //nolint:nilnil // Empty pulls are a normal admission boundary.
+		}
+		<-worker2Proceed
+		worker2Pulled.Store(true)
+		return nil, nil //nolint:nilnil // Empty pulls are a normal admission boundary.
+	}
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- consumer.Run(runCtx)
+	}()
+
+	for !worker1Pulled.Load() {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if err := consumer.Readiness(t.Context()); !errors.Is(err, messenger.ErrRuntimeNotRunning) {
+		close(worker2Proceed)
+		cancel()
+		t.Fatalf("Readiness before worker 2 started = %v, want ErrRuntimeNotRunning", err)
+	}
+
+	close(worker2Proceed)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for consumer.Readiness(t.Context()) != nil {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("consumer did not become ready after all workers established pull boundary")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-runDone
+}

@@ -1,5 +1,9 @@
 # Implementation notes
 
+## 2026-09-04 — PR #24 review round 8 fixes (NATS batch consumer pull loop readiness behind established pull boundary and deterministic fatal first fetch coverage)
+
+- [P1 - Signal readiness only after each pull loop starts]: In `adapters/nats/batch_consumer.go:runNATSBatchWorker`, moved `readyOnce.Do(ready)` behind the established pull boundary after `collectNATSBatch`. With multiple workers and a buffered startup channel, workers previously invoked `ready` before entering `collectNATSBatch`, allowing the coordinator to consume all signals and set `pullLoopReady = true` while a worker was still preempted before its first pull or while that first pull was about to report a fatal error. Moving the signal behind the pull boundary guarantees that any fatal error on the first pull sends to `fatal` without signaling readiness, causing the coordinator to abort startup and preventing `pullLoopReady` from becoming true. Added `collectBatchHook` on `Consumer` for deterministic package test simulation. Added unit tests `TestNATSBatchWorkerFatalFirstFetchDoesNotSignalReady`, `TestNATSBatchReadinessFailsClosedOnWorkerFatalFirstFetch`, and `TestNATSBatchReadinessSucceedsOnlyAfterAllWorkersEstablishPullBoundary`.
+
 ## 2026-09-04 — PR #24 review round 7 fixes (Runtime bounded shutdown, wire DLQ conservative sanitization, NATS OperationHandle decoupling, batch latency timing, and deterministic watchdog tests)
 
 - [P1 - Runtime shutdownServices bounded by deadline]: In `runtime.go`, replaced `sync.WaitGroup` in `shutdownServices` with a buffered result channel `results := make(chan shutdownServiceResult, len(r.services))` and a select loop against `ctx.Done()`. This guarantees `Runtime.Run` and pre-run `Runtime.Shutdown(ctx)` return boundedly within the timeout even if a registered service's `Shutdown` method blocks or ignores context cancellation. Eliminated data race by updating `shutdownErrors` only on the receiving goroutine.

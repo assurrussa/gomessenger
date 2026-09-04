@@ -322,19 +322,24 @@ func (c *Consumer) runNATSBatchWorker(
 	var topLevelStreak uint64
 	var readyOnce sync.Once
 	for admissionCtx.Err() == nil {
-		readyOnce.Do(ready)
-		batch, err := c.collectNATSBatch(runContext, admissionCtx, subscription)
-		if err != nil {
-			if normalNATSBatchBoundary(admissionCtx, err) {
-				continue
-			}
-			select {
-			case fatal <- err:
-			default:
-			}
-			return
+		collect := c.collectNATSBatch
+		if c.collectBatchHook != nil {
+			collect = c.collectBatchHook
 		}
-		if batch == nil {
+		batch, err := collect(runContext, admissionCtx, subscription)
+		if err != nil {
+			if !normalNATSBatchBoundary(admissionCtx, err) {
+				select {
+				case fatal <- err:
+				default:
+				}
+				return
+			}
+		}
+		if admissionCtx.Err() == nil {
+			readyOnce.Do(ready)
+		}
+		if err != nil || batch == nil {
 			continue
 		}
 		if err := c.processNATSBatch(runContext, batch, &topLevelStreak); err != nil {
