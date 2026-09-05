@@ -396,10 +396,7 @@ func isExpectedSQLiteConflict(err error) bool {
 	var sqliteErr *sqlite.Error
 	if errors.As(err, &sqliteErr) {
 		code := sqliteErr.Code() & 0xff
-		if code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED {
-			return true
-		}
+		return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "busy") || strings.Contains(msg, "table is locked")
+	return false
 }
