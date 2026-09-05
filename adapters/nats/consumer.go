@@ -5,7 +5,6 @@ import (
 	"context"
 	crand "crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -89,6 +88,7 @@ type Consumer struct {
 	runStarted      bool
 	pullLoopReady   bool
 	runDone         <-chan struct{}
+	fatalErr        error
 	forceCancel     context.CancelFunc
 	admissionCancel context.CancelFunc
 	iterator        jetstream.MessagesContext
@@ -363,7 +363,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		close(jobs)
 		workers.Wait()
 		c.markClosed()
-		return nil
+		return c.dlqPreparationFailure()
 	}
 	var runErr error
 pullLoop:
@@ -394,7 +394,7 @@ pullLoop:
 	close(jobs)
 	workers.Wait()
 	c.markClosed()
-	return runErr
+	return errors.Join(runErr, c.dlqPreparationFailure())
 }
 
 func recoverablePullError(err error) bool {
@@ -694,7 +694,7 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return
 	}
-	exhausted := c.attemptsExhausted(attempt)
+	exhausted := c.attemptsExhausted(attempt) || errors.Is(processErr, inbox.ErrAttemptsExhausted)
 	identityConflict := errors.Is(processErr, inbox.ErrFingerprintConflict)
 	if identityConflict || messenger.IsPermanent(processErr) || exhausted {
 		failureKind := "permanent"
@@ -708,7 +708,7 @@ func (c *Consumer) processMessage(runContext context.Context, message jetstream.
 			deliveryContext, message, decoded, recordAttempt, failureKind, processErr,
 		)
 		if acknowledged && !identityConflict {
-			c.forgetAttempt(deliveryContext, key, fingerprint, decoded.metadata.ID)
+			c.confirmTerminalHandoff(deliveryContext, key, fingerprint, decoded.metadata.ID)
 		}
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return
@@ -743,16 +743,19 @@ func handlerTransactionTimeout(handlerTimeout, finalizationTimeout time.Duration
 	return handlerTimeout + finalizationTimeout
 }
 
-func (c *Consumer) forgetAttempt(
+func (c *Consumer) confirmTerminalHandoff(
 	ctx context.Context,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 	messageID messenger.MessageID,
 ) {
-	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	if !c.store.SupportsTerminalRetention() {
+		return
+	}
+	confirmationContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := c.store.ForgetAttempt(cleanupContext, key, fingerprint); err != nil {
-		logInfrastructure(ctx, c.config.Logger, messenger.LogWarn, "forget terminal handler attempt",
+	if err := c.store.ConfirmTerminalHandoff(confirmationContext, key, fingerprint); err != nil {
+		logInfrastructure(ctx, c.config.Logger, messenger.LogWarn, "confirm terminal handler handoff",
 			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 			messenger.LogAttr{Key: logAttrMessageID, Value: messageID.String()},
 			messenger.LogAttr{Key: logAttrError, Value: err},
@@ -895,6 +898,7 @@ const (
 // DLQRecord is the stable dead-letter record persisted before the original
 // JetStream message receives a broker-confirmed acknowledgement.
 type DLQRecord struct {
+	Quarantine      *QuarantineInfo     `json:"quarantine,omitempty"`
 	SpecVersion     string              `json:"specVersion"`
 	ConsumerID      string              `json:"consumerId"`
 	Subject         string              `json:"subject"`
@@ -939,6 +943,9 @@ func DecodeDLQRecord(data []byte) (DLQRecord, error) {
 		}
 		record.Envelope = canonical
 	}
+	if record.Quarantine != nil {
+		return record, nil
+	}
 	clonedHeaders, err := copyReplayHeaders(record.OriginalHeaders)
 	if err != nil {
 		return DLQRecord{}, err
@@ -956,72 +963,22 @@ func (c *Consumer) deadLetterAndAcknowledge(
 	failure error,
 ) bool {
 	handoffStarted := c.clock().UTC()
-	headers, err := copyReplayHeaders(message.Headers())
+	prepared, err := prepareDLQ(DLQRecord{
+		SpecVersion: DLQSpecVersion, ConsumerID: c.config.ConsumerID, Subject: message.Subject(),
+		Attempt: attempt, FailureKind: failureKind,
+		Error:    boundedFailureText(c.config.FailureSanitizer, failure, 1024),
+		FailedAt: c.clock().UTC(), WireMode: c.config.WireMode, Envelope: decoded.canonical,
+	}, message.Headers(), message.Data())
 	if err != nil {
-		logInfrastructure(ctx, c.config.Logger, messenger.LogError, "capture DLQ message headers",
-			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
-			messenger.LogAttr{Key: logAttrError, Value: err},
-		)
+		c.observeBoundary(ctx, operationDLQHandoff, decoded.metadata.ID, handoffStarted, err)
+		c.failDLQPreparation(err)
 		return false
 	}
-	failureText := boundedFailureText(c.config.FailureSanitizer, failure, 1024)
-	if failureText == "" {
-		failureText = "unspecified failure"
-	}
-	record := DLQRecord{
-		SpecVersion: "1.0", ConsumerID: c.config.ConsumerID, Subject: message.Subject(),
-		Attempt: attempt, FailureKind: failureKind, Error: failureText,
-		FailedAt: c.clock().UTC(), WireMode: c.config.WireMode,
-		OriginalHeaders: headers,
-		OriginalBase64:  base64.StdEncoding.EncodeToString(message.Data()),
-	}
-	if len(decoded.canonical) > 0 && json.Valid(decoded.canonical) {
-		record.Envelope = append(json.RawMessage(nil), decoded.canonical...)
-	}
-	if err := validateDLQRecord(record); err != nil {
-		logInfrastructure(ctx, c.config.Logger, messenger.LogError, "validate DLQ record",
-			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
-			messenger.LogAttr{Key: logAttrError, Value: err},
-		)
-		return false
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		logInfrastructure(ctx, c.config.Logger, messenger.LogError, "encode DLQ record",
-			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
-			messenger.LogAttr{Key: logAttrError, Value: err},
-		)
-		return false
-	}
-	if len(data) > DefaultMaxDLQRecordBytes && len(record.Envelope) > 0 {
-		record.Envelope = nil
-		data, err = json.Marshal(record)
-		if err != nil {
-			logInfrastructure(ctx, c.config.Logger, messenger.LogError, "encode bounded DLQ record",
-				messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
-				messenger.LogAttr{Key: logAttrError, Value: err},
-			)
-			return false
-		}
-	}
-	if len(data) > DefaultMaxDLQRecordBytes {
-		sizeErr := fmt.Errorf(
-			"%w: DLQ record size %d exceeds %d", messenger.ErrInvalidMessage, len(data), DefaultMaxDLQRecordBytes,
-		)
-		logInfrastructure(ctx, c.config.Logger, messenger.LogError, "validate encoded DLQ record",
-			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
-			messenger.LogAttr{Key: logAttrError, Value: sizeErr},
-		)
-		return false
-	}
-	dedupID := dlqDedupID(
-		c.config.ConsumerID, message.Subject(), c.config.WireMode, headers, message.Data(),
-	)
 	dlqMessage := &natsio.Msg{
 		Subject: c.config.DLQSubject,
-		Header:  natsio.Header{"Content-Type": []string{"application/vnd.gomessenger.dlq+json; version=1.0"}},
-		Data:    data,
+		Header:  natsio.Header{"Content-Type": {prepared.contentType}}, Data: prepared.data,
 	}
+	dedupID := prepared.dedupID
 	for handoffAttempt := uint64(1); ; handoffAttempt++ {
 		ack, publishErr := c.js.PublishMsg(ctx, dlqMessage, jetstream.WithMsgID(dedupID))
 		if publishErr == nil && ack != nil && ack.Stream != "" {
@@ -1119,3 +1076,25 @@ func callHandler[T any](ctx context.Context, handler messenger.Handler[T], messa
 }
 
 var _ messenger.Service = (*Consumer)(nil)
+
+func (c *Consumer) failDLQPreparation(err error) {
+	c.mu.Lock()
+	if c.fatalErr == nil {
+		c.fatalErr = fmt.Errorf("messenger/nats: prepare terminal record: %w", err)
+	}
+	c.pullLoopReady = false
+	cancel, iterator := c.forceCancel, c.iterator
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if iterator != nil {
+		iterator.Stop()
+	}
+}
+
+func (c *Consumer) dlqPreparationFailure() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fatalErr
+}

@@ -29,6 +29,7 @@ type batchGroup struct {
 }
 
 type batchAttemptState struct {
+	kind     string
 	attempt  uint64
 	terminal bool
 }
@@ -79,10 +80,7 @@ func (b *backend) ProcessBatchAttempt(
 		return inbox.BatchProcessResult{}, err
 	}
 	if len(active) == 0 {
-		if err := tx.Commit(); err != nil {
-			return inbox.BatchProcessResult{}, fmt.Errorf("inbox/pgsql: commit filtered batch: %w", err)
-		}
-		return report, nil
+		return b.commitTerminalBatch(ctx, tx, report)
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].first < active[j].first })
 	handlerItems := make([]inbox.BatchItem, len(active))
@@ -159,6 +157,15 @@ func (b *backend) ProcessBatchAttempt(
 		return inbox.BatchProcessResult{}, err
 	}
 	if err := b.markBatchTerminal(ctx, tx, permanent); err != nil {
+		return inbox.BatchProcessResult{}, err
+	}
+	return b.commitTerminalBatch(ctx, tx, report)
+}
+
+func (b *backend) commitTerminalBatch(ctx context.Context, tx *sql.Tx,
+	report inbox.BatchProcessResult,
+) (inbox.BatchProcessResult, error) {
+	if err := b.terminalSQL().Record(ctx, tx, report.Items, b.clock().UTC()); err != nil {
 		return inbox.BatchProcessResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -274,11 +281,11 @@ func (b *backend) prepareBatchIdentities(
 			})
 			continue
 		}
-		if group.state.terminal || group.state.attempt >= maxAttempts {
+		if group.state.closed(maxAttempts) {
 			failureKind := inbox.FailureAttemptsExhausted
 			var itemErr error
 			itemErr = inbox.ErrAttemptsExhausted
-			if group.state.terminal {
+			if group.state.terminal || group.state.kind == inbox.FailurePermanent {
 				failureKind, itemErr = inbox.FailurePermanent, messenger.Permanent(inbox.ErrAttemptTerminal)
 			}
 			assignBatchOutcome(outcomes, group, inbox.BatchItemOutcome{
@@ -309,8 +316,10 @@ func (b *backend) readBatchAttempts(
 		var err error
 		if !generated {
 			rows, err = tx.QueryContext(ctx, b.names.render(`SELECT attempt.source, attempt.message_id,
-                attempt.attempts, attempt.terminal
+                attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
                 FROM {{attempts}} AS attempt
+ LEFT JOIN {{terminal}} AS closed ON closed.consumer_id=attempt.consumer_id
+ AND closed.source=attempt.source AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
                 JOIN unnest($2::text[], $3::text[]) AS requested(source, message_id)
                   ON requested.source = attempt.source AND requested.message_id = attempt.message_id
                 WHERE attempt.consumer_id = $1
@@ -318,8 +327,10 @@ func (b *backend) readBatchAttempts(
 				consumerID, sources, messageIDs)
 		} else {
 			rows, err = tx.QueryContext(ctx, b.names.render(`SELECT attempt.source, attempt.message_id,
-                attempt.attempts, attempt.terminal
+                attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
                 FROM {{attempt_generations}} AS attempt
+ LEFT JOIN {{terminal}} AS closed ON closed.consumer_id=attempt.consumer_id
+ AND closed.source=attempt.source AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
                 JOIN unnest($2::text[], $3::text[], $4::bytea[])
                   AS requested(source, message_id, fingerprint)
                   ON requested.source = attempt.source AND requested.message_id = attempt.message_id
@@ -335,7 +346,8 @@ func (b *backend) readBatchAttempts(
 			var source, messageID string
 			var attempts int64
 			var terminal bool
-			if err := rows.Scan(&source, &messageID, &attempts, &terminal); err != nil {
+			var kind string
+			if err := rows.Scan(&source, &messageID, &attempts, &terminal, &kind); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("inbox/pgsql: scan batch attempt: %w", err)
 			}
@@ -348,7 +360,7 @@ func (b *backend) readBatchAttempts(
 				_ = rows.Close()
 				return nil, err
 			}
-			result[key] = batchAttemptState{attempt: uint64(attempts), terminal: terminal}
+			result[key] = batchAttemptState{attempt: uint64(attempts), terminal: terminal, kind: kind}
 		}
 		if err := rows.Close(); err != nil {
 			return nil, fmt.Errorf("inbox/pgsql: close batch attempt rows: %w", err)
@@ -544,4 +556,8 @@ func assignBatchOutcome(outcomes []inbox.BatchItemOutcome, group *batchGroup, ou
 		}
 		outcomes[entry.index] = assigned
 	}
+}
+
+func (s batchAttemptState) closed(maxAttempts uint64) bool {
+	return s.terminal || s.attempt >= maxAttempts || s.kind != ""
 }

@@ -290,10 +290,10 @@ func TestConsumerPersistsPermanentOutcomeAcrossInterruptedDLQHandoff(t *testing.
 	}
 }
 
-func TestDLQReplayStartsFreshCycleWhenPostAckCleanupFails(t *testing.T) {
+func TestDLQReplayStartsFreshCycleWhenHandoffConfirmationFails(t *testing.T) {
 	connection := startJetStream(t)
 	ensureTestStream(t, connection)
-	backend := &failForgetAttemptBackend{delegate: openInbox(t)}
+	backend := &failConfirmHandoffBackend{delegate: openInbox(t)}
 	backend.failures.Store(1)
 	store, err := inbox.New(backend)
 	if err != nil {
@@ -339,7 +339,7 @@ func TestDLQReplayStartsFreshCycleWhenPostAckCleanupFails(t *testing.T) {
 		t.Fatalf("decode original DLQ: %v", err)
 	}
 	waitForConsumerEmpty(t, connection, config.ConsumerID)
-	waitFor(t, func() bool { return backend.forgetCalls.Load() == 1 })
+	waitFor(t, func() bool { return backend.confirmCalls.Load() == 1 })
 
 	js, err := jetstream.New(connection)
 	if err != nil {
@@ -640,10 +640,10 @@ type failFirstAttemptBackend struct {
 	failures atomic.Int32
 }
 
-type failForgetAttemptBackend struct {
-	delegate    *inbox.Store
-	failures    atomic.Int32
-	forgetCalls atomic.Int32
+type failConfirmHandoffBackend struct {
+	delegate     *inbox.Store
+	failures     atomic.Int32
+	confirmCalls atomic.Int32
 }
 
 func (b *failFirstAttemptBackend) Process(
@@ -673,6 +673,7 @@ func (b *failFirstAttemptBackend) ForgetAttempt(
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) error {
+	//nolint:staticcheck // Preserve the optional backend wrapper compatibility surface.
 	return b.delegate.ForgetAttempt(ctx, key, fingerprint)
 }
 
@@ -680,7 +681,7 @@ func (b *failFirstAttemptBackend) Prune(ctx context.Context, before time.Time, l
 	return b.delegate.Prune(ctx, before, limit)
 }
 
-func (b *failForgetAttemptBackend) Process(
+func (b *failConfirmHandoffBackend) Process(
 	ctx context.Context,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
@@ -689,7 +690,7 @@ func (b *failForgetAttemptBackend) Process(
 	return b.delegate.Process(ctx, key, fingerprint, handler)
 }
 
-func (b *failForgetAttemptBackend) ProcessAttempt(
+func (b *failConfirmHandoffBackend) ProcessAttempt(
 	ctx context.Context,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
@@ -699,19 +700,19 @@ func (b *failForgetAttemptBackend) ProcessAttempt(
 	return b.delegate.ProcessAttempt(ctx, key, fingerprint, maxAttempts, handler)
 }
 
-func (b *failForgetAttemptBackend) ForgetAttempt(
+func (b *failConfirmHandoffBackend) ConfirmTerminalHandoff(
 	ctx context.Context,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) error {
-	b.forgetCalls.Add(1)
+	b.confirmCalls.Add(1)
 	if b.failures.CompareAndSwap(1, 0) {
-		return errors.New("temporary attempt cleanup failure")
+		return errors.New("temporary handoff confirmation failure")
 	}
-	return b.delegate.ForgetAttempt(ctx, key, fingerprint)
+	return b.delegate.ConfirmTerminalHandoff(ctx, key, fingerprint)
 }
 
-func (b *failForgetAttemptBackend) Prune(ctx context.Context, before time.Time, limit int) (int64, error) {
+func (b *failConfirmHandoffBackend) Prune(ctx context.Context, before time.Time, limit int) (int64, error) {
 	return b.delegate.Prune(ctx, before, limit)
 }
 
@@ -765,4 +766,13 @@ func openConcurrentInbox(t *testing.T) *inbox.Store {
 		t.Fatalf("new concurrent inbox: %v", err)
 	}
 	return store
+}
+
+func (b *failConfirmHandoffBackend) ForgetAttempt(ctx context.Context, key inbox.Key, fingerprint inbox.Fingerprint) error {
+	//nolint:staticcheck // Preserve the optional backend wrapper compatibility surface.
+	return b.delegate.ForgetAttempt(ctx, key, fingerprint)
+}
+
+func (b *failConfirmHandoffBackend) PruneTerminalAttempts(ctx context.Context, before time.Time, limit int) (int64, error) {
+	return b.delegate.PruneTerminalAttempts(ctx, before, limit)
 }

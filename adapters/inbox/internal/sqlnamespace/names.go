@@ -15,10 +15,12 @@ const (
 
 // Names contains the unquoted identifiers derived from one table prefix.
 type Names struct {
-	Inbox              string
-	Attempts           string
-	AttemptGenerations string
-	CompletedAtIndex   string
+	Terminal             string
+	TerminalHandoffIndex string
+	Inbox                string
+	Attempts             string
+	AttemptGenerations   string
+	CompletedAtIndex     string
 }
 
 // Resolve validates prefix and derives every Inbox relation identifier.
@@ -27,10 +29,12 @@ func Resolve(prefix string) (Names, error) {
 		return Names{}, err
 	}
 	return Names{
-		Inbox:              prefix + "inbox",
-		Attempts:           prefix + "inbox_attempts",
-		AttemptGenerations: prefix + "inbox_attempt_generations",
-		CompletedAtIndex:   prefix + "inbox_completed_at_idx",
+		Terminal:             prefix + "inbox_terminal",
+		TerminalHandoffIndex: prefix + "inbox_terminal_gc_idx",
+		Inbox:                prefix + "inbox",
+		Attempts:             prefix + "inbox_attempts",
+		AttemptGenerations:   prefix + "inbox_attempt_generations",
+		CompletedAtIndex:     prefix + "inbox_completed_at_idx",
 	}, nil
 }
 

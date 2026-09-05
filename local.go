@@ -17,6 +17,16 @@ type localCall struct{ delivery Delivery }
 type localCallExecutor struct{}
 
 func (localCallExecutor) Execute(ctx context.Context, call localCall) error {
+	metadata := call.delivery.Metadata()
+	if !metadata.ExpiresAt.IsZero() && !metadata.ExpiresAt.After(time.Now()) {
+		err := Permanent(ErrMessageExpired)
+		if reporter, ok := call.delivery.(interface {
+			reportExpiry(ctx context.Context, err error)
+		}); ok {
+			reporter.reportExpiry(ctx, err)
+		}
+		return err
+	}
 	return call.delivery.Invoke(ctx)
 }
 

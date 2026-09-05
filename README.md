@@ -674,11 +674,18 @@ gomessengerctl kafka dlq replay --file kafka-record.json --confirm --brokers loc
 `dlq inspect` prints a safe summary and replayability status without handler error text, wire bytes, or header values.
 `dlq replay` is offline by default and prints a payload-free deterministic JSON plan. `--confirm` republishes the
 original subject, wire bytes, and bounded headers with a deterministic, DLQ-record-specific `Nats-Msg-Id`, then waits
-for JetStream `PubAck`. The target consumer starts one fresh bounded attempt generation even if post-ACK Inbox cleanup
-was interrupted; broker redeliveries of that replay retain the same generation and do not reset `MaxAttempts`. Replay
+for JetStream `PubAck`. The target consumer starts one fresh bounded attempt generation while the original terminal
+generation remains protected; redeliveries of that replay retain the same generation and do not reset `MaxAttempts`. Replay
 does not support subject substitution, record deletion, or payload/header output. Its internal replay headers are
 reserved transport metadata and must not be injected by ordinary publishers; enforce that boundary with NATS publish
 permissions when producers can access subjects directly.
+
+NATS DLQ inspection accepts normal v1 records and quarantine v2 records from the same subject. Quarantine reports its
+reason, original sizes, digest, and whether complete source content was omitted. It is explicitly non-replayable.
+PostgreSQL/SQLite terminal generations remain protected after handoff; hosts may opt into bounded retention with
+`Store.PruneTerminalAttempts` after choosing a safe cutoff. There is no automatic cleanup or default TTL.
+Upgrade the CLI first, apply additive migrations, drain old consumers, then start new consumers. See
+[delivery guarantees and rollout](docs/decisions/0006-delivery-guarantees.md).
 
 ## Development and verification
 

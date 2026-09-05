@@ -1399,28 +1399,28 @@ func TestKafkaBatchHandlerContextInheritsTransactionContextDeadlineAndCancellati
 	})
 }
 
-type trackingForgetBackend struct {
+type trackingConfirmBackend struct {
 	kafkaBatchTestBackend
-	forgetCalls atomic.Int32
-	mu          sync.Mutex
-	forgetKeys  []inbox.Key
-	onForget    func()
+	confirmCalls atomic.Int32
+	mu           sync.Mutex
+	confirmKeys  []inbox.Key
+	onConfirm    func()
 }
 
-func (b *trackingForgetBackend) ForgetAttempt(_ context.Context, key inbox.Key, _ inbox.Fingerprint) error {
-	b.forgetCalls.Add(1)
+func (b *trackingConfirmBackend) ConfirmTerminalHandoff(_ context.Context, key inbox.Key, _ inbox.Fingerprint) error {
+	b.confirmCalls.Add(1)
 	b.mu.Lock()
-	b.forgetKeys = append(b.forgetKeys, key)
+	b.confirmKeys = append(b.confirmKeys, key)
 	b.mu.Unlock()
-	if b.onForget != nil {
-		b.onForget()
+	if b.onConfirm != nil {
+		b.onConfirm()
 	}
 	return nil
 }
 
-func TestKafkaBatchAllowRebalanceCalledBeforeForgetAttempt(t *testing.T) {
-	t.Run("AllowRebalance called before ForgetAttempt and cleanup deduplicated", func(t *testing.T) {
-		backend := &trackingForgetBackend{}
+func TestKafkaBatchAllowRebalanceCalledBeforeConfirmTerminalHandoff(t *testing.T) {
+	t.Run("AllowRebalance called before ConfirmTerminalHandoff and cleanup deduplicated", func(t *testing.T) {
+		backend := &trackingConfirmBackend{}
 		consumer := newKafkaBatchTestConsumer(t, backend)
 		first := kafkaBatchTestRecord(t, consumer, 0, 10, "01991387-6880-7000-8000-000000000092")
 		second := kafkaBatchTestRecord(t, consumer, 0, 11, "01991387-6880-7000-8000-000000000093")
@@ -1449,10 +1449,10 @@ func TestKafkaBatchAllowRebalanceCalledBeforeForgetAttempt(t *testing.T) {
 		}
 
 		session := &kafkaBatchSessionRecorder{}
-		var allowRebalanceBeforeForget bool
-		backend.onForget = func() {
+		var allowRebalanceBeforeConfirm bool
+		backend.onConfirm = func() {
 			if session.allowRebalanceCalls.Load() > 0 {
-				allowRebalanceBeforeForget = true
+				allowRebalanceBeforeConfirm = true
 			}
 		}
 
@@ -1461,11 +1461,11 @@ func TestKafkaBatchAllowRebalanceCalledBeforeForgetAttempt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("processKafkaBatch failed: %v", err)
 		}
-		if !allowRebalanceBeforeForget {
-			t.Fatal("expected AllowRebalance to be called BEFORE ForgetAttempt")
+		if !allowRebalanceBeforeConfirm {
+			t.Fatal("expected AllowRebalance to be called BEFORE ConfirmTerminalHandoff")
 		}
-		if backend.forgetCalls.Load() != 2 {
-			t.Fatalf("forgetCalls = %d, want 2", backend.forgetCalls.Load())
+		if backend.confirmCalls.Load() != 2 {
+			t.Fatalf("confirmCalls = %d, want 2", backend.confirmCalls.Load())
 		}
 	})
 }
@@ -2064,4 +2064,8 @@ func TestKafkaBatchFailClosedInvalidResultEmitsOperationHandle(t *testing.T) {
 			t.Fatalf("OperationRetryHandoff count = %d, want 0 on fail-closed", retryHandoffs)
 		}
 	})
+}
+
+func (*trackingConfirmBackend) PruneTerminalAttempts(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
 }

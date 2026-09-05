@@ -1,5 +1,18 @@
 # Implementation notes
 
+## 2026-09-05 — Delivery guarantee fixes
+
+- Base: `cadafb53997a50dd7e84337a49e08a3693282d6d`; keep GoBus v1.1.0 and Outbox v0.13.0. Dependency upgrades remain separate.
+- Implement shared NATS DLQ preparation with bounded, non-replayable quarantine v2 in the existing DLQ; preserve v1 records and replay IDs.
+- Retain terminal Inbox generations in PostgreSQL/SQLite, confirm broker handoff separately, and expose opt-in bounded retention. Remove automatic destructive resets from single/batch NATS/Kafka consumers.
+- Recheck local one-way expiry at execution and report skipped jobs through `OperationExpire`.
+- Required evidence: focused regressions, `make check CHECK_GOWORK=off`, PostgreSQL gate, Kafka gate. No publication or production-readiness claim.
+- Implemented shared NATS quarantine preparation and CLI v1/v2 handling; terminal generations, optional retention and handoff confirmation in PostgreSQL/SQLite and all four consumer paths; local execution expiry and `OperationExpire`.
+- Focused tests passed for quarantine progress and fatal lifecycle, CLI pre-network rejection, queued command/event expiry, and SQLite/PostgreSQL retention under race detection. Re-delivery revokes stale handoff confirmation; regressions cover migration with unknown ACK history and concurrent processing/pruning.
+- Final evidence: `make check CHECK_GOWORK=off` passed (format, build, vet, all linters, unit/race/checkptr, coverage threshold, clean external consumer, durable E2E). Root package coverage: 91.2%.
+- Standalone `make test-postgres` passed against isolated PostgreSQL 18; `make test-kafka` passed single/batch pipelines under race detection against Apache Kafka 4.1.2 and 4.3.1. Temporary broker/database containers were cleaned up.
+- Updated contracts, Kafka/batch ADRs, README and ADR-0006. Rollout: new CLI, additive migrations, drain old consumers, start new consumers; host-controlled retention remains a separate opt-in. No dependency changes, publication, or production-readiness claim.
+
 ## 2026-09-04 — PR #24 review round 13 fixes (Restore GOWORK=off as default check graph)
 
 - [P1 - Restore GOWORK=off as the default check graph]: In `Makefile`, changed `CHECK_GOWORK ?= $(abspath go.work)` to `CHECK_GOWORK ?= off`. Unqualified targets (`build`, `vet`, `lint`, `test`, `test-race`, `test-checkptr`, `cover`, `test-consumer`, `test-e2e`, and `make check`) and hosted GitHub Actions CI jobs now resolve through the published-graph boundary (`GOWORK=off`) by default, preventing workspace replacements from masking broken requirements or unavailable published APIs. `make check-workspace` remains available to explicitly opt into verifying the local `go.work` workspace graph.

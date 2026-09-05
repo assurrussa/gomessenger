@@ -489,6 +489,7 @@ func queryResultAs[R any](result localQueryResult) (R, error) {
 
 func (b commandBinding) delivery(metadata Metadata, payload any) Delivery {
 	return &delivery{
+		onExpire: expiryObserver(b.observer, metadata, b.route.Name()),
 		metadata: metadata,
 		encode: func() ([]byte, DataEncoding, error) {
 			return b.descriptor.encode(payload)
@@ -547,6 +548,7 @@ func makeEventBinding(
 
 func (b eventBinding) delivery(metadata Metadata, payload any) Delivery {
 	return &delivery{
+		onExpire: expiryObserver(b.observer, metadata, b.route.Name()),
 		metadata: metadata,
 		encode: func() ([]byte, DataEncoding, error) {
 			return b.descriptor.encode(payload)

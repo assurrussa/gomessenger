@@ -51,12 +51,16 @@ func newStatements(names namespace) statements {
 		incrementAttemptGeneration: names.render(`UPDATE {{attempt_generations}}
         SET attempts = attempts + 1, updated_at = ?
         WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`),
-		readAttempt: names.render(`SELECT attempts, terminal
-        FROM {{attempts}}
-        WHERE consumer_id = ? AND source = ? AND message_id = ?`),
-		readAttemptGeneration: names.render(`SELECT attempts, terminal
-        FROM {{attempt_generations}}
-        WHERE consumer_id = ? AND source = ? AND message_id = ? AND fingerprint = ?`),
+		readAttempt: names.render(`SELECT attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
+ FROM {{attempts}} AS attempt LEFT JOIN {{terminal}} AS closed
+ ON closed.consumer_id=attempt.consumer_id AND closed.source=attempt.source
+ AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
+ WHERE attempt.consumer_id = ? AND attempt.source = ? AND attempt.message_id = ?`),
+		readAttemptGeneration: names.render(`SELECT attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
+ FROM {{attempt_generations}} AS attempt LEFT JOIN {{terminal}} AS closed
+ ON closed.consumer_id=attempt.consumer_id AND closed.source=attempt.source
+ AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
+ WHERE attempt.consumer_id = ? AND attempt.source = ? AND attempt.message_id = ? AND attempt.fingerprint = ?`),
 		deleteAttempt: names.render(`DELETE FROM {{attempts}}
         WHERE consumer_id = ? AND source = ? AND message_id = ?`),
 		deleteAttemptGeneration: names.render(`DELETE FROM {{attempt_generations}}

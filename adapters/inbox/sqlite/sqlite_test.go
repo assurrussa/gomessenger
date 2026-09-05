@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	"github.com/assurrussa/gomessenger/adapters/inbox/internal/retentiontest"
 	inboxsqlite "github.com/assurrussa/gomessenger/adapters/inbox/sqlite"
 )
 
@@ -192,6 +193,7 @@ func TestStore_ProcessAttemptPersistsPermanentOutcomeAcrossStoreInstances(t *tes
 		t.Fatalf("restored permanent attempt = %#v, calls=%d, error=%v", result, calls.Load(), err)
 	}
 
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := restarted.ForgetAttempt(t.Context(), key, fingerprint); err != nil {
 		t.Fatalf("forget terminal attempt: %v", err)
 	}
@@ -254,6 +256,7 @@ func TestStore_AttemptGenerationStartsFreshBoundedCycle(t *testing.T) {
 	assertExhausted(replayOne)
 	assertExhausted(replayTwo)
 
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), replayOne, fingerprint); err != nil {
 		t.Fatalf("forget first replay generation: %v", err)
 	}
@@ -357,6 +360,7 @@ func TestStore_ForgetAttemptAllowsTerminalReplay(t *testing.T) {
 	if !errors.Is(err, wantErr) || result.Attempt != 1 {
 		t.Fatalf("terminal attempt = %#v, %v", result, err)
 	}
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), key, fingerprint); err != nil {
 		t.Fatalf("forget attempt: %v", err)
 	}
@@ -522,6 +526,7 @@ func TestStore_CustomTablePrefixCoversLifecycle(t *testing.T) {
 	); !errors.Is(processErr, wantRetry) || result.Attempt != 1 {
 		t.Fatalf("custom failed generation = %#v, %v", result, processErr)
 	}
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), forgottenKey, forgottenFingerprint); err != nil {
 		t.Fatalf("forget custom generation: %v", err)
 	}
@@ -602,7 +607,8 @@ func assertSQLiteNamespace(t *testing.T, db *sql.DB) {
 		"site_inbox":                     objectTypeTable,
 		"site_inbox_attempts":            objectTypeTable,
 		"site_inbox_attempt_generations": objectTypeTable,
-		"site_inbox_completed_at_idx":    "index",
+		"site_inbox_terminal":            "table", "site_inbox_terminal_gc_idx": "index",
+		"site_inbox_completed_at_idx": "index",
 	}
 	rows, err := db.QueryContext(t.Context(), `SELECT name, type FROM sqlite_master
 		WHERE name LIKE 'site_%' OR name LIKE 'gomessenger_%'`)
@@ -743,4 +749,22 @@ func mustMessageID(t *testing.T, value string) messenger.MessageID {
 		t.Fatalf("parse message id: %v", err)
 	}
 	return id
+}
+
+func TestStore_TerminalRetention(t *testing.T) {
+	db := openDatabase(t)
+	retentiontest.Run(t, db, func(t *testing.T, prefix string) *inbox.Store {
+		t.Helper()
+		options := []inboxsqlite.Option{inboxsqlite.WithTablePrefix(prefix)}
+		for range 2 {
+			if err := inboxsqlite.Migrate(t.Context(), db, options...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		store, err := inboxsqlite.New(db, options...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	})
 }

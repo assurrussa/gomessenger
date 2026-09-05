@@ -117,6 +117,9 @@ func ReplayDLQ(
 }
 
 func replayInput(record DLQRecord) (replayMessage, error) {
+	if record.SpecVersion == QuarantineSpecVersion || record.Quarantine != nil {
+		return replayMessage{}, ErrQuarantineReplay
+	}
 	if err := validateDLQRecord(record); err != nil {
 		return replayMessage{}, err
 	}
@@ -179,13 +182,19 @@ func replayMessageFromRecord(
 }
 
 func validateDLQRecord(record DLQRecord) error {
-	if record.SpecVersion != DLQSpecVersion || record.ConsumerID == "" ||
+	if (record.SpecVersion != DLQSpecVersion && record.SpecVersion != QuarantineSpecVersion) || record.ConsumerID == "" ||
 		record.Subject == "" || record.Attempt == 0 || record.FailureKind == "" ||
 		record.Error == "" || record.FailedAt.IsZero() || !record.WireMode.valid() {
 		return fmt.Errorf("%w: incomplete DLQ record", messenger.ErrInvalidMessage)
 	}
 	if _, err := base64.StdEncoding.DecodeString(record.OriginalBase64); err != nil {
 		return fmt.Errorf("%w: invalid originalBase64", messenger.ErrInvalidMessage)
+	}
+	if record.SpecVersion == QuarantineSpecVersion {
+		return validateQuarantine(record)
+	}
+	if record.Quarantine != nil {
+		return fmt.Errorf("%w: quarantine in v1 record", messenger.ErrInvalidMessage)
 	}
 	_, err := copyReplayHeaders(record.OriginalHeaders)
 	return err

@@ -94,6 +94,12 @@ The receipt state says what the selected route has durably accepted:
 A successful receipt does not mean that every remote consumer has completed. That completion is observable at the
 consumer boundary, not at publish time.
 
+Local one-way routes validate `ExpiresAt` at admission and again immediately before invoking a delivery. If a queued
+command or event expires, the executor returns `Permanent(ErrMessageExpired)` without running middleware or handlers.
+The configured `Observer` receives `OperationExpire` with message identity, descriptor, and route; no `OperationHandle`
+is emitted for that skipped delivery. `ReceiptAccepted` still confirms admission only. Caller cancellation does not
+cancel accepted one-way work. Expiry limits the start of execution and does not interrupt an already started delivery.
+
 ## At-least-once and idempotency
 
 GoMessenger provides at-least-once delivery. The outbox closes the producer database-versus-broker gap. The inbox closes
@@ -123,9 +129,29 @@ does not migrate existing identity or attempt history.
 Attempt generations do not change the logical inbox key or bypass a completed identity. A confirmed DLQ replay carries
 a consumer-scoped generation derived from that DLQ hand-off. The first delivery in a new generation atomically starts a
 fresh bounded counter; redeliveries in the same generation continue that counter, and interleaved generations retain
-independent counters. Cleanup removes only the selected generation and keeps an incomplete logical identity while any
-other attempt generation remains. This keeps explicit replay independent from best-effort post-ACK cleanup without
-allowing broker redelivery to reset `MaxAttempts`.
+independent counters. PostgreSQL and SQLite atomically close permanent and exhausted generations with their attempt
+updates. Their additive terminal table is keyed by logical identity and `AttemptFingerprint` and stores the closing
+reason, count, time, and last confirmed handoff. Closed generations survive restarts and increases to `MaxAttempts`;
+completed logical identities continue to suppress every generation.
+
+`TerminalRetentionBackend` is optional; it adds no required methods to existing backend interfaces.
+`Store.SupportsTerminalRetention` detects it. NATS single/batch consumers call `ConfirmTerminalHandoff` only after DLQ
+`PubAck` and source ACK confirmation; Kafka single/batch consumers call it only after the transaction commits DLQ and
+source offsets. A newly observed terminal delivery clears earlier retention eligibility in its Inbox transaction.
+Confirmation failures leave terminal protection intact and the generation ineligible until confirmation succeeds.
+
+No automatic pruning or default TTL is installed. Hosts may call `PruneTerminalAttempts(ctx, before, limit)` with a
+non-zero UTC cutoff and `limit` in `1..10000`; it returns the number of removed generations. Only incomplete identities'
+terminal generations with a confirmed handoff strictly older than `before` are eligible. Selection is bounded; identity
+locks, eligibility rechecks, and deletion share one transaction. Active sibling generations and required logical
+identities remain. The host must choose a cutoff that accounts for broker retention and delayed or in-flight deliveries.
+After explicit deletion, that generation's protection ends. Existing `Prune` still removes completed identities and
+now deletes their associated terminal state in the same transaction.
+
+`ForgetAttempt` remains a deprecated, explicit destructive reset and is never automatic consumer cleanup. The migration
+backfills existing permanent outcomes without inferring historical ACKs. Old exhausted counters are closed when next
+observed at their configured limit; the old schema did not preserve that limit. Previously deleted history cannot be
+reconstructed. See [ADR-0006](decisions/0006-delivery-guarantees.md) for rollout order and compatibility boundaries.
 
 ## Producer and relay batch contract
 
@@ -242,16 +268,15 @@ The Inbox transaction deadline is `Timeout + FinalizationTimeout`; finalization 
 for slow commit or rollback without extending the application handler deadline.
 
 For JetStream, `MaxAttempts` bounds handler invocations, while the broker consumer keeps delivery unlimited until the
-terminal hand-off is complete. The inbox persists invocation counts and permanent outcomes across consumer restarts.
+terminal hand-off is complete. The Inbox persists invocation counts and terminal outcomes across consumer restarts.
 `NotBefore` deferrals and infrastructure failures before application code do not consume handler attempts.
 A permanent or exhausted message is acknowledged only after its DLQ record is publish-acknowledged. Failed DLQ
 publication and source-acknowledgement confirmation are retried under progress acknowledgements on the current delivery.
-If shutdown interrupts the hand-off, the source remains unacknowledged; a later delivery skips a previously permanent
-handler immediately and also skips any handler already at `MaxAttempts`. After confirmed source acknowledgement, the
-consumer attempts to remove the incomplete state as cleanup. A later explicit DLQ replay starts a fresh bounded attempt
-generation even if that cleanup was interrupted or failed.
+If shutdown interrupts the hand-off, source acknowledgement may be absent or unconfirmed; a later delivery skips its
+closed generation's handler. After confirmed source acknowledgement the consumer records handoff confirmation without
+removing terminal protection. A later explicit DLQ replay starts a fresh bounded attempt generation independently.
 
-DLQ records include the original subject, wire mode, wire bytes, and a bounded copy of original headers. Publisher
+Normal DLQ records retain format v1, including the original subject, wire mode, wire bytes, and bounded original headers. Publisher
 deduplication includes the consumer ID and that complete source wire identity, so equal bodies with distinct subjects
 or CloudEvents headers remain distinct records. Readers accept records written before optional `originalHeaders`
 existed. Offline replay planning exposes only subject, wire mode, message ID, digest, and deterministic replay ID.
@@ -260,8 +285,22 @@ specific consumer DLQ hand-off, so a later DLQ record for the same wire message 
 replay publishes the original wire message to the original subject, waits for `PubAck`, and never deletes the DLQ record
 or exposes payload and arbitrary headers. Consumer-targeted replay headers are reserved transport metadata; direct
 publishers must not inject them, and NATS permissions remain the host-owned trust boundary.
-CLI inspection likewise exposes only bounded operational metadata, sizes, and replayability—not handler error text,
-wire bytes, or header values.
+If those headers cannot satisfy replay validation, or the full v1 record exceeds the existing DLQ capacity, single and
+batch consumers publish quarantine format v2 to the same DLQ subject. `quarantine.reason` is `headers_unreplayable` or
+`record_too_large`; `replayable` is always false. Its `inputSha256` covers length-prefixed source subject, wire mode,
+exact header keys in byte-sorted order, ordered values, and payload. This digest is independent of replay validation;
+v1 source digests and replay IDs remain unchanged. Size fields count original payload bytes, distinct header keys, and
+header key/value bytes without protocol framing.
+
+Quarantine retains all original headers and payload only when lossless JSON representation fits the DLQ record limit.
+Otherwise both are omitted and `originalOmitted=true`; partial content is never presented as the original. Even an
+omitted capture retains its original digest and sizes. An internal failure to prepare the minimal record stops the
+consumer with an error and removes readiness, in both modes. Transient DLQ/ACK failures keep their heartbeat and
+shutdown cancellation behavior. Quarantine can never be replayed by `PlanDLQReplay`, `ReplayDLQ`, or the CLI; planning
+and confirmed execution reject it before broker access.
+
+CLI inspection reads v1/v2 and exposes bounded operational metadata, quarantine reason, sizes, digest, and replayability.
+It does not expose handler error text, wire bytes, or header values.
 
 Encoded DLQ JSON is bounded by `DefaultMaxDLQRecordBytes`; `DefaultMaxDLQMessageBytes` adds transport-header capacity.
 Before accepting work, `Consumer.Run` verifies both the connected NATS server/account `max_payload` and the stream bound

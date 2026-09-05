@@ -2,8 +2,6 @@ package nats
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -874,7 +872,7 @@ func (c *Consumer) finalizeNATSDLQDeliveries(
 ) (obsErr, fatalErr error) {
 	var dlqObsErr error
 	var dlqFatalErr error
-	var terminalCleanup []int
+	var terminalConfirmations []int
 	for index, outcome := range outcomes {
 		if outcome.item.Outcome != inbox.BatchDLQ {
 			continue
@@ -899,42 +897,42 @@ func (c *Consumer) finalizeNATSDLQDeliveries(
 		batch.heartbeat.Remove(delivery.brokerMessage())
 		if outcome.failureKind == inbox.FailurePermanent ||
 			outcome.failureKind == inbox.FailureAttemptsExhausted {
-			terminalCleanup = append(terminalCleanup, index)
+			terminalConfirmations = append(terminalConfirmations, index)
 		}
 	}
-	c.cleanupNATSTerminalAttempts(ctx, batch, outcomes, terminalCleanup)
+	c.confirmNATSTerminalHandoffs(ctx, batch, outcomes, terminalConfirmations)
 	return dlqObsErr, dlqFatalErr
 }
 
-func (c *Consumer) cleanupNATSTerminalAttempts(
+func (c *Consumer) confirmNATSTerminalHandoffs(
 	ctx context.Context,
 	batch *natsBatch,
 	outcomes []natsBatchFinalOutcome,
-	terminalCleanup []int,
+	terminalConfirmations []int,
 ) {
-	if len(terminalCleanup) == 0 {
+	if len(terminalConfirmations) == 0 || !c.store.SupportsTerminalRetention() {
 		return
 	}
-	type cleanupKey struct {
+	type confirmationKey struct {
 		key         inbox.Key
 		fingerprint inbox.Fingerprint
 	}
-	seen := make(map[cleanupKey]messenger.MessageID, len(terminalCleanup))
-	for _, index := range terminalCleanup {
+	seen := make(map[confirmationKey]messenger.MessageID, len(terminalConfirmations))
+	for _, index := range terminalConfirmations {
 		outcome := outcomes[index]
-		ck := cleanupKey{key: outcome.item.Key, fingerprint: outcome.item.Fingerprint}
+		ck := confirmationKey{key: outcome.item.Key, fingerprint: outcome.item.Fingerprint}
 		if _, exists := seen[ck]; !exists {
 			seen[ck] = batch.deliveries[index].decoded.metadata.ID
 		}
 	}
-	cleanupCtx, cancelCleanup := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelCleanup()
+	confirmationCtx, cancelConfirmation := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelConfirmation()
 	for ck, msgID := range seen {
-		if cleanupCtx.Err() != nil {
+		if confirmationCtx.Err() != nil {
 			break
 		}
-		if err := c.store.ForgetAttempt(cleanupCtx, ck.key, ck.fingerprint); err != nil {
-			logInfrastructure(cleanupCtx, c.config.Logger, messenger.LogWarn, "forget terminal handler attempt",
+		if err := c.store.ConfirmTerminalHandoff(confirmationCtx, ck.key, ck.fingerprint); err != nil {
+			logInfrastructure(confirmationCtx, c.config.Logger, messenger.LogWarn, "confirm terminal handler handoff",
 				messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 				messenger.LogAttr{Key: logAttrMessageID, Value: msgID.String()},
 				messenger.LogAttr{Key: logAttrError, Value: err})
@@ -1033,52 +1031,23 @@ func (c *Consumer) deadLetterAndAcknowledgeNATSBatch(
 	delivery *natsBatchDelivery,
 	outcome natsBatchFinalOutcome,
 ) natsDLQHandoffResult {
-	headers, err := copyReplayHeaders(delivery.broker.Header)
-	if err != nil {
-		return natsDLQHandoffResult{stage: "headers", err: err}
-	}
-	attempt := max(outcome.item.Attempt, natsBatchBrokerAttempt(delivery))
-	record := DLQRecord{
+	prepared, err := prepareDLQ(DLQRecord{
 		SpecVersion: DLQSpecVersion, ConsumerID: c.config.ConsumerID, Subject: delivery.broker.Subject,
-		Attempt: max(uint64(1), attempt), FailureKind: outcome.failureKind,
+		Attempt: max(outcome.item.Attempt, natsBatchBrokerAttempt(delivery)), FailureKind: outcome.failureKind,
 		Error: boundedFailureText(defaultFailureSanitizer{}, outcome.err, 1024), FailedAt: c.clock().UTC(),
-		WireMode: c.config.WireMode, OriginalHeaders: headers,
-		OriginalBase64: base64.StdEncoding.EncodeToString(delivery.broker.Data),
-	}
-	if record.FailureKind == "" {
-		record.FailureKind = "unknown"
-	}
-	if record.Error == "" {
-		record.Error = "unspecified failure"
-	}
-	if len(delivery.decoded.canonical) != 0 && json.Valid(delivery.decoded.canonical) {
-		record.Envelope = append(json.RawMessage(nil), delivery.decoded.canonical...)
-	}
-	if err := validateDLQRecord(record); err != nil {
-		return natsDLQHandoffResult{stage: "validate", err: err}
-	}
-	data, err := json.Marshal(record)
-	if err != nil || len(data) > DefaultMaxDLQRecordBytes {
-		record.Envelope = nil
-		data, err = json.Marshal(record)
-	}
+		WireMode: c.config.WireMode, Envelope: delivery.decoded.canonical,
+	}, delivery.broker.Header, delivery.broker.Data)
 	if err != nil {
-		return natsDLQHandoffResult{stage: "encode", err: err}
+		return natsDLQHandoffResult{stage: "prepare", err: err}
 	}
-	if len(data) > DefaultMaxDLQRecordBytes {
-		return natsDLQHandoffResult{stage: "encode", err: fmt.Errorf(
-			"%w: DLQ record size %d exceeds %d", messenger.ErrInvalidMessage, len(data), DefaultMaxDLQRecordBytes,
-		)}
-	}
-	dedupID := dlqDedupID(c.config.ConsumerID, delivery.broker.Subject, c.config.WireMode,
-		headers, delivery.broker.Data)
+	dedupID := prepared.dedupID
 	for handoffAttempt := uint64(1); ; handoffAttempt++ {
 		message := &natsio.Msg{
 			Subject: c.config.DLQSubject,
 			Header: natsio.Header{"Content-Type": []string{
-				"application/vnd.gomessenger.dlq+json; version=1.0",
+				prepared.contentType,
 			}},
-			Data: data,
+			Data: prepared.data,
 		}
 		ack, publishErr := c.js.PublishMsg(ctx, message, jetstream.WithMsgID(dedupID))
 		if publishErr == nil && ack != nil && ack.Stream != "" {

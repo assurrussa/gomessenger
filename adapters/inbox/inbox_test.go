@@ -107,3 +107,29 @@ func TestValidateKeyRejectsInvalidAttemptGeneration(t *testing.T) {
 		t.Fatalf("invalid generation error = %v", err)
 	}
 }
+
+func TestTerminalRetentionCapabilityAndValidation(t *testing.T) {
+	store, err := inbox.New(fakeBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := inbox.Key{ConsumerID: testInboxConsumerID, Source: testInboxSource, MessageID: mustInboxMessageID(t)}
+	if store.SupportsTerminalRetention() {
+		t.Fatal("legacy backend gained a required capability")
+	}
+	err = store.ConfirmTerminalHandoff(t.Context(), key, inbox.Fingerprint{})
+	if !errors.Is(err, inbox.ErrTerminalRetentionUnsupported) {
+		t.Fatal(err)
+	}
+	if _, err := store.PruneTerminalAttempts(t.Context(), time.Now(), 1); !errors.Is(err, inbox.ErrTerminalRetentionUnsupported) {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{0, -1, 10001} {
+		if _, err := store.PruneTerminalAttempts(t.Context(), time.Now(), limit); err == nil {
+			t.Fatal("invalid prune bound")
+		}
+	}
+	if err := store.ConfirmTerminalHandoff(t.Context(), inbox.Key{}, inbox.Fingerprint{}); !errors.Is(err, inbox.ErrInvalidKey) {
+		t.Fatal(err)
+	}
+}

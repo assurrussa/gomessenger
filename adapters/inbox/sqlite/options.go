@@ -27,10 +27,12 @@ func WithTablePrefix(prefix string) Option {
 }
 
 type namespace struct {
-	inbox              string
-	attempts           string
-	attemptGenerations string
-	completedAtIndex   string
+	terminal             string
+	terminalHandoffIndex string
+	inbox                string
+	attempts             string
+	attemptGenerations   string
+	completedAtIndex     string
 }
 
 func resolveNamespace(configOptions ...Option) (namespace, error) {
@@ -46,10 +48,12 @@ func resolveNamespace(configOptions ...Option) (namespace, error) {
 		return namespace{}, fmt.Errorf("inbox/sqlite: options: %w", err)
 	}
 	return namespace{
-		inbox:              quoteIdentifier(names.Inbox),
-		attempts:           quoteIdentifier(names.Attempts),
-		attemptGenerations: quoteIdentifier(names.AttemptGenerations),
-		completedAtIndex:   quoteIdentifier(names.CompletedAtIndex),
+		terminal:             quoteIdentifier(names.Terminal),
+		terminalHandoffIndex: quoteIdentifier(names.TerminalHandoffIndex),
+		inbox:                quoteIdentifier(names.Inbox),
+		attempts:             quoteIdentifier(names.Attempts),
+		attemptGenerations:   quoteIdentifier(names.AttemptGenerations),
+		completedAtIndex:     quoteIdentifier(names.CompletedAtIndex),
 	}, nil
 }
 
@@ -59,6 +63,7 @@ func quoteIdentifier(identifier string) string {
 
 func (n namespace) render(statement string) string {
 	return strings.NewReplacer(
+		"{{terminal}}", n.terminal, "{{terminal_handoff_index}}", n.terminalHandoffIndex,
 		"{{inbox}}", n.inbox,
 		"{{attempts}}", n.attempts,
 		"{{attempt_generations}}", n.attemptGenerations,

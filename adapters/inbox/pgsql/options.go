@@ -34,10 +34,12 @@ func WithSchema(schema string) Option {
 }
 
 type namespace struct {
-	inbox              string
-	attempts           string
-	attemptGenerations string
-	completedAtIndex   string
+	terminal             string
+	terminalHandoffIndex string
+	inbox                string
+	attempts             string
+	attemptGenerations   string
+	completedAtIndex     string
 }
 
 func resolveNamespace(configOptions ...Option) (namespace, error) {
@@ -56,10 +58,12 @@ func resolveNamespace(configOptions ...Option) (namespace, error) {
 		return namespace{}, fmt.Errorf("inbox/pgsql: options: %w", err)
 	}
 	return namespace{
-		inbox:              qualifyIdentifier(configuration.schema, names.Inbox),
-		attempts:           qualifyIdentifier(configuration.schema, names.Attempts),
-		attemptGenerations: qualifyIdentifier(configuration.schema, names.AttemptGenerations),
-		completedAtIndex:   quoteIdentifier(names.CompletedAtIndex),
+		terminal:             qualifyIdentifier(configuration.schema, names.Terminal),
+		terminalHandoffIndex: quoteIdentifier(names.TerminalHandoffIndex),
+		inbox:                qualifyIdentifier(configuration.schema, names.Inbox),
+		attempts:             qualifyIdentifier(configuration.schema, names.Attempts),
+		attemptGenerations:   qualifyIdentifier(configuration.schema, names.AttemptGenerations),
+		completedAtIndex:     quoteIdentifier(names.CompletedAtIndex),
 	}, nil
 }
 
@@ -77,6 +81,7 @@ func quoteIdentifier(identifier string) string {
 
 func (n namespace) render(statement string) string {
 	return strings.NewReplacer(
+		"{{terminal}}", n.terminal, "{{terminal_handoff_index}}", n.terminalHandoffIndex,
 		"{{inbox}}", n.inbox,
 		"{{attempts}}", n.attempts,
 		"{{attempt_generations}}", n.attemptGenerations,
