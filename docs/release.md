@@ -48,7 +48,7 @@ the required dependency tag wave is published and pinned.
 
 ## Prepare exact module requirements
 
-The GoMessenger outbox adapter depends on the unified outbox v0.12 contract. Outbox root and backend `v0.12.0` tags are
+The GoMessenger outbox adapter depends on the unified outbox v0.15 contract. Outbox root and backend `v0.15.0` tags are
 already published. The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
 able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
 is pinned.
@@ -70,8 +70,8 @@ prepare and review `adapters/nats` and `adapters/kafka`, then publish those tags
 run the final graph preparation:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.13.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
 make check
 ```
 

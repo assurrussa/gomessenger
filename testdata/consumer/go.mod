@@ -9,12 +9,12 @@ require (
 	github.com/assurrussa/gomessenger/adapters/nats v0.2.2
 	github.com/assurrussa/gomessenger/adapters/outbox v0.2.2
 	github.com/assurrussa/gomessenger/observability v0.2.2
-	github.com/assurrussa/outbox v0.13.0
+	github.com/assurrussa/outbox v0.15.0
 	github.com/prometheus/client_golang v1.24.1
 )
 
 require (
-	github.com/assurrussa/gobus v1.1.0 // indirect
+	github.com/assurrussa/gobus v1.2.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect

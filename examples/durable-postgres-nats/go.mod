@@ -7,15 +7,15 @@ require (
 	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
 	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
 	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
-	github.com/assurrussa/outbox v0.13.0
-	github.com/assurrussa/outbox/backends/pgsql v0.13.0
+	github.com/assurrussa/outbox v0.15.0
+	github.com/assurrussa/outbox/backends/pgsql v0.15.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nats-io/nats.go v1.53.1
 )
 
 require (
 	github.com/Masterminds/squirrel v1.5.4 // indirect
-	github.com/assurrussa/gobus v1.1.0 // indirect
+	github.com/assurrussa/gobus v1.2.1 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
 	github.com/georgysavva/scany/v2 v2.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect

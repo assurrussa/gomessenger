@@ -338,6 +338,68 @@ func TestMessengerQueryPreservesZeroPointerAndInterfaceResults(t *testing.T) {
 	}
 }
 
+func TestMessengerQueryReturnsZeroResultOnError(t *testing.T) {
+	expectedErr := errors.New("handler partial error")
+	querySync := messenger.MustQuery[string, string]("query.sync.error", 1, messenger.JSON[string]())
+	queryAsync := messenger.MustQuery[string, string]("query.async.error", 1, messenger.JSON[string]())
+
+	asyncRoute, err := messenger.NewLocalAsyncRoute("local.query.async", messenger.LocalAsyncConfig{
+		Capacity: 2,
+		Workers:  1,
+	})
+	if err != nil {
+		t.Fatalf("new async route: %v", err)
+	}
+
+	builder := messenger.NewBuilder(messenger.WithSource(testSource))
+	builder.HandleQueryFunc(querySync, "sync-handler", func(context.Context, string) (string, error) {
+		return "partial-sync-result", expectedErr
+	})
+	builder.RouteQuery(querySync, messenger.NewLocalSyncRoute())
+
+	builder.HandleQueryFunc(queryAsync, "async-handler", func(context.Context, string) (string, error) {
+		return "partial-async-result", expectedErr
+	})
+	builder.RouteQuery(queryAsync, asyncRoute)
+
+	instance, runtime, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// 1. Synchronous route returns zero value on error even if handler returned partial result.
+	syncVal, syncErr := instance.Query(t.Context(), querySync, "test")
+	if !errors.Is(syncErr, expectedErr) {
+		t.Fatalf("sync error = %v, want %v", syncErr, expectedErr)
+	}
+	if syncVal != "" {
+		t.Fatalf("sync result on error = %q, want empty zero value", syncVal)
+	}
+
+	// 2. Asynchronous route returns zero value on error even if handler returned partial result.
+	runDone := make(chan error, 1)
+	go func() { runDone <- runtime.Run(t.Context()) }()
+	waitRuntimeReady(t, runtime)
+
+	asyncVal, asyncErr := instance.Query(t.Context(), queryAsync, "test")
+	if !errors.Is(asyncErr, expectedErr) {
+		t.Fatalf("async error = %v, want %v", asyncErr, expectedErr)
+	}
+	if asyncVal != "" {
+		t.Fatalf("async result on error = %q, want empty zero value", asyncVal)
+	}
+
+	runtime.BeginDrain()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("runtime run: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not finish drain")
+	}
+}
+
 func TestQueryMiddlewareErrorsPanicsAndSyntheticResults(t *testing.T) {
 	handlerErr := errors.New("lookup failed")
 	query := messenger.MustQuery[int, string]("middleware.query", 1, messenger.JSON[int]())

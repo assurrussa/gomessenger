@@ -13,7 +13,7 @@ require (
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect
-	github.com/assurrussa/gobus v1.1.0 // indirect
+	github.com/assurrussa/gobus v1.2.1 // indirect
 	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
