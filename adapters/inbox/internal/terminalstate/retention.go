@@ -52,12 +52,44 @@ type candidate struct {
 	fingerprint []byte
 }
 
+// PruneHooks supplies optional test callbacks during terminal prune.
+type PruneHooks struct {
+	OnCandidatesQuery    func(ctx context.Context) error
+	OnCandidatesSelected func(ctx context.Context, candidates int) error
+	OnBeforeLockIdentity func(ctx context.Context) error
+}
+
+type pruneHooksKey struct{}
+
+// WithPruneHooks attaches prune test hooks to the context.
+func WithPruneHooks(ctx context.Context, hooks PruneHooks) context.Context {
+	return context.WithValue(ctx, pruneHooksKey{}, hooks)
+}
+
+func pruneHooksFromContext(ctx context.Context) (PruneHooks, bool) {
+	if ctx == nil {
+		return PruneHooks{}, false
+	}
+	hooks, ok := ctx.Value(pruneHooksKey{}).(PruneHooks)
+	return hooks, ok
+}
+
 // Prune selects a bounded batch and serializes its deletions with processing
 // and confirmation. Eligibility is checked again after each identity lock.
 func (s SQL) Prune(ctx context.Context, tx *sql.Tx, before time.Time, limit int) (int64, error) {
+	if hooks, ok := pruneHooksFromContext(ctx); ok && hooks.OnCandidatesQuery != nil {
+		if err := hooks.OnCandidatesQuery(ctx); err != nil {
+			return 0, err
+		}
+	}
 	candidates, err := s.candidates(ctx, tx, before, limit)
 	if err != nil {
 		return 0, err
+	}
+	if hooks, ok := pruneHooksFromContext(ctx); ok && hooks.OnCandidatesSelected != nil {
+		if err := hooks.OnCandidatesSelected(ctx, len(candidates)); err != nil {
+			return 0, err
+		}
 	}
 	var removed int64
 	for _, item := range candidates {
@@ -98,6 +130,11 @@ func (s SQL) candidates(ctx context.Context, tx *sql.Tx, before time.Time, limit
 }
 
 func (s SQL) pruneCandidate(ctx context.Context, tx *sql.Tx, item candidate, before time.Time) (int64, error) {
+	if hooks, ok := pruneHooksFromContext(ctx); ok && hooks.OnBeforeLockIdentity != nil {
+		if err := hooks.OnBeforeLockIdentity(ctx); err != nil {
+			return 0, err
+		}
+	}
 	var fingerprint []byte
 	var completed sql.NullTime
 	err := tx.QueryRowContext(ctx, s.LockIdentity, item.consumer, item.source, item.message).Scan(&fingerprint, &completed)

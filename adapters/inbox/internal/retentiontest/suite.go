@@ -6,14 +6,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	messenger "github.com/assurrussa/gomessenger"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	"github.com/assurrussa/gomessenger/adapters/inbox/internal/terminalstate"
 )
 
 // Factory constructs and migrates a store using the supplied isolated prefix.
@@ -287,26 +291,115 @@ func testConcurrentPrune(t *testing.T, db *sql.DB, factory Factory, complete boo
 		processed <- err
 	}()
 	<-entered
-	pruning := make(chan struct{})
+	candidatesQuery := make(chan struct{}, 1)
+	candidatesSelected := make(chan int, 1)
+	beforeLock := make(chan struct{}, 1)
+	pruneCtx := terminalstate.WithPruneHooks(t.Context(), terminalstate.PruneHooks{
+		OnCandidatesQuery: func(_ context.Context) error {
+			candidatesQuery <- struct{}{}
+			return nil
+		},
+		OnCandidatesSelected: func(_ context.Context, count int) error {
+			candidatesSelected <- count
+			return nil
+		},
+		OnBeforeLockIdentity: func(_ context.Context) error {
+			beforeLock <- struct{}{}
+			return nil
+		},
+	})
+
 	pruned := make(chan error, 1)
 	go func() {
-		close(pruning)
-		_, err := store.PruneTerminalAttempts(t.Context(), time.Now().Add(time.Hour), 1)
+		_, err := store.PruneTerminalAttempts(pruneCtx, time.Now().Add(time.Hour), 1)
 		pruned <- err
 	}()
-	<-pruning
-	once.Do(func() { close(release) })
+
+	var pruneErr error
+	if isSQLite(db) {
+		// SQLite uses table/database serialization where competing queries retry or block
+		// until the active write transaction commits.
+		select {
+		case <-candidatesQuery:
+			// Prune transaction has begun and reached the candidate query while handler is active.
+			once.Do(func() { close(release) })
+			pruneErr = <-pruned
+		case pruneErr = <-pruned:
+			once.Do(func() { close(release) })
+		}
+	} else {
+		// PostgreSQL supports MVCC candidate selection while holding row locks.
+		select {
+		case count := <-candidatesSelected:
+			if count != 1 {
+				t.Fatalf("selected candidates = %d, want 1", count)
+			}
+			select {
+			case <-beforeLock:
+				// Prune selected the in-flight candidate and reached the identity lock barrier.
+				once.Do(func() { close(release) })
+				pruneErr = <-pruned
+			case pruneErr = <-pruned:
+				once.Do(func() { close(release) })
+			}
+		case pruneErr = <-pruned:
+			once.Do(func() { close(release) })
+		}
+	}
+
 	if err := <-processed; (err == nil) != complete {
 		t.Fatalf("processing: %v", err)
 	}
-	// SQLite may reject a competing writer; a failed cleanup must leave all protection intact.
-	if err := <-pruned; err != nil {
-		assertCount(t, db, prefix+"inbox_terminal", 1)
-	}
+	assertPruneResult(t, db, prefix, pruneErr, complete)
 	assertCount(t, db, prefix+"inbox", 1)
 	var calls int
 	result, err := store.ProcessAttempt(t.Context(), active, fingerprint, 3, func(context.Context) error { calls++; return nil })
 	if err != nil || (complete && (!result.Duplicate || calls != 0)) || (!complete && (result.Attempt != 2 || calls != 1)) {
 		t.Fatalf("active after concurrent prune: %+v, calls=%d, %v", result, calls, err)
 	}
+}
+
+func assertPruneResult(t *testing.T, db *sql.DB, prefix string, pruneErr error, complete bool) {
+	t.Helper()
+	if pruneErr != nil {
+		if !isSQLite(db) {
+			t.Fatalf("prune terminal attempts unexpected error: %v", pruneErr)
+		}
+		if !isExpectedSQLiteConflict(pruneErr) {
+			t.Fatalf("prune terminal attempts unexpected SQLite error: %v", pruneErr)
+		}
+		// SQLite may reject a competing writer; a failed cleanup must leave all protection intact.
+		assertCount(t, db, prefix+"inbox_terminal", 1)
+		return
+	}
+	wantTerminal := 0
+	if complete {
+		wantTerminal = 1
+	}
+	assertCount(t, db, prefix+"inbox_terminal", wantTerminal)
+}
+
+func isSQLite(db *sql.DB) bool {
+	if db == nil {
+		return false
+	}
+	if _, ok := db.Driver().(*sqlite.Driver); ok {
+		return true
+	}
+	return strings.Contains(strings.ToLower(fmt.Sprintf("%T", db.Driver())), "sqlite")
+}
+
+func isExpectedSQLiteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		code := sqliteErr.Code() & 0xff
+		if code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "busy") || strings.Contains(msg, "table is locked")
 }
