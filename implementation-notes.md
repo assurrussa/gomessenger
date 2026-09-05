@@ -2,7 +2,7 @@
 
 ## 2026-09-05 — Delivery guarantee fixes
 
-- Base: `cadafb53997a50dd7e84337a49e08a3693282d6d`; keep GoBus v1.1.0 and Outbox v0.13.0. Dependency upgrades remain separate.
+- Base: `f32a3b7a9d2b99db79e5aa4c14ad3af1b12f27cc`; keep GoBus v1.2.1 and Outbox v0.15.0. Dependency upgrades remain separate.
 - Implement shared NATS DLQ preparation with bounded, non-replayable quarantine v2 in the existing DLQ; preserve v1 records and replay IDs.
 - Retain terminal Inbox generations in PostgreSQL/SQLite, confirm broker handoff separately, and expose opt-in bounded retention. Remove automatic destructive resets from single/batch NATS/Kafka consumers.
 - Recheck local one-way expiry at execution and report skipped jobs through `OperationExpire`.
