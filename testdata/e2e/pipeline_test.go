@@ -68,11 +68,11 @@ func TestTransactionalPipelineCommitsAndAcknowledges(t *testing.T) {
 	consumerRunner := startConsumer(t, consumer, false)
 	outboxRunner := harness.startOutbox(t)
 
-	harness.waitConsumerEmpty(t, "happy-worker")
 	harness.waitOutboxEmpty(t)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("handler calls = %d, want 1", got)
-	}
+	eventually(t, func() (bool, error) {
+		return calls.Load() == 1, nil
+	})
+	harness.waitConsumerEmpty(t, "happy-worker")
 	if count := harness.businessCount(t); count != 1 {
 		t.Fatalf("business counter = %d, want 1", count)
 	}
@@ -133,11 +133,11 @@ func TestTransactionalBatchPipelineCommitsOneSharedTransaction(t *testing.T) {
 	consumerRunner := startConsumer(t, consumer, false)
 	outboxRunner := harness.startOutbox(t)
 
-	harness.waitConsumerEmpty(t, "batch-worker")
 	harness.waitOutboxEmpty(t)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("batch handler calls = %d, want 1", got)
-	}
+	eventually(t, func() (bool, error) {
+		return calls.Load() == 1, nil
+	})
+	harness.waitConsumerEmpty(t, "batch-worker")
 	if count := harness.businessCount(t); count != 3 {
 		t.Fatalf("business counter = %d, want 3", count)
 	}
@@ -208,12 +208,11 @@ func TestTransactionalPipelineSurvivesLostAck(t *testing.T) {
 		nil,
 	)
 	secondRunner := startConsumer(t, second, false)
-	harness.waitConsumerEmpty(t, "lost-ack-worker")
 	harness.waitOutboxEmpty(t)
-
-	if calls := handlerCalls.Load(); calls != 1 {
-		t.Fatalf("handler calls = %d, want 1", calls)
-	}
+	eventually(t, func() (bool, error) {
+		return handlerCalls.Load() == 1, nil
+	})
+	harness.waitConsumerEmpty(t, "lost-ack-worker")
 	if count := harness.businessCount(t); count != 1 {
 		t.Fatalf("business counter = %d, want 1", count)
 	}
@@ -261,11 +260,11 @@ func TestTransactionalPipelineRetriesThenCommitsOnce(t *testing.T) {
 	if delay := secondAttempt.Sub(firstAttempt); delay < 120*time.Millisecond {
 		t.Fatalf("retry delay = %s, want at least 120ms", delay)
 	}
-	harness.waitConsumerEmpty(t, "retry-worker")
 	harness.waitOutboxEmpty(t)
-	if got := attempts.Load(); got != 2 {
-		t.Fatalf("attempts = %d, want 2", got)
-	}
+	eventually(t, func() (bool, error) {
+		return attempts.Load() == 2, nil
+	})
+	harness.waitConsumerEmpty(t, "retry-worker")
 	if count := harness.businessCount(t); count != 1 {
 		t.Fatalf("business counter = %d, want 1", count)
 	}
@@ -327,11 +326,11 @@ func TestTransactionalPipelinePublishesPermanentFailureToDLQ(t *testing.T) {
 	if envelope.ID != receipt.MessageID {
 		t.Fatalf("DLQ message ID = %s, want %s", envelope.ID, receipt.MessageID)
 	}
-	harness.waitConsumerEmpty(t, "dlq-worker")
 	harness.waitOutboxEmpty(t)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("handler calls = %d, want 1", got)
-	}
+	eventually(t, func() (bool, error) {
+		return calls.Load() == 1, nil
+	})
+	harness.waitConsumerEmpty(t, "dlq-worker")
 	if count := harness.businessCount(t); count != 0 {
 		t.Fatalf("business counter after permanent rollback = %d, want 0", count)
 	}
@@ -500,11 +499,11 @@ func TestTransactionalPipelineDrainRedeliversUncommittedWork(t *testing.T) {
 		},
 	)
 	secondRunner := startConsumer(t, second, false)
-	harness.waitConsumerEmpty(t, "drain-worker")
 	harness.waitOutboxEmpty(t)
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("handler calls = %d, want 2", got)
-	}
+	eventually(t, func() (bool, error) {
+		return calls.Load() == 2, nil
+	})
+	harness.waitConsumerEmpty(t, "drain-worker")
 	if count := harness.businessCount(t); count != 1 {
 		t.Fatalf("business counter = %d, want 1", count)
 	}
