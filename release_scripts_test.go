@@ -15,7 +15,8 @@ func TestReleaseConsumerProbeRequiresExactTagAndInstallsCLI(t *testing.T) {
 	fakeBin := t.TempDir()
 	goLog := filepath.Join(t.TempDir(), "go.log")
 	fakeGo := filepath.Join(fakeBin, "go")
-	if err := os.WriteFile(fakeGo, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_LOG\"\n"), 0o600); err != nil {
+	fakeSource := "#!/bin/sh\nprintf '%s|GOWORK=%s\\n' \"$*\" \"${GOWORK-}\" >> \"$GO_LOG\"\n"
+	if err := os.WriteFile(fakeGo, []byte(fakeSource), 0o600); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
 	if err := os.Chmod(fakeGo, 0o700); err != nil {
@@ -25,7 +26,8 @@ func TestReleaseConsumerProbeRequiresExactTagAndInstallsCLI(t *testing.T) {
 		t.Helper()
 		//nolint:gosec // Fixed test cases intentionally exercise the local shell script's argument validation.
 		command := exec.CommandContext(t.Context(), "sh", filepath.Join("scripts", "test-release-consumer.sh"), version)
-		command.Env = append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"), "GO_LOG="+goLog)
+		command.Env = append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"GO_LOG="+goLog, "GOWORK="+filepath.Join(fakeBin, "unexpected.go.work"))
 		return command.Run()
 	}
 
@@ -43,6 +45,11 @@ func TestReleaseConsumerProbeRequiresExactTagAndInstallsCLI(t *testing.T) {
 	if !strings.Contains(string(commands),
 		"get github.com/assurrussa/gomessenger/adapters/kafka@v1.2.3") {
 		t.Fatalf("Kafka adapter module was not resolved:\n%s", commands)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(commands)), "\n") {
+		if !strings.HasSuffix(line, "|GOWORK=off") {
+			t.Fatalf("published probe inherited the caller workspace: %s", line)
+		}
 	}
 
 	for _, version := range []string{"v1.2.3-rc1", "v1foo.2bar.3baz", "v1.2.3.4"} {

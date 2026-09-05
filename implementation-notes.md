@@ -1,5 +1,37 @@
 # Implementation notes
 
+## 2026-09-05 — Inbox retention review fixes
+
+- Preserve zero-attempt generation rows for single and batch item defer in PostgreSQL and SQLite. Existing schemas
+  allow zero; no migration or attempt-budget change is needed. Top-level batch rollback remains unchanged.
+- Select completed PostgreSQL prune candidates by age, then lock by logical identity in batch order; retain the
+  repeatable-read candidate set for all deletions. Correct the AGENTS.md description of hosted Kafka checks.
+- Added shared deferred-sibling regression coverage and a PostgreSQL lock-wait barrier test with opposite identity/age
+  order and bounded cleanup assertions. Both regressions fail on the original implementation and pass with the fixes.
+- Passed `make test-postgres` against isolated PostgreSQL 18 under race detection and full `make check` with
+  `GOWORK=off`: zero lint findings, tests/race/checkptr, 91.2% root coverage, clean consumer and durable E2E.
+  Live Kafka was not rerun for this Inbox-only change. No tags or releases were created.
+
+## 2026-09-05 — v0.3.0 release preparation
+
+- Base: merge `9f37952`; prepare the batch and delivery-guarantee release with GoBus v1.2.1 and Outbox v0.15.0.
+- Codex completed the requested PR #25 review for head `f9246d8` and reported one pilot dependency-pin finding.
+  Updated ADR-0002 to keep Outbox root/PostgreSQL at v0.15.0 and require a consistently published GoMessenger release.
+  The GitHub conversation remains open until this correction is published.
+- Scope: complete changelog and upgrade notes, prepare dependency layers without pinning unavailable tags, and document
+  a reproducible release capacity check. Tag publication and the published-consumer probe remain separate evidence.
+- Implemented `RELEASE_LAYER=root|modules|transports|final`. Prerequisite resolution precedes mutations; the final layer
+  removes consumer/example local replacements and aligns their exact versions. The published probe forces `GOWORK=off`.
+- Updated the changelog, candidate upgrade notes and fixed-rate capacity procedure (1500 msg/s, 200 ms p95, 3 runs for
+  each of small/mixed payloads). The heavy capacity series has not run; current Docker exposes 12 CPUs and about 4 GiB.
+- Verified prerequisite/no-mutation, layer isolation, final graph and caller-workspace regressions. Root preparation
+  and root readiness passed with published Outbox v0.15.0. Full `make check` passed with zero lint findings, all module
+  tests/race/checkptr, 91.2% root package coverage, consumer and durable E2E. The earlier single goconst finding in the
+  new test was fixed before this completed gate.
+- Remaining publication boundary: reviewed root v0.3.0 tag, modules and transport dependency waves, final CLI/fixture
+  graph, then the replacement-free published consumer. Current nested development requirements are intentionally
+  retained until their exact prerequisite tags resolve. No tags or release have been published by this preparation.
+
 ## 2026-09-05 — Delivery guarantee fixes
 
 - Base: `f32a3b7a9d2b99db79e5aa4c14ad3af1b12f27cc`; keep GoBus v1.2.1 and Outbox v0.15.0. Dependency upgrades remain separate.

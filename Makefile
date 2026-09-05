@@ -1,6 +1,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 CHECK_GOWORK ?= off
+RELEASE_LAYER ?= final
 MODULES := . adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 LINT_MODULES := adapters/inbox adapters/kafka adapters/nats adapters/outbox observability tools/gomessengerctl examples/durable-postgres-nats
 E2E_MODULE := testdata/e2e
@@ -96,7 +97,7 @@ test-kafka:
 
 test-postgres:
 	@test -n "$(GOMESSENGER_POSTGRES_DSN)" || (echo "GOMESSENGER_POSTGRES_DSN is required" >&2; exit 2)
-	@cd adapters/inbox && GOWORK=off $(GO) test -race -count=1 -run '^TestPostgresInboxIntegration$$' ./pgsql
+	@cd adapters/inbox && GOWORK=off $(GO) test -race -count=1 -run '^TestPostgresInbox' ./pgsql
 
 check: fmt-check build vet lint test test-race test-checkptr cover test-consumer test-e2e
 
@@ -109,13 +110,13 @@ check-published:
 release-ready:
 	@test -n "$(VERSION)" || (echo "VERSION=vX.Y.Z is required" >&2; exit 2)
 	@test -n "$(OUTBOX_VERSION)" || (echo "OUTBOX_VERSION=vX.Y.Z is required" >&2; exit 2)
-	@sh ./scripts/prepare-release-modules.sh "$(VERSION)" "$(OUTBOX_VERSION)"
+	@sh ./scripts/prepare-release-modules.sh "$(VERSION)" "$(OUTBOX_VERSION)" "$(RELEASE_LAYER)"
 	@files="$$(find . -name '*.go' -not -path './tmp/*')"; test -z "$$files" || gofmt -w $$files
 
 release-readiness:
 	@test -n "$(VERSION)" || (echo "VERSION=vX.Y.Z is required" >&2; exit 2)
 	@test -n "$(OUTBOX_VERSION)" || (echo "OUTBOX_VERSION=vX.Y.Z is required" >&2; exit 2)
-	@sh ./scripts/check-release-modules.sh "$(VERSION)" "$(OUTBOX_VERSION)"
+	@sh ./scripts/check-release-modules.sh "$(VERSION)" "$(OUTBOX_VERSION)" "$(RELEASE_LAYER)"
 
 bench-all:
 	@GOWORK=off $(GO) test -run '^$$' -bench . -benchmem ./...

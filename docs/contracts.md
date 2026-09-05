@@ -116,7 +116,10 @@ PostgreSQL suppression relies on one transaction containing the identity insert,
 marker. The unique key serializes concurrent new identities. Bounded handling keeps its durable attempt update outside a
 handler savepoint in that transaction, so failed business writes roll back while the invocation count commits; an
 already persisted incomplete identity is row-locked before the next attempt. A `DeferAfter` outcome is the exception:
-its business writes roll back and its attempt remains unchanged.
+its business writes roll back and its attempt remains unchanged. A first deferred generation persists a zero-attempt
+row so terminal pruning cannot remove the logical identity it still needs. Batch item defer uses the same marker;
+top-level batch failures continue to roll back the entire transaction. The existing attempt schemas already allow zero.
+Queued deferrals from older code acquire this marker on redelivery; let them redeliver before enabling terminal pruning.
 
 That SQL transaction remains open for the full handler invocation. The host sizes and monitors the shared
 `database/sql` pool; it is the intended connection backpressure boundary and the Inbox adapter adds no second semaphore.
@@ -146,7 +149,9 @@ terminal generations with a confirmed handoff strictly older than `before` are e
 locks, eligibility rechecks, and deletion share one transaction. Active sibling generations and required logical
 identities remain. The host must choose a cutoff that accounts for broker retention and delayed or in-flight deliveries.
 After explicit deletion, that generation's protection ends. Existing `Prune` still removes completed identities and
-now deletes their associated terminal state in the same transaction.
+now deletes their associated terminal state in the same transaction. PostgreSQL selects that bounded set by completion
+age, then locks it in `(consumer_id, source, message_id)` order, matching batch processing. A repeatable-read snapshot
+keeps every deletion on that same selected set.
 
 `ForgetAttempt` remains a deprecated, explicit destructive reset and is never automatic consumer cleanup. The migration
 backfills existing permanent outcomes without inferring historical ACKs. Old exhausted counters are closed when next

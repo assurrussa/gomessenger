@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# Caller workspace selection must never affect the published consumer probe.
+export GOWORK=off
+
 version="${1:?version is required}"
 if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
 	echo "version must be an exact vX.Y.Z tag" >&2

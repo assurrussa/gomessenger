@@ -187,6 +187,11 @@ func (b *backend) finishFailedAttempt(
 		return inbox.Result{}, fmt.Errorf("inbox/sqlite: rollback handler writes: %w", err)
 	}
 	if _, deferred := messenger.DeferDelay(handlerErr); deferred && !messenger.IsPermanent(handlerErr) {
+		if err := b.terminalSQL().PreserveDeferred(ctx, tx, []inbox.BatchItemOutcome{{
+			Key: key, Fingerprint: fingerprint, Outcome: inbox.BatchDefer, Attempt: decision.attempt - 1,
+		}}, b.clock().UTC()); err != nil {
+			return inbox.Result{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return inbox.Result{}, fmt.Errorf("inbox/sqlite: commit deferred handler attempt: %w", err)
 		}

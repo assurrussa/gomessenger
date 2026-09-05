@@ -52,8 +52,8 @@ in public documentation.
 - `make prepare` runs mutating formatting and `go mod tidy` for all modules.
 - `make test-integration` reruns adapter and embedded-JetStream/SQLite E2E
   suites. Infrastructure-specific Outbox backend suites remain in that repo.
-- `make test-kafka` runs the opt-in local transactional pipeline against official
-  Kafka 4.1.2 and 4.3.1 Docker images; it is not part of hosted CI.
+- `make test-kafka` runs the transactional pipeline against official Kafka 4.1.2
+  and 4.3.1 Docker images. Hosted CI runs the same gate as a version matrix.
 - `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres` runs the
   PostgreSQL migration, conflict, rollback/retry, concurrency, and prune gate.
 - `make bench-all` records allocation-aware local dispatch benchmarks.

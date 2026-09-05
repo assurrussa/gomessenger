@@ -1,6 +1,6 @@
 # ADR-0002: Pilot article publication audit in a real service
 
-- Status: accepted; target selected; publication prerequisite satisfied; `site` implementation remains pending
+- Status: accepted; target selected; selected-release verification required; `site` implementation remains pending
 - Date: 2026-08-24
 
 ## Context
@@ -29,10 +29,10 @@ The event payload is `{articleId, slug, locale, publishedAt}`. The pilot is disa
 the draft-to-published transition. Updates and unpublishing do not emit it. The audit handler writes through
 `inbox.SQLTxFromContext`, so the audit row and Inbox completion marker commit in one PostgreSQL transaction.
 
-Implementation belongs in a separate `site` project task and branch after every used GoMessenger module is published
-as `v0.1.0` and passes the clean release-consumer gate. Local `replace` directives are forbidden. The host must upgrade
-Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.12.0`, own the NATS connection/topology and
-migrations, and preserve existing required-runner supervision.
+Implementation belongs in a separate `site` project task and branch after every used GoMessenger module is pinned to
+the same published release and that version passes the clean release-consumer gate. Local `replace` directives are
+forbidden. The host must upgrade Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.15.0`, own the NATS
+connection/topology and migrations, and preserve existing required-runner supervision.
 
 ## Compatibility constraints
 
