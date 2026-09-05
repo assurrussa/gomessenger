@@ -4,9 +4,9 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.3.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
-	github.com/assurrussa/gomessenger/adapters/nats v0.0.0
-	github.com/assurrussa/gomessenger/adapters/outbox v0.0.0
+	github.com/assurrussa/gomessenger/adapters/inbox v0.3.0
+	github.com/assurrussa/gomessenger/adapters/nats v0.3.0
+	github.com/assurrussa/gomessenger/adapters/outbox v0.3.0
 	github.com/assurrussa/outbox v0.15.0
 	github.com/assurrussa/outbox/backends/pgsql v0.15.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -43,11 +43,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
-
-replace github.com/assurrussa/gomessenger => ../..
-
-replace github.com/assurrussa/gomessenger/adapters/inbox => ../../adapters/inbox
-
-replace github.com/assurrussa/gomessenger/adapters/nats => ../../adapters/nats
-
-replace github.com/assurrussa/gomessenger/adapters/outbox => ../../adapters/outbox

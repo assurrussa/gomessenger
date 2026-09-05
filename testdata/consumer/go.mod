@@ -4,11 +4,11 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.3.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
-	github.com/assurrussa/gomessenger/adapters/kafka v0.2.2
-	github.com/assurrussa/gomessenger/adapters/nats v0.2.2
-	github.com/assurrussa/gomessenger/adapters/outbox v0.2.2
-	github.com/assurrussa/gomessenger/observability v0.2.2
+	github.com/assurrussa/gomessenger/adapters/inbox v0.3.0
+	github.com/assurrussa/gomessenger/adapters/kafka v0.3.0
+	github.com/assurrussa/gomessenger/adapters/nats v0.3.0
+	github.com/assurrussa/gomessenger/adapters/outbox v0.3.0
+	github.com/assurrussa/gomessenger/observability v0.3.0
 	github.com/assurrussa/outbox v0.15.0
 	github.com/prometheus/client_golang v1.24.1
 )
@@ -46,13 +46,4 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-)
-
-replace (
-	github.com/assurrussa/gomessenger => ../..
-	github.com/assurrussa/gomessenger/adapters/inbox => ../../adapters/inbox
-	github.com/assurrussa/gomessenger/adapters/kafka => ../../adapters/kafka
-	github.com/assurrussa/gomessenger/adapters/nats => ../../adapters/nats
-	github.com/assurrussa/gomessenger/adapters/outbox => ../../adapters/outbox
-	github.com/assurrussa/gomessenger/observability => ../../observability
 )
