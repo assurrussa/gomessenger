@@ -1,5 +1,11 @@
 # Implementation notes
 
+## 2026-09-06 — v0.3.0 release publication
+
+- Published all GoMessenger v0.3.0 dependency layers in reviewed sequence: root `v0.3.0` on `843545f`, modules `adapters/inbox/v0.3.0`, `adapters/outbox/v0.3.0`, `observability/v0.3.0` (PR #28), transports `adapters/nats/v0.3.0`, `adapters/kafka/v0.3.0` (PR #29), and final CLI `tools/gomessengerctl/v0.3.0`.
+- Recorded fixed-rate release capacity evidence (6/6 PASS, ~1,499.2 msg/s, p95 <= 189.4 ms, zero message drops or corruptions) and deferred message pruning redelivery requirements in release notes.
+- Updated README adoption commands and pkg.go.dev reference links to v0.3.0.
+
 ## 2026-09-05 — Inbox retention review fixes
 
 - Preserve zero-attempt generation rows for single and batch item defer in PostgreSQL and SQLite. Existing schemas
