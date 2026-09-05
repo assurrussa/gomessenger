@@ -5,6 +5,9 @@ events. It supports direct transactional publish, Outbox relay, transactional co
 attempts, retry topics, DLQ hand-off, protected replay, declarative topology, and managed lifecycle. It does not support
 queries, CloudEvents modes, or arbitrary non-GoMessenger payloads.
 
+The adapter connects via the Kafka wire protocol (powered by franz-go) and targets modern **Apache Kafka 4.x operating in
+KRaft mode (ZooKeeper-less)** as well as compatible Kafka clusters.
+
 The contract is at-least-once. Kafka transactions atomically join a consumed offset to retry or DLQ production, while
 the Inbox transaction joins business database writes to completion. Neither boundary makes external effects exactly
 once.
@@ -234,8 +237,12 @@ make test-kafka
 ```
 
 It runs the transactional direct/Outbox/Inbox/retry/DLQ/replay pipeline and the partial-outcome batch pipeline against
-Kafka 4.1.2 and 4.3.1. Passing it proves
-the tested checkout and scenarios, not production capacity, multi-broker failover, deployment, or a live smoke.
+official Apache Kafka 4.1.2 and 4.3.1 images in KRaft mode (ZooKeeper-less). Both single-record and batch E2E pipelines
+run under the Go race detector with complete transactional verification.
+
+Passing it proves the tested checkout and scenarios, not production capacity, multi-broker failover, deployment, or a
+live smoke. Note that fixed-rate capacity baselines in [performance evidence](performance/README.md) (1,500 msg/s floor)
+are currently published for PostgreSQL + NATS JetStream; Kafka capacity benchmarking is part of the operational roadmap.
 
 The design rationale and deliberately separate NATS/Kafka implementations are recorded in
 [ADR-0004](decisions/0004-kafka-adapter.md).

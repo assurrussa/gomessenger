@@ -57,6 +57,7 @@ Exit criteria:
 
 - a documented pilot topology and rollback plan;
 - repeatable baseline results with environment metadata;
+- Kafka capacity benchmarks: complement existing PostgreSQL + NATS JetStream baselines with equivalent fixed-rate capacity and frontier evidence for the Kafka adapter under KRaft;
 - identified bottlenecks and an ordered Level 2 backlog based on measured impact.
 
 ## Workstream 1: schema identity and compatibility
@@ -172,7 +173,8 @@ Level 2 readiness requires repeatable tests beyond unit and happy-path E2E cover
 - JetStream heartbeat loss, consumer recreation, stream limits, and PubAck uncertainty;
 - PostgreSQL lock contention, pool starvation, failover, large Inbox history, and concurrent prune;
 - forced shutdown at every transaction boundary;
-- deterministic replay and duplicate suppression after partial failures.
+- deterministic replay and duplicate suppression after partial failures;
+- ready-to-run demo environment: introduce an `examples/durable-postgres-kafka` environment mirroring `examples/durable-postgres-nats` to provide turnkey local exploration with Kafka KRaft.
 
 Results must include the exact Go version, architecture, broker/database versions, topology, payload distribution,
 concurrency, and test duration. Cross-machine microbenchmarks remain informational; durable-pipeline regressions should

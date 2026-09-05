@@ -290,9 +290,18 @@ type Route interface {
 }
 ```
 
-Because `Route` (and `BatchRoute`) is a standard interface, host applications can implement custom adapters and overriding strategies directly in their codebase **without requiring any changes or new releases of GoMessenger**:
+For batched ingress, routes may additionally implement `BatchRoute`:
 
-- **Append-only / CDC Outbox:** write minimal unindexed append-only rows (or use `pgx.CopyFrom` binary streaming) while Debezium or an external WAL streamer forwards records to Kafka/NATS.
+```go
+type BatchRoute interface {
+	Name() string
+	DeliverBatch(ctx context.Context, batch []Delivery) ([]Receipt, error)
+}
+```
+
+Because `Route` and `BatchRoute` are standard interfaces, host applications can implement custom adapters and overriding strategies directly in their codebase **without requiring any changes or new releases of GoMessenger**:
+
+- **High-throughput Append-only / CDC Outbox:** The standard `adapters/outbox` provides transactional staging with a polling publisher relay and batching (~2,500–3,000 msg/s sustainable on single-instance PostgreSQL). For high-throughput platforms (e.g. 10,000–100,000+ msg/s) where polling queries and status updates (`UPDATE ... status = 'sent'`) cause database contention or table bloat, applications can write minimal unindexed append-only rows (or stream via `pgx.CopyFrom`) within the business transaction, and let an external CDC pipeline (such as Debezium, Kafka Connect, or a PostgreSQL WAL logical replication streamer via `pgoutput`) forward raw events directly to Kafka or NATS.
 - **Alternative storage backends:** route outbox events into Redis Streams, ClickHouse, KeyDB, or Tarantool.
 - **Dynamic / Conditional routing:** inspect `context.Context` at runtime to route through Outbox when an active `*sql.Tx` is present, or fall back to direct broker publishing outside transactions.
 - **Mock and testing routes:** capture or assert dispatched messages in integration tests with zero infrastructure dependencies.
@@ -747,9 +756,12 @@ blocked while a required GoMessenger or Outbox contract has not been published
 and pinned. `release-readiness` plus
 `make test-consumer-release VERSION=vX.Y.Z` is the separate no-replacement
 publication proof. `make test-e2e` reruns only the full
-Outbox-to-JetStream-to-Inbox path. `make test-kafka` is the local Docker entry point against official Kafka 4.1.2
-and 4.3.1 images; hosted CI runs each version in an independent matrix job. Run the full source gate before publishing
-the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
+Outbox-to-JetStream-to-Inbox path (using embedded JetStream for Docker-free local runs). `make test-kafka` is the local
+Docker entry point against official Apache Kafka 4.1.2 and 4.3.1 images in KRaft mode (ZooKeeper-less); hosted CI runs
+each version in an independent matrix job. Both NATS and Kafka adapters share complete functional E2E test parity under
+the race detector (Outbox staging, transactional relay, Inbox deduplication, retry tiers, DLQ, and replay). Fixed-rate
+capacity benchmarking (1,500 msg/s floor) is currently published for PostgreSQL + NATS. Run the full source gate before
+publishing the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
 Inbox-dependent transports, and finally the CLI and checkout fixtures. After the root, Inbox, NATS, and Kafka tags
 resolve through the Go proxy, finalize and check the complete graph:
 

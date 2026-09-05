@@ -76,6 +76,25 @@ This boundary provides the following invariant:
 It does not imply that the broker has received the message at transaction commit time. The supervised outbox worker owns
 that later delivery.
 
+### High-throughput platforms and CDC Outbox
+
+The standard outbox uses a transactional polling publisher model with batching (`adapters/outbox`). For typical service
+workloads, this sustains several thousand messages per second. However, for high-throughput platforms requiring tens or
+hundreds of thousands of messages per second, polling and status updates (`SELECT ... FOR UPDATE SKIP LOCKED`, claim,
+and completion updates) can create database IOPS bottlenecks, lock contention, and table bloat.
+
+Because GoMessenger isolates routing through the minimal `Route` and `BatchRoute` interfaces, high-throughput systems
+can adopt alternative staging strategies without changing application contracts:
+
+- **Append-only + CDC (Change Data Capture):** The application implements a custom `Route` that writes an immutable,
+  unindexed row (or uses binary streaming via `pgx.CopyFrom`) in the business transaction. An external CDC engine
+  (e.g., Debezium, a PostgreSQL WAL / `pgoutput` streamer, or Kafka Connect) captures WAL changes and forwards canonical
+  envelopes to Kafka or JetStream with near-zero transactional overhead on the primary database.
+- **Custom high-speed routes:** Teams can implement `Route` to write directly to fast distributed journals, memory-mapped
+  buffers, Redis Streams, or Tarantool when relational database staging is not required.
+- **Contract preservation:** Regardless of the underlying staging or transport mechanism, application code retains
+  GoMessenger's typed descriptors, schema versions, context propagation, middleware, tracing, and metadata lineage.
+
 ## Consumer transaction
 
 NATS and Kafka consumers pass canonical bytes and a stable key to the inbox. PostgreSQL and SQLite backends begin a
