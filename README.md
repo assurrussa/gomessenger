@@ -259,6 +259,44 @@ For a durable flow, provision topology, apply Outbox and Inbox migrations, regis
 start the managed runtimes, and expose readiness before accepting traffic. The [practical usage guide](docs/usage.md)
 shows the full composition and shutdown order.
 
+### Selective routing (Mixing Outbox and direct brokers)
+
+Outbox is not mandatory for all messages. You can mix and match different routes in the same application based on descriptor requirements:
+
+- **Transactional Outbox:** Route critical state transitions (e.g., payments, orders, status changes) through `outboxadapter.NewBatchProducer` so messages commit atomically with your database writes.
+- **Direct broker dispatch:** Route high-throughput, low-latency, or non-transactional traffic (e.g., clickstream, telemetry, audit logs, ephemeral notifications) directly through `natsadapter.NewRoute` or `kafkaadapter.NewRoute`. This completely bypasses the database, avoids WAL/disk contention, and delivers at full broker throughput.
+
+```go
+builder := messenger.NewBuilder(messenger.WithSource("urn:service:billing"))
+
+// 1. Critical event: staged atomically in PostgreSQL transaction (ReceiptStaged)
+builder.RouteEvent(OrderCreatedEvent, outboxProducer)
+
+// 2. High-volume audit/telemetry: published directly to JetStream without DB (ReceiptBrokerConfirmed)
+builder.RouteEvent(TelemetryMetricEvent, natsDirectRoute)
+
+// 3. Local in-process command: executed in-memory via GoBus (ReceiptCompleted)
+builder.RouteCommand(InvalidateLocalCache, messenger.NewLocalSyncRoute())
+```
+
+### Custom routes and custom adapters
+
+GoMessenger does not couple your application to the bundled database or broker implementations. The route boundary is a minimal Go interface:
+
+```go
+type Route interface {
+	Name() string
+	Deliver(ctx context.Context, delivery Delivery) (Receipt, error)
+}
+```
+
+Because `Route` (and `BatchRoute`) is a standard interface, host applications can implement custom adapters and overriding strategies directly in their codebase **without requiring any changes or new releases of GoMessenger**:
+
+- **Append-only / CDC Outbox:** write minimal unindexed append-only rows (or use `pgx.CopyFrom` binary streaming) while Debezium or an external WAL streamer forwards records to Kafka/NATS.
+- **Alternative storage backends:** route outbox events into Redis Streams, ClickHouse, KeyDB, or Tarantool.
+- **Dynamic / Conditional routing:** inspect `context.Context` at runtime to route through Outbox when an active `*sql.Tx` is present, or fall back to direct broker publishing outside transactions.
+- **Mock and testing routes:** capture or assert dispatched messages in integration tests with zero infrastructure dependencies.
+
 ## Modules and release status
 
 GoMessenger requires Go 1.27 because the builder and messenger expose generic methods.
