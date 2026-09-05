@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.3.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
+	github.com/assurrussa/gomessenger/adapters/inbox v0.3.0
 	github.com/twmb/franz-go v1.21.6
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 )
@@ -16,7 +16,3 @@ require (
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 )
-
-replace github.com/assurrussa/gomessenger => ../..
-
-replace github.com/assurrussa/gomessenger/adapters/inbox => ../inbox
