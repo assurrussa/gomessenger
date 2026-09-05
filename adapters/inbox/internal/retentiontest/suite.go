@@ -27,6 +27,11 @@ type Factory func(t *testing.T, prefix string) *inbox.Store
 func Run(t *testing.T, db *sql.DB, factory Factory) {
 	t.Helper()
 	for _, batch := range []bool{false, true} {
+		for _, replay := range []bool{false, true} {
+			t.Run(fmt.Sprintf("PruneTerminalPreservesDeferredSiblingGeneration/batch_%t_replay_%t", batch, replay), func(t *testing.T) {
+				testDeferredSibling(t, db, factory, batch, replay)
+			})
+		}
 		for _, permanent := range []bool{false, true} {
 			t.Run(fmt.Sprintf("batch_%t_permanent_%t", batch, permanent), func(t *testing.T) {
 				testClosure(t, db, factory, batch, permanent)

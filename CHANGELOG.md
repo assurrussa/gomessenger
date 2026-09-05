@@ -4,17 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+Planned release: **v0.3.0**. See the [release and upgrade notes](docs/releases/v0.3.0.md).
+
 ### Added
 
+- typed atomic command/event batch staging through `BatchRoute`, bound batch senders/publishers, and the Outbox
+  `NewBatchProducer` and `NewBatchRelayJob` adapters; NATS confirms each asynchronous publication and Kafka commits
+  each relay batch in one broker transaction;
+- supported NATS/Kafka batch command/event consumers, batch-only middleware and exact-cover item results, backed by
+  PostgreSQL/SQLite transactional `BatchAttemptBackend`; `DeferAfter` retries without consuming an item attempt;
+- bounded non-replayable NATS quarantine v2 for captures that cannot enter replayable DLQ v1, with CLI inspection and
+  rejection of quarantine replay before broker access;
+- durable terminal Inbox generations, additive PostgreSQL/SQLite migrations, confirmed terminal handoff and optional
+  host-controlled `PruneTerminalAttempts`; completed identities continue to suppress every replay generation;
+- batch execution, broker finalization, SQL/WAL and connection-health evidence in capacity report spec `2.1`;
 - `make check-workspace` runs the maximal source gate against the local
-  multi-module workspace, including the sibling Outbox checkout, without
+  multi-module workspace without
   weakening the separate `GOWORK=off` publication boundary.
 - True-batch proof artifacts identify their evidence scope as
   `checkout-workspace` and retain both clean checkout commits.
 - `make capacity-outbox-batch-screen` provides a two-cell development A/B with
   30 seconds of warm-up and 60 seconds of measured load per Outbox variant at
-  a default 1,000 msg/s; its artifacts are explicitly non-proof `SCREEN_ONLY`
+  a default 1,500 msg/s; its artifacts are explicitly non-proof `SCREEN_ONLY`
   evidence.
+
+### Changed
+
+- GoBus is pinned to `v1.2.1`; Outbox root and matching database backends are pinned together at `v0.15.0`;
+- release preparation supports `RELEASE_LAYER=root|modules|transports|final`, verifies published prerequisites before
+  editing module files, and removes consumer/example local replacements when finalizing the graph;
+- terminal Inbox protection persists after permanent/exhausted DLQ handoff; `ForgetAttempt` remains a deprecated,
+  explicit destructive reset and is no longer automatic consumer cleanup.
+
+### Fixed
+
+- queued local commands/events recheck expiry immediately before execution, skip middleware/handlers when expired,
+  and emit `OperationExpire` without changing admission receipts;
+- NATS batch readiness waits for an established pull boundary and respects cancellation during startup, fill,
+  asynchronous publish saturation, finalization and drain;
+- Kafka batch retry handoff survives session replacement, collection retains bounded partition state, broker
+  watchdogs bound finalization, and user observations run after rebalance release;
+- terminal retention rechecks handoff eligibility under identity locks, preserves active generations and synchronizes
+  pruning with concurrent processing;
+- the published-consumer probe forces `GOWORK=off`, including when its caller selected a workspace explicitly;
+- the real-service pilot pins the Outbox root and PostgreSQL backend to the same `v0.15.0` dependency baseline.
 
 ## [0.2.2] - 2026-08-29
 

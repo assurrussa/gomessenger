@@ -4,6 +4,9 @@ This directory keeps versioned, reviewable performance snapshots for GoMessenger
 It complements the raw capacity artifacts under `tmp/capacity/`; it does not
 replace them or turn a checkout-local experiment into a production benchmark.
 
+For a new release's fixed-rate confirmations and explicit latency gate, use
+[release capacity verification](release-verification.md).
+
 ## Evidence levels
 
 - `make bench-all` measures allocation-aware, synchronous local dispatch. It

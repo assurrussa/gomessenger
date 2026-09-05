@@ -3,17 +3,15 @@
 GoMessenger is a multi-module repository. Tags are immutable and every optional module must be published before the
 clean release consumer can resolve the complete facade.
 
-## `v0.1.0` scope
+## Release scope
 
-The first release includes typed commands, typed local `Query[Q,R]` request/reply, typed events, local sync/async GoBus
-routes, canonical command/event envelopes, Outbox/JetStream/Kafka/Inbox durability, middleware, lifecycle,
-observability, topology, and DLQ tooling. The query request codec is local descriptor identity; result `R` is not
-serialized.
+The current preparation targets [v0.3.0](releases/v0.3.0.md): supported producer/relay/consumer batches, quarantine v2,
+terminal Inbox protection and execution-time expiry. Keep the published README install commands on v0.2.2 until the
+new release passes published verification.
 
-Distributed query transports are explicitly not part of `v0.1.0`. HTTP, gRPC, and core NATS request/reply remain
-future candidates under ADR-0003; JetStream, Outbox, Inbox, receipts, retry, and DLQ must not be presented as remote
-query support. The `site` article-publication audit pilot starts only after all dependency-ordered `v0.1.0` module tags
-pass the published clean-consumer gate.
+Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
+candidates under ADR-0003. The `site` article-publication audit pilot requires all used modules to resolve at the same
+published release version and remains a separate service integration task.
 
 ## Pre-release gate
 
@@ -23,7 +21,7 @@ pass the published clean-consumer gate.
    no-findings reaction. Request a missing review with `@codex review`, wait for
    the completed result, and resolve every actionable conversation. A new push
    invalidates the earlier review gate for that pull request.
-2. Run `make prepare` and inspect generated module sums and formatting changes.
+2. Run the applicable `release-ready` layer below and inspect module sums and formatting changes.
 3. Run `make check-workspace`; it includes the Docker-free transactional
    Outbox-to-JetStream-to-Inbox E2E under the race detector.
 4. Run `GOMESSENGER_POSTGRES_DSN='postgres://...' make test-postgres`. CI runs the same target against PostgreSQL 18.
@@ -41,10 +39,11 @@ pass the published clean-consumer gate.
    tagging. Request a missing review with `@codex review`; a later push requires
    a new completed result.
 
-`make check-workspace` proves the local checkout graph, including the sibling
-Outbox checkout selected by `go.work`. It does not prove the published module
-graph. `make check` keeps `GOWORK=off` and is expected to remain blocked until
-the required dependency tag wave is published and pinned.
+`make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox;
+its root and backend dependencies resolve at v0.15.0. `make check` uses `GOWORK=off`, but development replacements in
+individual `go.mod` files still apply. Before final release preparation, either source gate can pass without proving
+that an external consumer can resolve the new GoMessenger APIs. The final `release-readiness` and published-consumer
+gates close that boundary.
 
 ## Prepare exact module requirements
 
@@ -58,16 +57,41 @@ verify a compatible Outbox core/backend version, then pass that exact version
 as `OUTBOX_VERSION`. Outbox path overrides remain in `go.work` only and are
 never a substitute for this release boundary.
 
-Before the root tag, keep nested modules on the last published GoMessenger graph and run:
+`RELEASE_LAYER` selects which module files may change. Its default is `final`, preserving the existing command.
+Every preparation checks the selected layer's published prerequisites before editing `go.mod` or `go.work`, tidies
+each affected module with `GOWORK=off`, and checks that layer's requirements. A failed prerequisite check changes no
+source files. Preparation never creates or pushes tags.
+
+Before the root tag, keep nested modules on their current development graph and run:
 
 ```sh
+make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
+make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
 make check-workspace
 ```
 
-After the reviewed root tag resolves through the Go proxy, prepare and review the root-dependent modules
-(`adapters/inbox`, `adapters/outbox`, and `observability`), then publish their tags. After the Inbox tag resolves,
-prepare and review `adapters/nats` and `adapters/kafka`, then publish those tags. Only after the transport tags resolve,
-run the final graph preparation:
+The root layer verifies the published Outbox root/backend prerequisites, checks that the facade has no replacement,
+and tidies only the root module. It does not pin nested modules to an unavailable GoMessenger tag.
+
+After the reviewed root tag resolves through the Go proxy, prepare the root-dependent modules:
+
+```sh
+make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
+make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
+make check
+```
+
+This layer updates and removes development replacements in `adapters/inbox`, `adapters/outbox`, and `observability`.
+Review and commit the layer, then publish those three tags. After the Inbox tag resolves, prepare the transports:
+
+```sh
+make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
+make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
+make check
+```
+
+This layer updates `adapters/nats` and `adapters/kafka` while leaving the CLI and fixtures unchanged. Review and commit
+the layer, then publish both transport tags. After all six root/adapter/observability tags resolve, finalize the graph:
 
 ```sh
 make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
@@ -75,14 +99,16 @@ make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
 make check
 ```
 
-`release-ready` finalizes every remaining exact requirement, removes development path replacements from published
-module files, adds matching local replacements to `go.work`, tidies the durable example and test modules with
-`GOWORK=off`, and formats source. It is a final-layer command, not a pre-root-tag command. Run it only after the
-requested root, Inbox, NATS, and Kafka tags and the selected Outbox root/backend tags resolve from the Go proxy.
-`release-readiness` verifies every expected GoMessenger requirement in published modules and the clean consumer, plus
-the Outbox root/SQLite pair used by clean consumer/E2E modules and the Outbox root/PostgreSQL pair used by the durable
-example. It rejects remaining `replace` directives in published module files and any Outbox replacement in these
-consumer/example modules. The unpublished local
+The final layer aligns every GoMessenger requirement, including fixture requirements previously set to `v0.0.0`.
+It removes development replacements from all published modules, the external consumer fixture and durable example,
+and adds matching local replacements to `go.work`. It requires root, Inbox, Outbox adapter, observability, NATS and
+Kafka tags plus the selected Outbox root/backend tags to resolve first. Commit and review the final layer before the
+CLI tag. A partial layer's successful readiness result is not final release readiness.
+
+Final `release-readiness` verifies every expected GoMessenger requirement in published modules and all fixtures, plus
+the Outbox root in the consumer, the root/SQLite pair in E2E, and the root/PostgreSQL pair in the durable example.
+It rejects every `replace` directive in published modules, the consumer and the example, plus Outbox
+replacements in the E2E fixture. The unpublished local
 E2E module deliberately keeps GoMessenger path replacements to test the checkout itself; it is not a published-module
 resolution probe. The gate verifies the committed version graph but does not replace clean published resolution. The
 full source gate must pass for every reviewed dependency-layer commit; published resolution is proved separately after
@@ -131,8 +157,8 @@ After all tags are visible through the Go module proxy, run:
 make test-consumer-release VERSION=vX.Y.Z
 ```
 
-The script accepts only an exact stable `vX.Y.Z` tag, creates a clean temporary module, downloads root and nested modules
-by that tag, compiles the command/query/event facade and adapters, installs the published `gomessengerctl` module, and
+The script forces `GOWORK=off`, accepts only an exact stable `vX.Y.Z` tag, creates a clean temporary module and downloads
+root and nested modules by that tag. It compiles the command/query/event facade and adapters, installs the published `gomessengerctl` module, and
 uses no local replacement. Record this separately from the local gate in the release notes.
 
 ## Post-publication adoption surface

@@ -161,6 +161,9 @@ func (b *backend) ProcessBatchAttempt(
 func (b *backend) commitTerminalBatch(ctx context.Context, tx *sql.Tx,
 	report inbox.BatchProcessResult,
 ) (inbox.BatchProcessResult, error) {
+	if err := b.terminalSQL().PreserveDeferred(ctx, tx, report.Items, b.clock().UTC()); err != nil {
+		return inbox.BatchProcessResult{}, err
+	}
 	if err := b.terminalSQL().Record(ctx, tx, report.Items, b.clock().UTC()); err != nil {
 		return inbox.BatchProcessResult{}, err
 	}

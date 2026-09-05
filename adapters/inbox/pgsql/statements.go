@@ -149,11 +149,16 @@ func newStatements(names namespace) statements {
     WHERE inbox.consumer_id = doomed.consumer_id
       AND inbox.source = doomed.source
       AND inbox.message_id = doomed.message_id`),
-		lockPruneBatch: names.render(`SELECT 1
+		lockPruneBatch: names.render(`WITH candidates AS (
+        SELECT consumer_id, source, message_id
         FROM {{inbox}}
         WHERE completed_at < $1
         ORDER BY completed_at, consumer_id, source, message_id
         LIMIT $2
-        FOR UPDATE`),
+    )
+    SELECT 1 FROM {{inbox}} AS identity
+    JOIN candidates USING (consumer_id, source, message_id)
+    ORDER BY identity.consumer_id, identity.source, identity.message_id
+    FOR UPDATE OF identity`),
 	}
 }
