@@ -3,7 +3,7 @@ module github.com/assurrussa/gomessenger/adapters/nats
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.2.2
+	github.com/assurrussa/gomessenger v0.3.0
 	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/nats-io/nats-server/v2 v2.14.5

@@ -3,7 +3,7 @@ module github.com/assurrussa/gomessenger/tools/gomessengerctl
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.2.2
+	github.com/assurrussa/gomessenger v0.3.0
 	github.com/assurrussa/gomessenger/adapters/kafka v0.2.2
 	github.com/assurrussa/gomessenger/adapters/nats v0.2.2
 	github.com/nats-io/nats-server/v2 v2.14.5

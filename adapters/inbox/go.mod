@@ -3,7 +3,7 @@ module github.com/assurrussa/gomessenger/adapters/inbox
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.2.2
+	github.com/assurrussa/gomessenger v0.3.0
 	github.com/jackc/pgx/v5 v5.10.0
 	modernc.org/sqlite v1.57.0
 )
@@ -25,5 +25,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/assurrussa/gomessenger => ../..
