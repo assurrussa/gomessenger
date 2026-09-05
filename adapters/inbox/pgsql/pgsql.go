@@ -33,6 +33,7 @@ type attemptDecision struct {
 }
 
 type attemptState struct {
+	kind     string
 	attempt  uint64
 	terminal bool
 }
@@ -150,6 +151,9 @@ func (b *backend) ProcessAttempt(
 	}
 	attempt := decision.attempt
 	if decision.terminal || decision.exhausted {
+		if err := b.recordTerminal(ctx, tx, key, fingerprint, decision.attempt, decision.terminal); err != nil {
+			return result, err
+		}
 		if err := tx.Commit(); err != nil {
 			return result, fmt.Errorf("inbox/pgsql: commit existing attempt state: %w", err)
 		}
@@ -164,7 +168,7 @@ func (b *backend) ProcessAttempt(
 
 	handlerContext := inbox.ContextWithSQLTx(ctx, tx)
 	if handlerErr := handler(handlerContext); handlerErr != nil {
-		return b.finishFailedAttempt(ctx, tx, key, fingerprint, decision, handlerErr)
+		return b.finishFailedAttempt(ctx, tx, key, fingerprint, decision, maxAttempts, handlerErr)
 	}
 	if err := b.consumeAttempt(ctx, tx, key, fingerprint, decision); err != nil {
 		return result, err
@@ -185,6 +189,7 @@ func (b *backend) finishFailedAttempt(
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 	decision attemptDecision,
+	maxAttempts uint64,
 	handlerErr error,
 ) (inbox.Result, error) {
 	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT gomessenger_handler"); err != nil {
@@ -201,6 +206,11 @@ func (b *backend) finishFailedAttempt(
 	}
 	if err := b.markAttemptTerminal(ctx, tx, key, fingerprint, handlerErr); err != nil {
 		return inbox.Result{}, err
+	}
+	if messenger.IsPermanent(handlerErr) || decision.attempt >= maxAttempts {
+		if err := b.recordTerminal(ctx, tx, key, fingerprint, decision.attempt, messenger.IsPermanent(handlerErr)); err != nil {
+			return inbox.Result{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return inbox.Result{}, fmt.Errorf("inbox/pgsql: commit failed handler attempt: %w", err)
@@ -293,10 +303,10 @@ func (b *backend) nextAttempt(
 	if err != nil {
 		return attemptDecision{}, err
 	}
-	if state.terminal {
+	if state.terminal || state.kind == inbox.FailurePermanent {
 		return attemptDecision{attempt: state.attempt, terminal: true, exists: true}, nil
 	}
-	if state.attempt >= maxAttempts {
+	if state.attempt >= maxAttempts || state.kind == inbox.FailureAttemptsExhausted {
 		return attemptDecision{attempt: state.attempt, exhausted: true, exists: true}, nil
 	}
 	return attemptDecision{attempt: state.attempt + 1, exists: true}, nil
@@ -362,13 +372,14 @@ func (b *backend) readAttempt(
 ) (attemptState, error) {
 	var attempt int64
 	var terminal bool
+	var kind string
 	var err error
 	if key.AttemptGeneration == "" {
 		err = tx.QueryRowContext(ctx, b.statements.readAttempt,
-			key.ConsumerID, key.Source, key.MessageID.String()).Scan(&attempt, &terminal)
+			key.ConsumerID, key.Source, key.MessageID.String()).Scan(&attempt, &terminal, &kind)
 	} else {
 		err = tx.QueryRowContext(ctx, b.statements.readAttemptGeneration,
-			key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:]).Scan(&attempt, &terminal)
+			key.ConsumerID, key.Source, key.MessageID.String(), fingerprint[:]).Scan(&attempt, &terminal, &kind)
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -379,7 +390,7 @@ func (b *backend) readAttempt(
 	if attempt < 0 {
 		return attemptState{}, errors.New("inbox/pgsql: invalid stored handler attempt")
 	}
-	return attemptState{attempt: uint64(attempt), terminal: terminal}, nil
+	return attemptState{attempt: uint64(attempt), terminal: terminal, kind: kind}, nil
 }
 
 func (b *backend) ForgetAttempt(
@@ -413,6 +424,9 @@ func (b *backend) ForgetAttempt(
 			return fmt.Errorf("inbox/pgsql: commit completed forgotten attempt: %w", err)
 		}
 		return nil
+	}
+	if err := b.terminalSQL().Forget(ctx, tx, key, fingerprint); err != nil {
+		return err
 	}
 	attemptFingerprint := inbox.AttemptFingerprint(key, fingerprint)
 	if err := b.deleteAttempt(ctx, tx, key, attemptFingerprint); err != nil {
@@ -507,6 +521,9 @@ func (b *backend) Prune(ctx context.Context, before time.Time, limit int) (int64
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := b.lockPruneBatch(ctx, tx, before, limit); err != nil {
+		return 0, err
+	}
+	if err := b.terminalSQL().PruneCompleted(ctx, tx, before, limit); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, b.statements.pruneAttemptGenerations, before, limit); err != nil {

@@ -714,7 +714,7 @@ func (c *Consumer) processKafkaBatch(
 	}
 
 	produced := make([]*kgo.Record, 0, len(outcomes))
-	terminalCleanup := make([]int, 0, len(outcomes))
+	terminalConfirmations := make([]int, 0, len(outcomes))
 	for index, outcome := range outcomes {
 		record := batch.records[index]
 		switch outcome.item.Outcome {
@@ -735,7 +735,7 @@ func (c *Consumer) processKafkaBatch(
 			produced = append(produced, dlq)
 			if outcome.failureKind == inbox.FailurePermanent ||
 				outcome.failureKind == inbox.FailureAttemptsExhausted {
-				terminalCleanup = append(terminalCleanup, index)
+				terminalConfirmations = append(terminalConfirmations, index)
 			}
 		default:
 			allowRebalance()
@@ -787,27 +787,27 @@ func (c *Consumer) processKafkaBatch(
 	if batch.firstDeferred != nil {
 		c.logDeferredPartition(ctx, batch.firstDeferred, batch.deferUntil)
 	}
-	if len(terminalCleanup) != 0 {
-		type cleanupKey struct {
+	if len(terminalConfirmations) != 0 && c.store.SupportsTerminalRetention() {
+		type confirmationKey struct {
 			key         inbox.Key
 			fingerprint inbox.Fingerprint
 		}
-		seen := make(map[cleanupKey]messenger.MessageID, len(terminalCleanup))
-		for _, index := range terminalCleanup {
+		seen := make(map[confirmationKey]messenger.MessageID, len(terminalConfirmations))
+		for _, index := range terminalConfirmations {
 			outcome := outcomes[index]
-			ck := cleanupKey{key: outcome.item.Key, fingerprint: outcome.item.Fingerprint}
+			ck := confirmationKey{key: outcome.item.Key, fingerprint: outcome.item.Fingerprint}
 			if _, exists := seen[ck]; !exists {
 				seen[ck] = batch.records[index].decoded.metadata.ID
 			}
 		}
-		cleanupCtx, cancelCleanup := context.WithTimeout(ctx, 5*time.Second)
-		defer cancelCleanup()
+		confirmationCtx, cancelConfirmation := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelConfirmation()
 		for ck, msgID := range seen {
-			if cleanupCtx.Err() != nil {
+			if confirmationCtx.Err() != nil {
 				break
 			}
-			if err := c.store.ForgetAttempt(cleanupCtx, ck.key, ck.fingerprint); err != nil {
-				logInfrastructure(cleanupCtx, c.config.Logger, messenger.LogWarn, "forget terminal handler attempt",
+			if err := c.store.ConfirmTerminalHandoff(confirmationCtx, ck.key, ck.fingerprint); err != nil {
+				logInfrastructure(confirmationCtx, c.config.Logger, messenger.LogWarn, "confirm terminal handler handoff",
 					messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 					messenger.LogAttr{Key: logAttrMessageID, Value: msgID.String()},
 					messenger.LogAttr{Key: logAttrError, Value: err})

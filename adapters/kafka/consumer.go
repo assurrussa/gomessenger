@@ -920,7 +920,7 @@ func (c *Consumer) processPreparedRecord(
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return ctx.Err()
 	}
-	exhausted := attempt >= maxAttempts
+	exhausted := attempt >= maxAttempts || errors.Is(processErr, inbox.ErrAttemptsExhausted)
 	identityConflict := errors.Is(processErr, inbox.ErrFingerprintConflict)
 	if identityConflict || messenger.IsPermanent(processErr) || exhausted {
 		failureKind := "permanent"
@@ -932,7 +932,7 @@ func (c *Consumer) processPreparedRecord(
 		commitErr := c.deadLetterRecord(ctx, session, record, control, failureKind, processErr,
 			max(1, attempt), decoded.metadata.ID.String())
 		if commitErr == nil && !identityConflict {
-			c.forgetAttempt(deliveryContext, key, fingerprint, decoded.metadata.ID)
+			c.confirmTerminalHandoff(deliveryContext, key, fingerprint, decoded.metadata.ID)
 		}
 		c.observeHandle(processContext, decoded, attempt, result, 0, startedAt, processErr)
 		return commitErr
@@ -1150,16 +1150,19 @@ func handlerTransactionTimeout(handlerTimeout, finalizationTimeout time.Duration
 	return handlerTimeout + finalizationTimeout
 }
 
-func (c *Consumer) forgetAttempt(
+func (c *Consumer) confirmTerminalHandoff(
 	ctx context.Context,
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 	messageID messenger.MessageID,
 ) {
-	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	if !c.store.SupportsTerminalRetention() {
+		return
+	}
+	confirmationContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := c.store.ForgetAttempt(cleanupContext, key, fingerprint); err != nil {
-		logInfrastructure(ctx, c.config.Logger, messenger.LogWarn, "forget terminal handler attempt",
+	if err := c.store.ConfirmTerminalHandoff(confirmationContext, key, fingerprint); err != nil {
+		logInfrastructure(ctx, c.config.Logger, messenger.LogWarn, "confirm terminal handler handoff",
 			messenger.LogAttr{Key: logAttrConsumerID, Value: c.config.ConsumerID},
 			messenger.LogAttr{Key: logAttrMessageID, Value: messageID.String()},
 			messenger.LogAttr{Key: logAttrError, Value: err})

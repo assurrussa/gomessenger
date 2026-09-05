@@ -96,6 +96,7 @@ func (b *observingInboxBackend) ForgetAttempt(
 	key inbox.Key,
 	fingerprint inbox.Fingerprint,
 ) error {
+	//nolint:staticcheck // Preserve the optional backend wrapper compatibility surface.
 	return b.delegate.ForgetAttempt(ctx, key, fingerprint)
 }
 
@@ -552,4 +553,12 @@ func eventually(
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func (b *observingInboxBackend) ConfirmTerminalHandoff(ctx context.Context, key inbox.Key, fingerprint inbox.Fingerprint) error {
+	return b.delegate.ConfirmTerminalHandoff(ctx, key, fingerprint)
+}
+
+func (b *observingInboxBackend) PruneTerminalAttempts(ctx context.Context, before time.Time, limit int) (int64, error) {
+	return b.delegate.PruneTerminalAttempts(ctx, before, limit)
 }

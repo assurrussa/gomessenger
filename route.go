@@ -66,6 +66,7 @@ type LocalQueryRoute interface {
 }
 
 type delivery struct {
+	onExpire func(context.Context, error)
 	metadata Metadata
 	encode   func() ([]byte, DataEncoding, error)
 	invoke   func(context.Context) error
@@ -122,4 +123,23 @@ func validateImmediateTiming(metadata Metadata, now time.Time) error {
 type localRoute interface {
 	Route
 	requiresLocalHandler()
+}
+
+func (d *delivery) reportExpiry(ctx context.Context, err error) {
+	if d.onExpire != nil {
+		d.onExpire(ctx, err)
+	}
+}
+
+func expiryObserver(observer Observer, metadata Metadata, route string) func(context.Context, error) {
+	if observer == nil {
+		return nil
+	}
+	return func(ctx context.Context, err error) {
+		observe(ctx, observer, Observation{
+			Operation: OperationExpire,
+			MessageID: metadata.ID, Kind: metadata.Kind, Name: metadata.Name, SchemaVersion: metadata.SchemaVersion,
+			Route: route, StartedAt: time.Now().UTC(), Err: err,
+		})
+	}
 }

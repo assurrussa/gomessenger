@@ -236,9 +236,9 @@ func (s *Store) ProcessBatchAttempt(
 }
 
 // ProcessAttempt executes one bounded handler attempt and durably records a
-// failed invocation while rolling back its business writes. A permanent
-// handler error remains terminal across later calls in the same attempt
-// generation until ForgetAttempt.
+// failed invocation while rolling back its business writes. Permanent and
+// exhausted generations remain closed across restarts and limit changes until
+// explicit retention or destructive reset removes their protection.
 func (s *Store) ProcessAttempt(
 	ctx context.Context,
 	key Key,
@@ -262,8 +262,10 @@ func (s *Store) ProcessAttempt(
 	return backend.ProcessAttempt(ctx, key, fingerprint, maxAttempts, handler)
 }
 
-// ForgetAttempt removes an incomplete attempt record after the source message
-// has been durably handed off and terminated.
+// ForgetAttempt explicitly resets an incomplete generation, including its terminal protection.
+// It must not be called automatically after broker acknowledgement.
+//
+// Deprecated: replay with a new AttemptGeneration; use PruneTerminalAttempts for retention.
 func (s *Store) ForgetAttempt(ctx context.Context, key Key, fingerprint Fingerprint) error {
 	if err := ValidateKey(key); err != nil {
 		return err

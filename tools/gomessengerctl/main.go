@@ -167,18 +167,19 @@ func inspectDLQ(args []string, stdout, stderr io.Writer) int {
 }
 
 type dlqInspection struct {
-	SpecVersion         string                  `json:"specVersion"`
-	ConsumerID          string                  `json:"consumerId"`
-	Subject             string                  `json:"subject"`
-	Attempt             uint64                  `json:"attempt"`
-	FailureKind         string                  `json:"failureKind"`
-	FailedAt            time.Time               `json:"failedAt"`
-	WireMode            natsadapter.WireMode    `json:"wireMode"`
-	OriginalBytes       int                     `json:"originalBytes"`
-	OriginalHeaderCount int                     `json:"originalHeaderCount"`
-	Replayable          bool                    `json:"replayable"`
-	ReplayPlan          *natsadapter.ReplayPlan `json:"replayPlan,omitempty"`
-	ReplayError         string                  `json:"replayError,omitempty"`
+	Quarantine          *natsadapter.QuarantineInfo `json:"quarantine,omitempty"`
+	SpecVersion         string                      `json:"specVersion"`
+	ConsumerID          string                      `json:"consumerId"`
+	Subject             string                      `json:"subject"`
+	Attempt             uint64                      `json:"attempt"`
+	FailureKind         string                      `json:"failureKind"`
+	FailedAt            time.Time                   `json:"failedAt"`
+	WireMode            natsadapter.WireMode        `json:"wireMode"`
+	OriginalBytes       int                         `json:"originalBytes"`
+	OriginalHeaderCount int                         `json:"originalHeaderCount"`
+	Replayable          bool                        `json:"replayable"`
+	ReplayPlan          *natsadapter.ReplayPlan     `json:"replayPlan,omitempty"`
+	ReplayError         string                      `json:"replayError,omitempty"`
 }
 
 func inspectDLQRecord(record natsadapter.DLQRecord) dlqInspection {
@@ -187,6 +188,13 @@ func inspectDLQRecord(record natsadapter.DLQRecord) dlqInspection {
 		SpecVersion: record.SpecVersion, ConsumerID: record.ConsumerID, Subject: record.Subject,
 		Attempt: record.Attempt, FailureKind: record.FailureKind, FailedAt: record.FailedAt,
 		WireMode: record.WireMode, OriginalBytes: len(original), OriginalHeaderCount: len(record.OriginalHeaders),
+	}
+	if record.Quarantine != nil {
+		inspection.Quarantine = record.Quarantine
+		inspection.OriginalBytes = record.Quarantine.OriginalBytes
+		inspection.OriginalHeaderCount = record.Quarantine.HeaderCount
+		inspection.ReplayError = natsadapter.ErrQuarantineReplay.Error()
+		return inspection
 	}
 	plan, err := natsadapter.PlanDLQReplay(record)
 	if err != nil {
@@ -213,6 +221,9 @@ func replayDLQ(args []string, stdout, stderr io.Writer) int {
 		return report(stderr, err)
 	}
 	plan, planErr := natsadapter.PlanDLQReplay(record)
+	if errors.Is(planErr, natsadapter.ErrQuarantineReplay) {
+		return report(stderr, natsadapter.ErrQuarantineReplay)
+	}
 	if planErr != nil {
 		return report(stderr, errors.New(dlqReplayUnavailable))
 	}

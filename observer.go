@@ -11,6 +11,8 @@ type Operation string
 const (
 	// OperationDeliver covers outbound route delivery.
 	OperationDeliver Operation = "deliver"
+	// OperationExpire reports a local delivery skipped before execution because its deadline passed.
+	OperationExpire Operation = "expire"
 	// OperationHandle covers local or durable handler execution.
 	OperationHandle Operation = "handle"
 	// OperationBatchHandle covers one durable batch handler transaction.

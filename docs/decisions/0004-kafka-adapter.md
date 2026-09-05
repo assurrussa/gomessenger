@@ -43,6 +43,9 @@ into the root facade or hide materially different ordering and retry behavior.
 - Preserve source ordering only until the first failure. Records routed through retry topics may be overtaken.
 - Keep DLQ record v1 separate from the NATS DLQ format. Replay is protected, deterministic, payload-redacted in plans,
   and uses a fresh consumer attempt generation without bypassing completed Inbox identity.
+- Persist permanent and exhausted Inbox generations after the terminal transaction. Confirm handoff only after commit;
+  optional host-controlled retention replaces automatic attempt deletion in single and batch paths. See
+  [ADR-0006](0006-delivery-guarantees.md).
 - Manage topic partitions, replication factor, minimum ISR, retention time, retention bytes, and maximum message bytes
   declaratively. Service topics have the same partition count as their source. Apply creates topics or strengthens
   managed configurations only. Partition drift requires an explicit ordering-aware migration; heterogeneous or

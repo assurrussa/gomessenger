@@ -81,14 +81,17 @@ func newStatements(names namespace) statements {
 		incrementAttemptGeneration: names.render(`UPDATE {{attempt_generations}}
         SET attempts = attempts + 1, updated_at = $1
         WHERE consumer_id = $2 AND source = $3 AND message_id = $4 AND fingerprint = $5`),
-		readAttempt: names.render(`SELECT attempts, terminal
-        FROM {{attempts}}
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3
-        FOR UPDATE`),
-		readAttemptGeneration: names.render(`SELECT attempts, terminal
-        FROM {{attempt_generations}}
-        WHERE consumer_id = $1 AND source = $2 AND message_id = $3 AND fingerprint = $4
-        FOR UPDATE`),
+		readAttempt: names.render(`SELECT attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
+ FROM {{attempts}} AS attempt LEFT JOIN {{terminal}} AS closed
+ ON closed.consumer_id=attempt.consumer_id AND closed.source=attempt.source
+ AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
+ WHERE attempt.consumer_id = $1 AND attempt.source = $2 AND attempt.message_id = $3 FOR UPDATE OF attempt`),
+		readAttemptGeneration: names.render(`SELECT attempt.attempts, attempt.terminal, COALESCE(closed.failure_kind, '')
+ FROM {{attempt_generations}} AS attempt LEFT JOIN {{terminal}} AS closed
+ ON closed.consumer_id=attempt.consumer_id AND closed.source=attempt.source
+ AND closed.message_id=attempt.message_id AND closed.fingerprint=attempt.fingerprint
+ WHERE attempt.consumer_id = $1 AND attempt.source = $2 AND attempt.message_id = $3
+ AND attempt.fingerprint = $4 FOR UPDATE OF attempt`),
 		deleteAttempt: names.render(`DELETE FROM {{attempts}}
         WHERE consumer_id = $1 AND source = $2 AND message_id = $3`),
 		deleteAttemptGeneration: names.render(`DELETE FROM {{attempt_generations}}

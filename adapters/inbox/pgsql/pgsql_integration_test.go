@@ -15,6 +15,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/assurrussa/gomessenger/adapters/inbox"
+	"github.com/assurrussa/gomessenger/adapters/inbox/internal/retentiontest"
 	"github.com/assurrussa/gomessenger/adapters/inbox/pgsql"
 )
 
@@ -63,6 +64,22 @@ func TestPostgresInboxIntegration(t *testing.T) {
 		t.Fatalf("create commit-failure business fixture: %v", err)
 	}
 
+	t.Run("terminal retention", func(t *testing.T) {
+		retentiontest.Run(t, database, func(t *testing.T, prefix string) *inbox.Store {
+			t.Helper()
+			options := []pgsql.Option{pgsql.WithTablePrefix(prefix)}
+			for range 2 {
+				if err := pgsql.Migrate(t.Context(), database, options...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := pgsql.New(database, options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		})
+	})
 	t.Run("commit duplicate conflict and prune", func(t *testing.T) { testPostgresCommitAndPrune(t, database) })
 	t.Run("handler rollback can retry", func(t *testing.T) { testPostgresRollbackRetry(t, database) })
 	t.Run("attempt commit duplicate and conflict", func(t *testing.T) {
@@ -219,12 +236,12 @@ func testPostgresCustomNamespace(t *testing.T, database *sql.DB) {
 
 	var tableCount int
 	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM information_schema.tables
-		WHERE table_schema = $1 AND table_name IN ($2, $3, $4)`, schema,
-		"site_inbox", "site_inbox_attempts", "site_inbox_attempt_generations").Scan(&tableCount); err != nil {
+		WHERE table_schema = $1 AND table_name IN ($2, $3, $4, $5)`, schema,
+		"site_inbox", "site_inbox_attempts", "site_inbox_attempt_generations", "site_inbox_terminal").Scan(&tableCount); err != nil {
 		t.Fatalf("inspect custom tables: %v", err)
 	}
-	if tableCount != 3 {
-		t.Fatalf("custom table count = %d, want 3", tableCount)
+	if tableCount != 4 {
+		t.Fatalf("custom table count = %d, want 4", tableCount)
 	}
 	var defaultTableCount int
 	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM information_schema.tables
@@ -275,6 +292,24 @@ func testPostgresCustomNamespace(t *testing.T, database *sql.DB) {
 	}
 	if pruned, pruneErr := store.Prune(t.Context(), time.Now().Add(time.Minute), 10); pruneErr != nil || pruned != 3 {
 		t.Fatalf("custom prune = %d, %v", pruned, pruneErr)
+	}
+	testCustomTerminalRetention(t, store)
+}
+
+func testCustomTerminalRetention(t *testing.T, store *inbox.Store) {
+	t.Helper()
+	key := postgresKey(t, "custom-terminal")
+	fingerprint := postgresFingerprint("custom-terminal")
+	if _, err := store.ProcessAttempt(t.Context(), key, fingerprint, 1, func(context.Context) error {
+		return messenger.Permanent(errors.New("custom schema terminal"))
+	}); err == nil {
+		t.Fatal("terminal handler succeeded")
+	}
+	if err := store.ConfirmTerminalHandoff(t.Context(), key, fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := store.PruneTerminalAttempts(t.Context(), time.Now().Add(time.Hour), 1); err != nil || removed != 1 {
+		t.Fatalf("custom terminal prune: %d, %v", removed, err)
 	}
 }
 
@@ -339,6 +374,7 @@ func testPostgresDurableAttempts(t *testing.T, database *sql.DB) {
 	if !errors.Is(err, inbox.ErrAttemptsExhausted) || result.Attempt != 2 {
 		t.Fatalf("exhausted result=%#v err=%v", result, err)
 	}
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), key, fingerprint); err != nil {
 		t.Fatalf("forget terminal attempt: %v", err)
 	}
@@ -377,6 +413,7 @@ func testPostgresPermanentOutcome(t *testing.T, database *sql.DB) {
 		t.Fatalf("restored permanent attempt = %#v, calls=%d, error=%v", result, calls.Load(), err)
 	}
 
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), key, fingerprint); err != nil {
 		t.Fatalf("forget permanent outcome: %v", err)
 	}
@@ -435,6 +472,7 @@ func testPostgresAttemptGeneration(t *testing.T, database *sql.DB) {
 	assertExhausted(replayOne)
 	assertExhausted(replayTwo)
 
+	//nolint:staticcheck // Verify compatibility of the explicit destructive reset API.
 	if err := store.ForgetAttempt(t.Context(), replayOne, fingerprint); err != nil {
 		t.Fatalf("forget first replay generation: %v", err)
 	}
@@ -799,7 +837,7 @@ func newPostgresStore(t *testing.T, database *sql.DB) *inbox.Store {
 
 func resetPostgresFixtures(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if _, err := database.ExecContext(t.Context(), `TRUNCATE gomessenger_inbox_attempt_generations,
+	if _, err := database.ExecContext(t.Context(), `TRUNCATE gomessenger_inbox_terminal, gomessenger_inbox_attempt_generations,
 		gomessenger_inbox_attempts,
 		gomessenger_inbox,
 		gomessenger_inbox_test_commit_effect,

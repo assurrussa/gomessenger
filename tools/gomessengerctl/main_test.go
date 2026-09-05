@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	flagServer        = "--server"
 	flagFile          = "--file"
 	cmdValidate       = "validate"
 	cmdDLQ            = "dlq"
@@ -85,7 +86,7 @@ func TestDLQReplayDryRunDoesNotConnectOrExposeWireData(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		cmdDLQ, cmdReplay, flagFile, path,
-		"--server", "nats://127.0.0.1:1", "--timeout", "1ms",
+		flagServer, "nats://127.0.0.1:1", "--timeout", "1ms",
 	}, &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -106,7 +107,7 @@ func TestDLQReplayDryRunDoesNotConnectOrExposeWireData(t *testing.T) {
 func TestDLQInspectDoesNotExposePayloadHeadersOrHandlerError(t *testing.T) {
 	path, marker := writeReplayRecord(t)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{cmdDLQ, "inspect", flagFile, path}, &stdout, &stderr); code != exitOK {
+	if code := run([]string{cmdDLQ, commandInspect, flagFile, path}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	for _, forbidden := range []string{marker, "originalBase64", "originalHeaders", headerContentType, "rejected"} {
@@ -156,7 +157,7 @@ func TestDLQInspectAndReplayRedactWireValidationDetails(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{cmdDLQ, "inspect", flagFile, path}, &stdout, &stderr); code != exitOK {
+	if code := run([]string{cmdDLQ, commandInspect, flagFile, path}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("inspect code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if strings.Contains(stdout.String(), marker) || strings.Contains(stderr.String(), marker) {
@@ -212,7 +213,7 @@ func TestDLQReplayConfirmedWaitsForPubAckAndDeduplicates(t *testing.T) {
 	}
 
 	var firstOutput, secondOutput, stderr bytes.Buffer
-	args := []string{cmdDLQ, cmdReplay, flagFile, path, "--confirm", "--server", instance.ClientURL()}
+	args := []string{cmdDLQ, cmdReplay, flagFile, path, "--confirm", flagServer, instance.ClientURL()}
 	if code := run(args, &firstOutput, &stderr); code != exitOK {
 		t.Fatalf("first code=%d stdout=%q stderr=%q", code, firstOutput.String(), stderr.String())
 	}
@@ -266,4 +267,49 @@ func writeReplayRecord(t *testing.T) (path, marker string) {
 		t.Fatalf("write record: %v", err)
 	}
 	return path, marker
+}
+
+func TestQuarantineInspectionAndReplayRejectBeforeConnection(t *testing.T) {
+	record := natsadapter.DLQRecord{
+		SpecVersion: natsadapter.QuarantineSpecVersion, ConsumerID: "quarantine-worker",
+		Subject: testReplaySubject, Attempt: 1, FailureKind: "decode", Error: "private failure",
+		FailedAt: time.Unix(1700000001, 0).UTC(), WireMode: natsadapter.WireNative,
+		Quarantine: &natsadapter.QuarantineInfo{
+			Reason:      "record_too_large",
+			InputSHA256: strings.Repeat("a", 64), OriginalBytes: 2000000, HeaderCount: 65,
+			HeaderBytes: 500, OriginalOmitted: true,
+		},
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "quarantine.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{cmdDLQ, commandInspect, flagFile, path}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("inspect: %d %s", code, stderr.String())
+	}
+	var inspection dlqInspection
+	if err := json.Unmarshal(stdout.Bytes(), &inspection); err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Quarantine == nil || *inspection.Quarantine != *record.Quarantine || inspection.Replayable ||
+		inspection.OriginalBytes != 2000000 || inspection.ReplayError != natsadapter.ErrQuarantineReplay.Error() {
+		t.Fatalf("inspection: %+v", inspection)
+	}
+	for _, confirm := range []bool{false, true} {
+		stdout.Reset()
+		stderr.Reset()
+		args := []string{cmdDLQ, cmdReplay, flagFile, path, flagServer, "://invalid-before-network"}
+		if confirm {
+			args = append(args, "--confirm")
+		}
+		if code := run(args, &stdout, &stderr); code != exitFailure ||
+			!strings.Contains(stderr.String(), natsadapter.ErrQuarantineReplay.Error()) {
+			t.Fatalf("replay confirm=%t: %d %s", confirm, code, stderr.String())
+		}
+	}
 }

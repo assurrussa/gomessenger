@@ -647,10 +647,13 @@ func TestConsumerPermanentFailurePublishesDLQBeforeConfirmedAck(t *testing.T) {
 		MessageID:  mustID(t, "018f4f2c-4a00-7000-8000-000000000020"),
 	}
 	result, err := store.ProcessAttempt(
-		t.Context(), key, inbox.FingerprintEnvelope(record.Envelope), 1, func(context.Context) error { return nil },
+		t.Context(), key, inbox.FingerprintEnvelope(record.Envelope), 100, func(context.Context) error {
+			t.Error("terminal generation invoked handler after confirmed handoff")
+			return nil
+		},
 	)
-	if err != nil || result.Attempt != 1 {
-		t.Fatalf("fresh attempt after terminal hand-off = %#v, %v", result, err)
+	if !errors.Is(err, inbox.ErrAttemptTerminal) || !messenger.IsPermanent(err) || result.Attempt != 1 {
+		t.Fatalf("protected attempt after terminal handoff = %#v, %v", result, err)
 	}
 	cancel()
 	<-runDone

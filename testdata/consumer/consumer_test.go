@@ -82,8 +82,10 @@ func (backend) ProcessBatchAttempt(
 	handler inbox.BatchHandler,
 ) (inbox.BatchProcessResult, error) {
 	result, err := handler(ctx, items)
-	return inbox.BatchProcessResult{Items: make([]inbox.BatchItemOutcome, len(result.Items)),
-		HandlerMessages: len(items)}, err
+	return inbox.BatchProcessResult{
+		Items:           make([]inbox.BatchItemOutcome, len(result.Items)),
+		HandlerMessages: len(items),
+	}, err
 }
 
 func TestPublishedFacadeAndOptionalModulesCompileForConsumer(t *testing.T) {
@@ -220,3 +222,37 @@ var (
 	_ inbox.AttemptBackend             = backend{}
 	_ inbox.BatchAttemptBackend        = backend{}
 )
+
+func TestOptionalTerminalRetentionConsumerAPI(t *testing.T) {
+	store, err := inbox.New(backend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.SupportsTerminalRetention() {
+		t.Fatal("legacy backend unexpectedly requires retention")
+	}
+	if _, err := store.PruneTerminalAttempts(t.Context(), time.Now(), 1); !errors.Is(err, inbox.ErrTerminalRetentionUnsupported) {
+		t.Fatal(err)
+	}
+	var capability inbox.TerminalRetentionBackend = retentionBackend{}
+	if err := capability.ConfirmTerminalHandoff(t.Context(), inbox.Key{}, inbox.Fingerprint{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = messenger.OperationExpire
+	_ = natsadapter.QuarantineSpecVersion
+	if _, err := natsadapter.PlanDLQReplay(natsadapter.DLQRecord{
+		SpecVersion: natsadapter.QuarantineSpecVersion, Quarantine: &natsadapter.QuarantineInfo{Replayable: false},
+	}); !errors.Is(err, natsadapter.ErrQuarantineReplay) {
+		t.Fatal(err)
+	}
+}
+
+type retentionBackend struct{ backend }
+
+func (retentionBackend) ConfirmTerminalHandoff(context.Context, inbox.Key, inbox.Fingerprint) error {
+	return nil
+}
+
+func (retentionBackend) PruneTerminalAttempts(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}

@@ -32,6 +32,7 @@ type sqliteBatchGroup struct {
 }
 
 type sqliteBatchAttemptState struct {
+	kind     string
 	attempt  uint64
 	terminal bool
 }
@@ -75,10 +76,7 @@ func (b *backend) ProcessBatchAttempt(
 		return inbox.BatchProcessResult{}, err
 	}
 	if len(active) == 0 {
-		if err := tx.Commit(); err != nil {
-			return inbox.BatchProcessResult{}, fmt.Errorf("inbox/sqlite: commit filtered batch: %w", err)
-		}
-		return report, nil
+		return b.commitTerminalBatch(ctx, tx, report)
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].first < active[j].first })
 	handlerItems := make([]inbox.BatchItem, len(active))
@@ -157,6 +155,15 @@ func (b *backend) ProcessBatchAttempt(
 	if err := b.markSQLiteBatchTerminal(ctx, tx, permanent); err != nil {
 		return inbox.BatchProcessResult{}, err
 	}
+	return b.commitTerminalBatch(ctx, tx, report)
+}
+
+func (b *backend) commitTerminalBatch(ctx context.Context, tx *sql.Tx,
+	report inbox.BatchProcessResult,
+) (inbox.BatchProcessResult, error) {
+	if err := b.terminalSQL().Record(ctx, tx, report.Items, b.clock().UTC()); err != nil {
+		return inbox.BatchProcessResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return inbox.BatchProcessResult{}, fmt.Errorf("inbox/sqlite: commit batch transaction: %w", err)
 	}
@@ -231,11 +238,11 @@ func (b *backend) prepareSQLiteBatchIdentities(
 			})
 			continue
 		}
-		if state.terminal || state.attempt >= maxAttempts {
+		if state.terminal || state.attempt >= maxAttempts || state.kind != "" {
 			failureKind := inbox.FailureAttemptsExhausted
 			var itemErr error
 			itemErr = inbox.ErrAttemptsExhausted
-			if state.terminal {
+			if state.terminal || state.kind == inbox.FailurePermanent {
 				failureKind, itemErr = inbox.FailurePermanent, messenger.Permanent(inbox.ErrAttemptTerminal)
 			}
 			assignSQLiteBatchOutcome(outcomes, group, inbox.BatchItemOutcome{

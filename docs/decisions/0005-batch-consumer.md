@@ -48,7 +48,8 @@ fails the consumer closed.
 Deliveries with equal identity and canonical fingerprint coalesce. A completed
 Inbox identity is ACKed without entering the handler. Reusing an identity with
 a different fingerprint is an individual terminal DLQ outcome. Terminal and
-exhausted attempts are also filtered before invocation.
+exhausted attempts are also filtered before invocation and stay closed after terminal handoff or changes to the
+attempt limit; see [ADR-0006](0006-delivery-guarantees.md).
 
 One batch uses one Inbox/business SQL transaction. The handler first
 classifies the entire batch and performs business SQL only for the successful
@@ -83,8 +84,8 @@ library does not attempt to decrement a counter that may already be committed.
 `AttemptBackend` interfaces are unchanged. Batch constructors require it and
 fail closed when it is absent. PostgreSQL implements deterministic identity
 locking and set-based `unnest` mutations. SQLite uses a serializable
-transaction and bounded multi-row statements. Existing Inbox tables are
-sufficient; no migration is added.
+transaction and bounded multi-row statements. Batching itself reuses the existing attempt tables; terminal
+retention additionally requires the additive migration and optional `TerminalRetentionBackend` in ADR-0006.
 
 ### NATS
 
@@ -97,9 +98,11 @@ admission and flushes a partial batch immediately.
 After the SQL commit, ACKs use confirmed `DoubleAck` in a group bounded to 16
 operations per worker. Retry and defer use `NakWithDelay`. DLQ publication uses
 a deterministic message ID, waits for `PubAck`, and only then confirms the
-source delivery. A DLQ outage retains the affected worker slot; other workers
+source delivery. Both modes share DLQ preparation: normal records stay v1; unrepresentable or oversized replay
+captures become bounded, non-replayable quarantine v2 in the same subject. Internal preparation failure stops the
+consumer and removes readiness. A DLQ outage retains the affected worker slot; other workers
 continue. A failed source ACK is safe because redelivery is suppressed by the
-completed Inbox identity.
+completed Inbox identity or retained terminal generation.
 
 Commands use native envelopes. Events support native, structured CloudEvents,
 and binary CloudEvents, matching the existing single-message consumer.

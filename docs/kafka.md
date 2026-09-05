@@ -175,7 +175,9 @@ window, decode, Inbox attempt, batch handler, and Kafka transaction to preserve 
 its rebalance timeout is therefore sized dynamically to cover that complete worst-case processing window
 (`MaxWait + Timeout + FinalizationTimeout + 2*OperationTimeout + 5s` safety margin), assuming bounded application codec
 execution. `AllowRebalance` is invoked immediately once the Kafka transaction and any deferred partition pause
-complete, before executing best-effort terminal cleanup.
+complete, before recording best-effort terminal handoff confirmation. Terminal Inbox protection remains in place;
+confirmation failure leaves the generation ineligible for retention. Optional host-controlled retention and rollout are
+defined in [ADR-0006](decisions/0006-delivery-guarantees.md).
 Invalid control or envelope metadata and expired records enter transactional DLQ hand-off only after that release. A
 valid early retry does not invoke its codec until it is fetched again. `MaxAttempts` counts application handler
 invocations, not broker deliveries or `NotBefore` deferrals.
