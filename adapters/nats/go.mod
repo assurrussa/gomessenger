@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/assurrussa/gomessenger v0.3.0
-	github.com/assurrussa/gomessenger/adapters/inbox v0.2.2
+	github.com/assurrussa/gomessenger/adapters/inbox v0.3.0
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/nats-io/nats-server/v2 v2.14.5
 	github.com/nats-io/nats.go v1.53.1
@@ -39,7 +39,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/assurrussa/gomessenger => ../..
-
-replace github.com/assurrussa/gomessenger/adapters/inbox => ../inbox

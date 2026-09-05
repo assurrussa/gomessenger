@@ -2,6 +2,10 @@ github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/assurrussa/gobus v1.2.1 h1:1urjLfegz05kjKVfW3XM+tDgPCU7qoAC+rN/6O6Z8is=
 github.com/assurrussa/gobus v1.2.1/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
+github.com/assurrussa/gomessenger v0.3.0 h1:B2M2DhpsZdEO58ag2KxmRTxP+UbKw6BF2A+tlQbv388=
+github.com/assurrussa/gomessenger v0.3.0/go.mod h1:IaoCqFzCqMixe6vRb9yddMxloSlC/Rt6WHBE10c6VF4=
+github.com/assurrussa/gomessenger/adapters/inbox v0.3.0 h1:EO2kV1E0VG8XWXfqPUyKrv2uUc92849+rCTVLYaEKYQ=
+github.com/assurrussa/gomessenger/adapters/inbox v0.3.0/go.mod h1:LkutOFjIHh6o41j1/TicNeUf6qQu/Dje89jSC02l0JM=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
