@@ -125,12 +125,15 @@ func (r *Runtime) Run(ctx context.Context) error {
 		workers.Add(1)
 		go func(service namedService) {
 			defer workers.Done()
-			startedAt := time.Now().UTC()
-			results <- serviceResult{
+			result := serviceResult{
 				id:        service.id,
-				startedAt: startedAt,
-				err:       r.runManagedService(runContext, service),
+				startedAt: time.Now().UTC(),
+				err:       errors.New("messenger: service exited without returning"),
 			}
+			// Goexit runs defers but cannot be recovered as a panic. Always
+			// report termination so the supervisor can cancel remaining peers.
+			defer func() { results <- result }()
+			result.err = r.runManagedService(runContext, service)
 		}(configuredService)
 	}
 
@@ -267,15 +270,13 @@ func (r *Runtime) Readiness(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
 	}
-	r.mu.Lock()
-	state := r.state
-	r.mu.Unlock()
-	if state != runtimeRunning {
-		return ErrRuntimeNotRunning
+	if err := r.healthStateError(false); err != nil {
+		return err
 	}
-	return r.checkServices(ctx, "readiness", func(ctx context.Context, service namedService) error {
+	err := r.checkServices(ctx, "readiness", func(ctx context.Context, service namedService) error {
 		return service.service.Readiness(ctx)
 	})
+	return errors.Join(err, r.healthStateError(false))
 }
 
 // Liveness checks that Runtime has not terminated and invokes optional service
@@ -284,25 +285,17 @@ func (r *Runtime) Liveness(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
 	}
-	r.mu.Lock()
-	state := r.state
-	r.mu.Unlock()
-	switch state {
-	case runtimeRunning, runtimeDraining:
-	case runtimeClosed:
-		return ErrRuntimeClosed
-	case runtimeNew:
-		return ErrRuntimeNotRunning
-	default:
-		return ErrRuntimeNotRunning
+	if err := r.healthStateError(true); err != nil {
+		return err
 	}
-	return r.checkServices(ctx, "liveness", func(ctx context.Context, service namedService) error {
+	err := r.checkServices(ctx, "liveness", func(ctx context.Context, service namedService) error {
 		checker, ok := service.service.(LivenessChecker)
 		if !ok {
 			return nil
 		}
 		return checker.Liveness(ctx)
 	})
+	return errors.Join(err, r.healthStateError(true))
 }
 
 // DeepHealth performs explicit, potentially expensive service health and
@@ -311,18 +304,38 @@ func (r *Runtime) DeepHealth(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrInvalidMessage)
 	}
-	r.mu.Lock()
-	state := r.state
-	r.mu.Unlock()
-	if state != runtimeRunning {
-		return ErrRuntimeNotRunning
+	if err := r.healthStateError(false); err != nil {
+		return err
 	}
-	return r.checkServices(ctx, "deep health", func(ctx context.Context, service namedService) error {
+	err := r.checkServices(ctx, "deep health", func(ctx context.Context, service namedService) error {
 		if checker, ok := service.service.(DeepHealthChecker); ok {
 			return checker.DeepHealth(ctx)
 		}
 		return service.service.Readiness(ctx)
 	})
+	return errors.Join(err, r.healthStateError(false))
+}
+
+// Service checks may block while a concurrent drain or shutdown changes the
+// runtime state. Check both sides of those callbacks without holding mu while
+// calling external code; liveness alone remains valid during graceful drain.
+func (r *Runtime) healthStateError(liveness bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.state {
+	case runtimeRunning:
+		return nil
+	case runtimeDraining:
+		if liveness {
+			return nil
+		}
+	case runtimeClosed:
+		if liveness {
+			return ErrRuntimeClosed
+		}
+	case runtimeNew:
+	}
+	return ErrRuntimeNotRunning
 }
 
 func (r *Runtime) checkServices(

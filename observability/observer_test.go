@@ -23,7 +23,8 @@ const (
 func TestObserverRecordsMetricsAndExplicitTraceTiming(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	exporter := tracetest.NewInMemoryExporter()
-	provider := trace.NewTracerProvider(trace.WithSyncer(exporter))
+	// Keep this recording assertion independent of host OTEL_TRACES_SAMPLER settings.
+	provider := trace.NewTracerProvider(trace.WithSyncer(exporter), trace.WithSampler(trace.AlwaysSample()))
 	t.Cleanup(func() { _ = provider.Shutdown(t.Context()) })
 	observer, err := observability.New(observability.Config{Registerer: registry, TracerProvider: provider})
 	if err != nil {
