@@ -17,7 +17,25 @@ require_version() {
 }
 
 drop_replace() {
-	(cd "$1" && go mod edit -dropreplace="$2")
+	(
+		cd "$1"
+		# An unversioned -dropreplace leaves version-qualified directives intact.
+		# Inspect every old path and retain its optional version in the edit.
+		replacements="$(go mod edit -json | awk -v dependency="$2" '
+			/"Old": \{/ { in_old = 1; path = ""; version = ""; next }
+			in_old && /"Path":/ { path = $2; gsub(/[",]/, "", path) }
+			in_old && /"Version":/ { version = $2; gsub(/[",]/, "", version) }
+			in_old && /}/ {
+				if (path == dependency) {
+					print path (version == "" ? "" : "@" version)
+				}
+				in_old = 0
+			}
+		')"
+		for replacement in $replacements; do
+			go mod edit -dropreplace="$replacement"
+		done
+	)
 }
 
 workspace_replace() {
@@ -117,6 +135,22 @@ if [ "$layer" = final ]; then
 		done
 	done
 	modules="$modules examples/durable-postgres-nats testdata/consumer testdata/e2e"
+fi
+
+# The checkout-only E2E fixture replaces adapters with this working tree. Its
+# direct requirements must include their already-published prerequisites so
+# GOWORK=off source checks stay tidy between dependency-layer publications.
+# Never advance a fixture requirement to a tag that this layer has not checked.
+if [ "$layer" != final ]; then
+	require_version testdata/e2e github.com/assurrussa/gomessenger "$version"
+	for dependency in github.com/assurrussa/outbox github.com/assurrussa/outbox/backends/sqlite; do
+		require_version testdata/e2e "$dependency" "$outbox_version"
+		drop_replace testdata/e2e "$dependency"
+	done
+	if [ "$layer" = transports ]; then
+		require_version testdata/e2e github.com/assurrussa/gomessenger/adapters/inbox "$version"
+	fi
+	modules="$modules testdata/e2e"
 fi
 
 workspace_replace github.com/assurrussa/gomessenger .

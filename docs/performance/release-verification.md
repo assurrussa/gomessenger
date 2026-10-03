@@ -1,6 +1,9 @@
 # Release capacity verification
 
-To verify the candidate at 1,500 msg/s, run three independent confirmations for each advertised payload profile on
+This procedure records the v0.3.0 capacity baseline with published Outbox v0.15.0. It does not establish a v0.3.1
+capacity result; a new claim needs fresh evidence for its exact selected dependency graph.
+
+To reproduce the v0.3.0 candidate at 1,500 msg/s, run three independent confirmations for each advertised payload profile on
 the exact clean release-candidate checkout. The September 5 `SCREEN_ONLY` result is not a substitute for this series.
 This check establishes the tested rate and latency floor; it does not measure maximum throughput or a batching speedup.
 
@@ -10,7 +13,7 @@ This check establishes the tested rate and latency floor; it does not measure ma
   prepare the complete module graph and pass `release-readiness` and the published-consumer probe. A pre-tag run must
   remain labelled with its exact candidate commit and checkout-local scope.
 - Use clean GoMessenger and adjacent `outbox` checkouts. Preserve any existing local changes by using an isolated clean
-  pair instead of resetting the working repositories. The current runner records both checkouts even though Outbox
+  pair instead of resetting the working repositories. The v0.3.0 runner records both checkouts even though Outbox
   resolves from published v0.15.0; require `outboxVersion=v0.15.0` in each runtime report.
 - Run the source gate once on that state and the PostgreSQL/Kafka correctness gates from the release process.
   The candidate's already completed CI can supply the same-commit correctness evidence; do not reuse an older commit's
@@ -82,5 +85,5 @@ public upload because environment and logs may contain host-specific information
 
 For a claim about maximum throughput or a batch speedup, use the matched frontier/matrix procedure in the
 [performance contract](README.md), with its controls and three confirmations. `capacity-batch-proof` currently accepts
-only `checkout-workspace` evidence with a local Outbox development replacement; it rejects published Outbox v0.15.0.
+only `checkout-workspace` evidence with a local Outbox development replacement; it rejects the published Outbox graph, including v0.15.0 and v0.16.0.
 Do not use that validator as a release check for the current published dependency graph.

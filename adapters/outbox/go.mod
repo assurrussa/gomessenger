@@ -3,8 +3,8 @@ module github.com/assurrussa/gomessenger/adapters/outbox
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.3.0
-	github.com/assurrussa/outbox v0.15.0
+	github.com/assurrussa/gomessenger v0.3.1
+	github.com/assurrussa/outbox v0.16.0
 )
 
 require (

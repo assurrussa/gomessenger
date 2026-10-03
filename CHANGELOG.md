@@ -4,8 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.3.1]
 
-See the [release and upgrade notes](docs/releases/v0.3.1.md). Publication and
-published-consumer verification are pending.
+See the [release and upgrade notes](docs/releases/v0.3.1.md). The root is published; nested module publication and
+complete published-consumer verification are pending.
 
 ### Fixed
 
@@ -13,6 +13,11 @@ published-consumer verification are pending.
   shutdown instead of leaving the runtime supervisor waiting;
 - runtime health probes recheck lifecycle state after service callbacks: readiness and deep health fail after drain
   or closure, while liveness remains valid during drain and fails after closure; callback errors retain classification.
+
+### Dependencies
+
+- staged nested-module preparation adopts published Outbox root/backend v0.16.0 with worker-exit supervision and
+  transaction-finalization fixes; the immutable root v0.3.1 has no Outbox dependency.
 
 ## [0.3.0] - 2026-09-06
 

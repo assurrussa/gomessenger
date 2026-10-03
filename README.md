@@ -82,7 +82,7 @@ may describe unreleased APIs that are not present in that release line. Use the 
 [Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.3.0) for the exact release API, or use the checkout
 workflow below when evaluating unreleased changes.
 
-Keep every GoMessenger module in one consumer on the same version. The Outbox adapter requires Outbox `v0.15.0`; the
+Keep every GoMessenger module in one consumer on the same version. The v0.3.0 Outbox adapter requires Outbox `v0.15.0`; the
 host selects and installs its matching database backend separately. To evaluate the current checkout instead:
 
 ```sh
@@ -766,8 +766,8 @@ Inbox-dependent transports, and finally the CLI and checkout fixtures. After the
 resolve through the Go proxy, finalize and check the complete graph:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
 make check
 ```
 
