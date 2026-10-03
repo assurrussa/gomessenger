@@ -17,7 +17,25 @@ require_version() {
 }
 
 drop_replace() {
-	(cd "$1" && go mod edit -dropreplace="$2")
+	(
+		cd "$1"
+		# An unversioned -dropreplace leaves version-qualified directives intact.
+		# Inspect every old path and retain its optional version in the edit.
+		replacements="$(go mod edit -json | awk -v dependency="$2" '
+			/"Old": \{/ { in_old = 1; path = ""; version = ""; next }
+			in_old && /"Path":/ { path = $2; gsub(/[",]/, "", path) }
+			in_old && /"Version":/ { version = $2; gsub(/[",]/, "", version) }
+			in_old && /}/ {
+				if (path == dependency) {
+					print path (version == "" ? "" : "@" version)
+				}
+				in_old = 0
+			}
+		')"
+		for replacement in $replacements; do
+			go mod edit -dropreplace="$replacement"
+		done
+	)
 }
 
 workspace_replace() {

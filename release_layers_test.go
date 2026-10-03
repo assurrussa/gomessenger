@@ -153,32 +153,43 @@ func TestReleasePartialLayersRemoveAndRejectExternalE2EReplacements(t *testing.T
 		{releaseTransportsLayer, releaseOutboxModule},
 		{releaseTransportsLayer, releaseOutboxSQLiteModule},
 	} {
-		t.Run(test.layer+"/"+test.dependency, func(t *testing.T) {
-			dir, env := releaseScriptFixture(t)
-			path := filepath.Join(dir, releaseE2EModule, "go.mod")
-			before := readReleaseFile(t, path)
-			replacement := "\nreplace " + test.dependency + " => ./external-checkout\n"
-			writeReleaseFile(t, path, before+replacement)
-			err := runReleaseScriptWithOutbox(t, dir, env, "prepare-release-modules.sh", test.layer, releaseTestOutboxVersion)
-			if err != nil {
-				t.Fatalf("prepare %s: %v", test.layer, err)
-			}
-			after := readReleaseFile(t, path)
-			if strings.Contains(after, "replace "+test.dependency+" ") {
-				t.Fatal("preparation retained an external replacement")
-			}
-			assertReleaseFixturePreservedDependencies(t, before, after, []string{
-				"github.com/assurrussa/gomessenger",
-				"github.com/assurrussa/gomessenger/adapters/inbox",
-				releaseOutboxModule,
-				releaseOutboxSQLiteModule,
+		for _, version := range []string{"", releaseTestOutboxVersion, "v0.97.97"} {
+			t.Run(test.layer+"/"+test.dependency+"@"+version, func(t *testing.T) {
+				assertReleaseExternalReplacement(t, test.layer, test.dependency, version)
 			})
-			writeReleaseFile(t, path, after+replacement)
-			err = runReleaseScriptWithOutbox(t, dir, env, "check-release-modules.sh", test.layer, releaseTestOutboxVersion)
-			if err == nil {
-				t.Fatal("readiness accepted an external replacement")
-			}
-		})
+		}
+	}
+}
+
+func assertReleaseExternalReplacement(t *testing.T, layer, dependency, version string) {
+	t.Helper()
+	dir, env := releaseScriptFixture(t)
+	path := filepath.Join(dir, releaseE2EModule, "go.mod")
+	before := readReleaseFile(t, path)
+	qualifier := ""
+	if version != "" {
+		qualifier = " " + version
+	}
+	replacement := "\nreplace " + dependency + qualifier + " => ./external-checkout\n"
+	writeReleaseFile(t, path, before+replacement)
+	err := runReleaseScriptWithOutbox(t, dir, env, "prepare-release-modules.sh", layer, releaseTestOutboxVersion)
+	if err != nil {
+		t.Fatalf("prepare %s: %v", layer, err)
+	}
+	after := readReleaseFile(t, path)
+	if strings.Contains(after, "replace "+dependency+" ") {
+		t.Fatal("preparation retained an external replacement")
+	}
+	assertReleaseFixturePreservedDependencies(t, before, after, []string{
+		"github.com/assurrussa/gomessenger",
+		"github.com/assurrussa/gomessenger/adapters/inbox",
+		releaseOutboxModule,
+		releaseOutboxSQLiteModule,
+	})
+	writeReleaseFile(t, path, after+replacement)
+	err = runReleaseScriptWithOutbox(t, dir, env, "check-release-modules.sh", layer, releaseTestOutboxVersion)
+	if err == nil {
+		t.Fatal("readiness accepted an external replacement")
 	}
 }
 

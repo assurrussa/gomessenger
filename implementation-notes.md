@@ -9,7 +9,7 @@
   without external replacements. Later GoMessenger adapter tags remain unchanged, and their checkout replacements are retained.
 - The nested v0.3.1 layers adopt published Outbox v0.16.0 after exact-tag public graph and checksum verification.
 - Readiness rejects stale prerequisite pins and external replacements. Regression tests cover both partial layers, retained replacements and
-  later dependencies, removal/rejection of external Outbox root/SQLite replacements, and the existing preflight tests preserve the no-mutation guarantee for unavailable tags.
+  later dependencies, removal/rejection of unversioned and version-qualified external Outbox root/SQLite replacements, and the existing preflight tests preserve the no-mutation guarantee for unavailable tags.
 
 ## 2026-09-06 — v0.3.0 release publication
 
