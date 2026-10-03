@@ -1,5 +1,17 @@
 # Implementation notes
 
+## 2026-10-03 — v0.3.1 release publication
+
+- Published immutable dependency layers: root at `8d2501c` (PR #32), Inbox/Outbox adapter/observability at `54bfbd6b`
+  (PR #33), NATS/Kafka at `197589d0` (PR #34), and CLI at `b8fec0b8` (PR #35). Every final head completed Codex review
+  without unresolved findings and passed required CI; all merge trees passed post-merge CI and benchmarks.
+- Completed the canonical published consumer with Go 1.27.0, including public facade/adapter tests and CLI installation.
+  Exact origins and checksums match all seven tags; the natural combined graph selects Outbox v0.16.0. Anonymous
+  verification used the public proxy/checksum database without local replacements or VCS fallback; its isolated cache
+  was initially empty for the first module-layer probe and reused thereafter.
+- Updated adoption commands, Go Reference links and release metadata only after published verification passed.
+  The real-service pilot remains pending, and v0.3.0 capacity evidence is not presented as a new v0.3.1 result.
+
 ## 2026-10-03 — v0.3.1 dependency-layer fixture alignment
 
 - Root v0.3.1 is published. Preparing Inbox, Outbox adapter and observability exposed an untidy checkout-only E2E graph:
