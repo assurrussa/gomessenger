@@ -2,9 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.1]
 
-Planned release: **v0.3.0**. See the [release and upgrade notes](docs/releases/v0.3.0.md).
+See the [release and upgrade notes](docs/releases/v0.3.1.md). Publication and
+published-consumer verification are pending.
+
+### Fixed
+
+- managed services that call `runtime.Goexit` now report an unexpected non-returning exit, cancel peers, and complete
+  shutdown instead of leaving the runtime supervisor waiting;
+- runtime health probes recheck lifecycle state after service callbacks: readiness and deep health fail after drain
+  or closure, while liveness remains valid during drain and fails after closure; callback errors retain classification.
+
+## [0.3.0] - 2026-09-06
+
+See the [release and upgrade notes](docs/releases/v0.3.0.md).
 
 ### Added
 

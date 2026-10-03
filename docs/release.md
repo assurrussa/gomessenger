@@ -5,9 +5,9 @@ clean release consumer can resolve the complete facade.
 
 ## Release scope
 
-The current preparation targets [v0.3.0](releases/v0.3.0.md): supported producer/relay/consumer batches, quarantine v2,
-terminal Inbox protection and execution-time expiry. Keep the published README install commands on v0.2.2 until the
-new release passes published verification.
+The current preparation targets [v0.3.1](releases/v0.3.1.md): managed-service non-returning exit supervision and
+lifecycle-safe runtime health probes. Keep the published README install commands on v0.3.0 until the new release
+passes published verification.
 
 Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
 candidates under ADR-0003. The `site` article-publication audit pilot requires all used modules to resolve at the same
@@ -65,8 +65,8 @@ source files. Preparation never creates or pushes tags.
 Before the root tag, keep nested modules on their current development graph and run:
 
 ```sh
-make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
-make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
+make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
+make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
 make check-workspace
 ```
 
@@ -76,8 +76,8 @@ and tidies only the root module. It does not pin nested modules to an unavailabl
 After the reviewed root tag resolves through the Go proxy, prepare the root-dependent modules:
 
 ```sh
-make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
-make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
+make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
+make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
 make check
 ```
 
@@ -85,8 +85,8 @@ This layer updates and removes development replacements in `adapters/inbox`, `ad
 Review and commit the layer, then publish those three tags. After the Inbox tag resolves, prepare the transports:
 
 ```sh
-make release-ready VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
-make release-readiness VERSION=v0.3.0 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
+make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
+make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
 make check
 ```
 
