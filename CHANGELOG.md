@@ -2,10 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.1]
+## [0.3.1] - 2026-10-03
 
-See the [release and upgrade notes](docs/releases/v0.3.1.md). The root is published; nested module publication and
-complete published-consumer verification are pending.
+See the [release and upgrade notes](docs/releases/v0.3.1.md). All seven module tags are published; the complete
+published-consumer gate, CLI installation and exact origin/checksum verification passed.
 
 ### Fixed
 
@@ -16,7 +16,7 @@ complete published-consumer verification are pending.
 
 ### Dependencies
 
-- staged nested-module preparation adopts published Outbox root/backend v0.16.0 with worker-exit supervision and
+- the Outbox adapter and durable fixtures adopt published Outbox root/backend v0.16.0 with worker-exit supervision and
   transaction-finalization fixes; the immutable root v0.3.1 has no Outbox dependency.
 
 ## [0.3.0] - 2026-09-06

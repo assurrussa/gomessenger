@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/assurrussa/gomessenger/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/assurrussa/gomessenger)](https://github.com/assurrussa/gomessenger/releases/latest)
-[![Go Reference](https://pkg.go.dev/badge/github.com/assurrussa/gomessenger.svg)](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.3.0)
+[![Go Reference](https://pkg.go.dev/badge/github.com/assurrussa/gomessenger.svg)](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.3.1)
 ![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -12,8 +12,9 @@ Build commands, local queries, and events with explicit transaction, delivery, r
 
 Transactional Outbox/Inbox, NATS JetStream, Kafka, bounded retries, DLQ/replay, tracing, and managed lifecycle.
 
-> **Release status:** `v0.3.0` is the current release line. Source validation, dependency-ordered tag publication, and
-> the clean published-consumer gate are separate release evidence. The real-service pilot remains pending, so
+> **Release status:** all seven `v0.3.1` module tags are published and the clean published-consumer gate passed.
+> Source checks and published-module verification are recorded in the [release notes](docs/releases/v0.3.1.md).
+> The real-service pilot remains pending, so
 > controlled repository gates are not a production-readiness claim. The current checkout may accumulate follow-up
 > changes beyond that release line.
 
@@ -49,40 +50,40 @@ choosing an abstraction.
 GoMessenger requires Go 1.27+. For local commands, queries, and events:
 
 ```sh
-go get github.com/assurrussa/gomessenger@v0.3.0
+go get github.com/assurrussa/gomessenger@v0.3.1
 ```
 
 For durable NATS JetStream delivery with Inbox and transactional Outbox integration:
 
 ```sh
-go get github.com/assurrussa/gomessenger@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/inbox@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/nats@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/outbox@v0.3.0
+go get github.com/assurrussa/gomessenger@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/inbox@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/nats@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/outbox@v0.3.1
 ```
 
 For durable Kafka delivery with Inbox and transactional Outbox integration:
 
 ```sh
-go get github.com/assurrussa/gomessenger@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/inbox@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/kafka@v0.3.0 \
-  github.com/assurrussa/gomessenger/adapters/outbox@v0.3.0
+go get github.com/assurrussa/gomessenger@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/inbox@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/kafka@v0.3.1 \
+  github.com/assurrussa/gomessenger/adapters/outbox@v0.3.1
 ```
 
 Optional telemetry and CLI modules use the same release version:
 
 ```sh
-go get github.com/assurrussa/gomessenger/observability@v0.3.0
-go install github.com/assurrussa/gomessenger/tools/gomessengerctl@v0.3.0
+go get github.com/assurrussa/gomessenger/observability@v0.3.1
+go install github.com/assurrussa/gomessenger/tools/gomessengerctl@v0.3.1
 ```
 
-These commands target the exact path-qualified `v0.3.0` tags. The rest of this README tracks the current checkout and
+These commands target the exact path-qualified `v0.3.1` tags. The rest of this README tracks the current checkout and
 may describe unreleased APIs that are not present in that release line. Use the versioned
-[Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.3.0) for the exact release API, or use the checkout
+[Go Reference](https://pkg.go.dev/github.com/assurrussa/gomessenger@v0.3.1) for the exact release API, or use the checkout
 workflow below when evaluating unreleased changes.
 
-Keep every GoMessenger module in one consumer on the same version. The v0.3.0 Outbox adapter requires Outbox `v0.15.0`; the
+Keep every GoMessenger module in one consumer on the same version. The v0.3.1 Outbox adapter requires Outbox `v0.16.0`; the
 host selects and installs its matching database backend separately. To evaluate the current checkout instead:
 
 ```sh
@@ -320,9 +321,9 @@ GoMessenger requires Go 1.27 because the builder and messenger expose generic me
 | `.../observability` | Prometheus, OpenTelemetry spans, W3C Trace Context |
 | `.../tools/gomessengerctl` | manifest/topology validation, plan/apply, DLQ inspect/replay |
 
-The module set uses synchronized path-qualified `v0.3.0` tags. Release completion requires every tag above plus the
-clean post-publication consumer probe; neither is inferred from source-only checks. Outbox root and its
-PostgreSQL/SQLite backend tags at `v0.15.0` are the pinned durable-producer dependencies. During repository development
+The complete module set uses synchronized path-qualified `v0.3.1` tags and passed the clean post-publication consumer
+probe, including installation of the published CLI. Outbox root and its
+PostgreSQL/SQLite backend tags at `v0.16.0` are the pinned durable-producer dependencies. During repository development
 `go.work` selects local GoMessenger modules; published consumers use matching path-qualified tags and no local
 `replace` directives. See the [release process](docs/release.md) for dependency order and verification.
 
@@ -760,7 +761,8 @@ Outbox-to-JetStream-to-Inbox path (using embedded JetStream for Docker-free loca
 Docker entry point against official Apache Kafka 4.1.2 and 4.3.1 images in KRaft mode (ZooKeeper-less); hosted CI runs
 each version in an independent matrix job. Both NATS and Kafka adapters share complete functional E2E test parity under
 the race detector (Outbox staging, transactional relay, Inbox deduplication, retry tiers, DLQ, and replay). Fixed-rate
-capacity benchmarking (1,500 msg/s floor) is currently published for PostgreSQL + NATS. Run the full source gate before
+capacity benchmarking (1,500 msg/s floor) is published for the v0.3.0 PostgreSQL + NATS baseline; it is not a fresh
+v0.3.1 capacity result. Run the full source gate before
 publishing the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
 Inbox-dependent transports, and finally the CLI and checkout fixtures. After the root, Inbox, NATS, and Kafka tags
 resolve through the Go proxy, finalize and check the complete graph:

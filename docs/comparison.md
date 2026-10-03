@@ -40,9 +40,9 @@ system problem.
   implement GoMessenger's custom `Route` / `BatchRoute` with append-only streaming plus an external CDC engine
   (Debezium/WAL streamer) or direct broker streaming instead of the standard polling outbox.
 
-GoMessenger [`v0.3.0`](https://github.com/assurrussa/gomessenger/releases/tag/v0.3.0) is the current release line.
-Release completion requires its dependency-ordered tags and clean published-consumer probe; its real-service pilot is
-still pending. Evaluate the checkout with the
+GoMessenger [`v0.3.1`](https://github.com/assurrussa/gomessenger/releases/tag/v0.3.1) is the current release line.
+All dependency-ordered module tags are published and the clean published-consumer probe passed; the real-service pilot
+is still pending. Evaluate the checkout with the
 [PostgreSQL + NATS durable demo](../examples/durable-postgres-nats), use the [contracts](contracts.md) to review exact
 guarantees, and use the [release process](release.md) to distinguish source gates, published-module proof, and the
 separate operational pilot.
