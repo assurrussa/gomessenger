@@ -396,7 +396,8 @@ arbitrary headers.
 Managed services implement `Run`, `Readiness`, `BeginDrain`, and `Shutdown`.
 
 1. `Run` starts all registered services and cancels peers if one terminates unexpectedly. It emits a service observation
-   and does not restart the failed service.
+   and does not restart the failed service. A service that calls `runtime.Goexit` is reported as an unexpected
+   non-returning exit, not a recovered panic, and follows the same peer-cancellation and shutdown path.
 2. `Readiness` is a lightweight admission probe. Kafka consumers require all transactional workers plus a broker ping;
    NATS consumers require a running pull loop and connected client. It does not rescan topology on every probe.
 3. `DeepHealth` is the explicit low-frequency diagnostic for exact adapter topology: Kafka topic presence, equal
@@ -407,6 +408,11 @@ Managed services implement `Run`, `Readiness`, `BeginDrain`, and `Shutdown`.
    startup; a service drained before `Run` does not begin pulling.
 5. `Shutdown` waits for accepted work. If its context expires, the runtime force-cancels service contexts and returns
    the context error. Service shutdown calls run concurrently; joined errors retain deterministic service-ID order.
+
+Runtime health probes recheck lifecycle state after service callbacks finish. A concurrent drain or shutdown observed
+at that final check makes `Readiness` and `DeepHealth` fail; `Liveness` remains valid during drain but fails after closure.
+Service probe errors remain available through `errors.Is`/`errors.As`. The final state check is a snapshot, not a promise
+that the runtime cannot transition immediately afterward.
 
 `Shutdown` before `Run` closes services synchronously; it does not wait for a run loop that was never started.
 
