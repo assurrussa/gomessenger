@@ -40,15 +40,15 @@ published release version and remains a separate service integration task.
    a new completed result.
 
 `make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox;
-its root and backend dependencies resolve at v0.15.0. `make check` uses `GOWORK=off`, but development replacements in
+the v0.3.1 modules layer selects Outbox root/SQLite v0.16.0, while the remaining consumer/example pins advance in the final layer. `make check` uses `GOWORK=off`, but development replacements in
 individual `go.mod` files still apply. Before final release preparation, either source gate can pass without proving
 that an external consumer can resolve the new GoMessenger APIs. The final `release-readiness` and published-consumer
 gates close that boundary.
 
 ## Prepare exact module requirements
 
-The GoMessenger outbox adapter depends on the unified outbox v0.15 contract. Outbox root and backend `v0.15.0` tags are
-already published. The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
+The GoMessenger outbox adapter uses the compatible unified Outbox contract. Outbox root and backend `v0.16.0` tags are
+already published; the v0.3.1 nested release layers adopt their worker-exit and transaction-finalization fixes. The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
 able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
 is pinned.
 
@@ -62,11 +62,12 @@ Every preparation checks the selected layer's published prerequisites before edi
 each affected module with `GOWORK=off`, and checks that layer's requirements. A failed prerequisite check changes no
 source files. Preparation never creates or pushes tags.
 
-Before the root tag, keep nested modules on their current development graph and run:
+The immutable root v0.3.1 tag was published with the existing Outbox v0.15.0 prerequisites; its own module has no
+Outbox dependency. For a future root release, keep nested modules on their current development graph and run:
 
 ```sh
-make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
-make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=root
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=root
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=root
 make check-workspace
 ```
 
@@ -76,26 +77,31 @@ and tidies only the root module. It does not pin nested modules to an unavailabl
 After the reviewed root tag resolves through the Go proxy, prepare the root-dependent modules:
 
 ```sh
-make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
-make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=modules
+make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=modules
+make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=modules
 make check
 ```
 
 This layer updates and removes development replacements in `adapters/inbox`, `adapters/outbox`, and `observability`.
-Review and commit the layer, then publish those three tags. After the Inbox tag resolves, prepare the transports:
+It also advances the checkout-only E2E fixture's root requirement and selected Outbox root/SQLite pair to their
+already-published versions, preserving its GoMessenger path replacements and all later adapter requirements. Review and commit the layer, then
+publish those three tags. After the Inbox tag resolves, prepare the transports:
 
 ```sh
-make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
-make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.15.0 RELEASE_LAYER=transports
+make release-ready VERSION=v0.3.1 OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=transports
+make release-readiness VERSION=v0.3.1 OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=transports
 make check
 ```
 
-This layer updates `adapters/nats` and `adapters/kafka` while leaving the CLI and fixtures unchanged. Review and commit
-the layer, then publish both transport tags. After all six root/adapter/observability tags resolve, finalize the graph:
+This layer updates `adapters/nats` and `adapters/kafka` plus the checkout-only E2E fixture's already-published root,
+Inbox and selected Outbox root/SQLite prerequisites. The fixture keeps its GoMessenger path replacements; its other
+adapter requirements, the CLI,
+the external consumer and the durable example wait until the final layer. Review and commit the layer, then publish
+both transport tags. After all six root/adapter/observability tags resolve, finalize the graph:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.15.0
+make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
+make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
 make check
 ```
 

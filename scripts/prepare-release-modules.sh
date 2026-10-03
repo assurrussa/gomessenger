@@ -119,6 +119,22 @@ if [ "$layer" = final ]; then
 	modules="$modules examples/durable-postgres-nats testdata/consumer testdata/e2e"
 fi
 
+# The checkout-only E2E fixture replaces adapters with this working tree. Its
+# direct requirements must include their already-published prerequisites so
+# GOWORK=off source checks stay tidy between dependency-layer publications.
+# Never advance a fixture requirement to a tag that this layer has not checked.
+if [ "$layer" != final ]; then
+	require_version testdata/e2e github.com/assurrussa/gomessenger "$version"
+	for dependency in github.com/assurrussa/outbox github.com/assurrussa/outbox/backends/sqlite; do
+		require_version testdata/e2e "$dependency" "$outbox_version"
+		drop_replace testdata/e2e "$dependency"
+	done
+	if [ "$layer" = transports ]; then
+		require_version testdata/e2e github.com/assurrussa/gomessenger/adapters/inbox "$version"
+	fi
+	modules="$modules testdata/e2e"
+fi
+
 workspace_replace github.com/assurrussa/gomessenger .
 for dependency in adapters/inbox adapters/kafka adapters/nats adapters/outbox observability; do
 	workspace_replace "github.com/assurrussa/gomessenger/$dependency" "./$dependency"

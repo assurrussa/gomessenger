@@ -3,7 +3,7 @@ module github.com/assurrussa/gomessenger/adapters/inbox
 go 1.27.0
 
 require (
-	github.com/assurrussa/gomessenger v0.3.0
+	github.com/assurrussa/gomessenger v0.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	modernc.org/sqlite v1.57.0
 )

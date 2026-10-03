@@ -102,6 +102,18 @@ case "$layer" in
 		check_requirement adapters/nats github.com/assurrussa/gomessenger/adapters/inbox "$version"
 		;;
 esac
+case "$layer" in
+	modules|transports)
+		check_requirement testdata/e2e github.com/assurrussa/gomessenger "$version"
+		for dependency in github.com/assurrussa/outbox github.com/assurrussa/outbox/backends/sqlite; do
+			check_requirement testdata/e2e "$dependency" "$outbox_version"
+			check_dependency_no_replace testdata/e2e "$dependency"
+		done
+		if [ "$layer" = transports ]; then
+			check_requirement testdata/e2e github.com/assurrussa/gomessenger/adapters/inbox "$version"
+		fi
+		;;
+esac
 if [ "$layer" != final ]; then
 	exit 0
 fi

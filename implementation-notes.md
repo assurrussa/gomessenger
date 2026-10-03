@@ -1,5 +1,16 @@
 # Implementation notes
 
+## 2026-10-03 — v0.3.1 dependency-layer fixture alignment
+
+- Root v0.3.1 is published. Preparing Inbox, Outbox adapter and observability exposed an untidy checkout-only E2E graph:
+  its local adapters required the new root while its direct root requirement stayed on v0.3.0.
+- Partial preparation now advances only E2E prerequisites already verified as published: root in the modules layer;
+  root and Inbox in the transports layer. Both partial layers align the selected published Outbox root/SQLite pair
+  without external replacements. Later GoMessenger adapter tags remain unchanged, and their checkout replacements are retained.
+- The nested v0.3.1 layers adopt published Outbox v0.16.0 after exact-tag public graph and checksum verification.
+- Readiness rejects stale prerequisite pins and external replacements. Regression tests cover both partial layers, retained replacements and
+  later dependencies, removal/rejection of external Outbox root/SQLite replacements, and the existing preflight tests preserve the no-mutation guarantee for unavailable tags.
+
 ## 2026-09-06 — v0.3.0 release publication
 
 - Published all GoMessenger v0.3.0 dependency layers in reviewed sequence: root `v0.3.0` on `843545f`, modules `adapters/inbox/v0.3.0`, `adapters/outbox/v0.3.0`, `observability/v0.3.0` (PR #28), transports `adapters/nats/v0.3.0`, `adapters/kafka/v0.3.0` (PR #29), and final CLI `tools/gomessengerctl/v0.3.0`.
