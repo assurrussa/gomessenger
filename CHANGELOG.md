@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- local command, event, and query terminal handlers retain canonical metadata and child lineage when global middleware
+  replaces the context; the replacement's other values, deadlines, and cancellation are preserved.
+
+### Added
+
+- NATS `HandlerConfig.MaxAckPending` explicitly controls the shared durable's global outstanding-ACK window separately
+  from per-replica worker/prefetch bounds. Zero preserves the previous default; negative values are rejected and topology
+  mismatches remain strict conflicts. Existing unkeyed configuration literals need to be updated to keyed form.
+
 ## [0.3.1] - 2026-10-03
 
 See the [release and upgrade notes](docs/releases/v0.3.1.md). All seven module tags are published; the complete

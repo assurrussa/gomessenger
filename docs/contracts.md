@@ -230,7 +230,10 @@ offset; unrelated polled records are rewound. Neither transport promises global 
 Global middleware receives `(ctx, metadata, handlerID, next)` for local query/command/event and durable handlers. The
 first registered item is the outermost. It may short-circuit or pass a replacement context, but may invoke `next` at
 most once. Metadata passed to middleware is a copy, including a cloned header map. Nil middleware is rejected at
-build/configuration time.
+build/configuration time. At the terminal local handler, the original canonical metadata is installed on the
+replacement context before building the typed `Message`. This preserves message identity and child lineage even if
+middleware passes `context.Background()` or installs different metadata. The replacement context's other values,
+deadline, and cancellation remain in force.
 
 `HandlerMiddleware[T]` and `ChainHandler` provide a separate typed decorator layer. Typed and global middleware do not
 change message identity, canonical bytes, inbox keys, or acknowledgement ordering.
@@ -271,6 +274,20 @@ separate connection-liveness mechanism and remain within the NATS client's suppo
 is recoverable: the NATS client issues a new pull and the service continues instead of terminating the managed runtime.
 The Inbox transaction deadline is `Timeout + FinalizationTimeout`; finalization defaults to 5 seconds and may be raised
 for slow commit or rollback without extending the application handler deadline.
+
+For JetStream, `HandlerConfig.MaxAckPending` is a global outstanding-acknowledgement limit for one durable consumer
+across all process replicas. A positive value is independent of local `Concurrency` and batch size; every replica sharing
+that durable must declare the same effective value. Zero retains the legacy default: `Concurrency` in single-message
+mode, or `Concurrency * BatchConfig.MaxMessages` in batch mode. Negative values, including the broker's unlimited
+sentinel, are invalid. Local workers and pull/prefetch bounds still derive only from local concurrency and batch limits;
+a larger global window never enlarges them. A smaller global window is valid and intentionally limits delivery.
+Outstanding acknowledgements include prefetched deliveries, not only active handlers. The host sizes the shared window
+for the intended deployment; no per-replica fairness or utilization guarantee follows from a particular value.
+
+The topology planner, consumer startup, and deep health compare the effective `MaxAckPending` exactly. A mismatch is a
+topology conflict, including an increase; consumers do not update an existing durable automatically. Hosts coordinate
+window changes and replica rollout. Zero/default configurations with different local capacities still conflict, preserving
+legacy behavior; explicit equal windows let replicas use different local concurrency without changing the durable contract.
 
 For JetStream, `MaxAttempts` bounds handler invocations, while the broker consumer keeps delivery unlimited until the
 terminal hand-off is complete. The Inbox persists invocation counts and terminal outcomes across consumer restarts.

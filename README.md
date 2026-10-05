@@ -544,6 +544,17 @@ semaphore: `database/sql` is the host-managed backpressure boundary. When severa
 and maintenance queries. A smaller pool becomes the bottleneck before Go dispatch and can exhaust handler deadlines
 before application code runs.
 
+The unreleased development API adds `natsadapter.HandlerConfig.MaxAckPending` for the shared durable's global
+outstanding-ACK window across all process replicas. Set the same positive value on every replica independently of
+local `Concurrency`. Zero preserves the previous limit: `Concurrency` for single-message consumers, or
+`Concurrency * BatchConfig.MaxMessages` for batch consumers. Negative values, including an unlimited sentinel, are
+rejected. The global window may be smaller than local capacity; that deliberately throttles broker delivery. A larger
+window does not increase local workers or prefetch bounds. Outstanding ACKs include prefetched messages as well as active
+handlers; size the shared window for the intended deployment. A shared window does not guarantee fair distribution
+between replicas. Existing durables must match the effective window exactly;
+startup and deep health report conflicts rather than changing host-owned topology. See the
+[rollout guidance](MIGRATION.md#consumer-migration-to-jetstream-and-inbox) before changing an existing window.
+
 `Timeout` bounds application handler execution. The Inbox transaction receives an additional
 `FinalizationTimeout` (5 seconds by default) to commit or roll back after that deadline. Increase it when a remote or
 otherwise slow database needs more finalization time; it does not extend the handler deadline.
@@ -579,6 +590,9 @@ order: the first middleware is outermost. A middleware may replace the context o
 called at most once. Typed one-way decorators use `messenger.ChainHandler`; typed query decorators use
 `messenger.ChainQueryHandler` and may return a cached or synthetic `R`. Global middleware cannot synthesize a typed
 result: successful completion without one returns `ErrQueryResultMissing`.
+At the terminal local handler, the original canonical metadata is restored on the replacement context. Middleware
+cannot remove or forge the handler's message identity or child lineage; other replacement values, deadlines, and
+cancellation are preserved.
 
 ```go
 logger := messenger.AdaptSlog(slog.Default())

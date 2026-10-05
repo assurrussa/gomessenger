@@ -27,8 +27,16 @@ type HandlerConfig struct {
 	ConsumerID  string
 	Description string
 	WireMode    WireMode
+	// Concurrency bounds local worker invocations, independently of MaxAckPending.
 	Concurrency int
-	Timeout     time.Duration
+	// MaxAckPending bounds outstanding acknowledgements across all replicas sharing
+	// this durable consumer. Zero preserves the legacy limit: Concurrency for a
+	// single-message consumer, or Concurrency * BatchConfig.MaxMessages for batches.
+	// Positive values do not increase local worker or prefetch bounds. Negative
+	// values, including JetStream's unlimited sentinel, are invalid. All replicas
+	// must agree on the effective limit; changing it is a topology conflict.
+	MaxAckPending int
+	Timeout       time.Duration
 	// FinalizationTimeout is the additional Inbox transaction deadline after Timeout.
 	// Zero uses five seconds.
 	FinalizationTimeout time.Duration
@@ -226,7 +234,7 @@ func newConsumer(
 		return nil, fmt.Errorf("%w: consumer ID: %w", ErrInvalidConfig, err)
 	}
 	if connection == nil || store == nil || decode == nil ||
-		config.Concurrency < 1 || config.Concurrency > 128 ||
+		config.Concurrency < 1 || config.Concurrency > 128 || config.MaxAckPending < 0 ||
 		config.Timeout <= 0 || config.FinalizationTimeout <= 0 || config.MaxAttempts <= 0 || config.BaseRetry <= 0 ||
 		config.MaxRetry < config.BaseRetry || config.AckWait < 100*time.Millisecond || !config.WireMode.valid() {
 		return nil, fmt.Errorf("%w: durable consumer", ErrInvalidConfig)
@@ -583,9 +591,12 @@ func (c *Consumer) ensureDLQStream(ctx context.Context) error {
 }
 
 func (c *Consumer) consumerSpec() ConsumerSpec {
-	maxAckPending := c.config.Concurrency
-	if c.batch != nil {
-		maxAckPending *= c.batch.config.MaxMessages
+	maxAckPending := c.config.MaxAckPending
+	if maxAckPending == 0 {
+		maxAckPending = c.config.Concurrency
+		if c.batch != nil {
+			maxAckPending *= c.batch.config.MaxMessages
+		}
 	}
 	return ConsumerSpec{
 		Stream: c.config.Stream, Name: c.config.ConsumerID, Description: c.config.Description,
