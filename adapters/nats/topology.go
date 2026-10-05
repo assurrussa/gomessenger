@@ -51,9 +51,10 @@ type ConsumerSpec struct {
 	FilterSubject string        `json:"filterSubject"`
 	AckWait       time.Duration `json:"ackWait"`
 	MaxDeliver    int           `json:"maxDeliver"`
-	MaxAckPending int           `json:"maxAckPending"`
-	Replicas      int           `json:"replicas,omitempty"`
-	MemoryStorage bool          `json:"memoryStorage,omitempty"`
+	// MaxAckPending is the positive global limit for this durable across all replicas.
+	MaxAckPending int  `json:"maxAckPending"`
+	Replicas      int  `json:"replicas,omitempty"`
+	MemoryStorage bool `json:"memoryStorage,omitempty"`
 }
 
 // ChangeAction is one non-destructive topology action.

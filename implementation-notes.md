@@ -1,5 +1,26 @@
 # Implementation notes
 
+## 2026-10-05 — Local metadata and NATS global ACK window
+
+- Reproduced metadata loss/forgery for local command, query and event middleware replacement contexts, including async
+  execution and broken child lineage. The terminal boundary now reinstalls canonical metadata while preserving the
+  replacement context's values, deadlines and cancellation. Regression coverage also isolates header copies between
+  middleware, context readers and event subscriptions.
+- Reproduced cross-replica starvation against embedded JetStream when the first replica occupies the durable's
+  local-sized legacy ACK window, in both single and batch modes. Added explicit positive `HandlerConfig.MaxAckPending`
+  as a shared durable limit; zero retains single/batch legacy defaults and negatives remain invalid. Local worker and
+  prefetch bounds are unchanged. A shared window includes prefetched deliveries and does not promise replica fairness.
+- Existing exact topology comparison governs startup, planning/application and deep health. Differing local concurrency
+  works with an equal explicit window; changing the durable limit remains a host-coordinated operation. Documented
+  unkeyed-literal source compatibility and rolling adoption without silently changing broker policy.
+- Verification: all targets of canonical `make check` passed with `GOWORK=off` and Go 1.27.1: format, build, vet,
+  all module linters, unit/race/checkptr tests, coverage threshold (root package 91.4%), clean consumer and durable
+  race E2E. Resource kills and a shared lint-process lock interrupted aggregate attempts on the unchanged source;
+  the remaining targets completed with `make test-checkptr cover test-consumer test-e2e`, preserving every flag.
+  Focused NATS regressions also passed three repetitions under race detection. Independent local review found no
+  actionable issues. Hosted PostgreSQL/Kafka infrastructure checks and GitHub Code Review remain separate evidence.
+- No wire, schema, dependency, Kafka, transport, release-tag or real-service pilot changes.
+
 ## 2026-10-03 — v0.3.1 release publication
 
 - Published immutable dependency layers: root at `8d2501c` (PR #32), Inbox/Outbox adapter/observability at `54bfbd6b`

@@ -61,6 +61,16 @@ consumer; never use local `replace` directives as release evidence.
 5. Deploy the consumer dark, check readiness and telemetry, then enable producer traffic.
 6. Drain and remove the old consumer only after lag and duplicate behavior are understood.
 
+The unreleased `HandlerConfig.MaxAckPending` field separates the shared durable's broker window from each replica's
+worker count. Existing keyed literals keep their zero-value behavior; existing unkeyed `HandlerConfig` literals must be
+updated (prefer keyed literals). No wire format, database schema, or dependency changes are required.
+
+For a rolling adoption with unchanged broker policy, set the explicit window to the durable's existing `MaxAckPending`
+on every replica, then vary local concurrency independently. To change that global window, coordinate the host-owned
+topology change with draining and restarting replicas under the new value. The adapter and topology planner report any
+mismatch as a conflict and never silently update the durable, even for a larger window. Do not delete/recreate the durable
+or change its consumer ID merely to bypass the conflict; that can change delivery and Inbox identity semantics.
+
 A new consumer ID creates a new inbox identity and normally reprocesses retained messages. Treat such a rename as a data
 migration, not a cosmetic refactor.
 

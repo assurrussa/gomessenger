@@ -608,7 +608,9 @@ func invokeMiddleware(
 			return fmt.Errorf("%w: middleware supplied a nil context", ErrInvalidMessage)
 		}
 		if index == len(middlewares) {
-			return handler(current)
+			// Middleware may replace context, but the terminal handler must retain
+			// the original message identity and lineage on that replacement.
+			return handler(contextWithMetadata(current, metadata))
 		}
 		var called atomic.Bool
 		next := func(nextContext context.Context) error {
