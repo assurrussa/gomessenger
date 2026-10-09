@@ -269,7 +269,7 @@ shows the full composition and shutdown order.
 Outbox is not mandatory for all messages. You can mix and match different routes in the same application based on descriptor requirements:
 
 - **Transactional Outbox:** Route critical state transitions (e.g., payments, orders, status changes) through `outboxadapter.NewBatchProducer` so messages commit atomically with your database writes.
-- **Direct broker dispatch:** Route high-throughput, low-latency, or non-transactional traffic (e.g., clickstream, telemetry, audit logs, ephemeral notifications) directly through `natsadapter.NewRoute` or `kafkaadapter.NewRoute`. This completely bypasses the database, avoids WAL/disk contention, and delivers at full broker throughput.
+- **Direct broker dispatch:** Route high-throughput, low-latency, or non-transactional traffic (e.g., clickstream, telemetry, audit logs, ephemeral notifications) directly through `natsadapter.NewRoute` or `kafkaadapter.NewRoute`. This bypasses producer-side Outbox staging and relay database work; it does not promise full broker throughput or remove downstream Inbox/business database work. Direct routes still wait for [broker confirmation](docs/contracts.md#delivery-receipts): JetStream `PubAck` or a Kafka producer transaction commit. Measure capacity for the intended payload, concurrency, broker configuration, and consumer workload.
 
 ```go
 builder := messenger.NewBuilder(messenger.WithSource("urn:service:billing"))
@@ -306,10 +306,25 @@ type BatchRoute interface {
 
 Because `Route` and `BatchRoute` are standard interfaces, host applications can implement custom adapters and overriding strategies directly in their codebase **without requiring any changes or new releases of GoMessenger**:
 
-- **High-throughput Append-only / CDC Outbox:** The standard `adapters/outbox` provides transactional staging with a polling publisher relay and batching (~2,500–3,000 msg/s sustainable on single-instance PostgreSQL). For high-throughput platforms (e.g. 10,000–100,000+ msg/s) where polling queries and status updates (`UPDATE ... status = 'sent'`) cause database contention or table bloat, applications can write minimal unindexed append-only rows (or stream via `pgx.CopyFrom`) within the business transaction, and let an external CDC pipeline (such as Debezium, Kafka Connect, or a PostgreSQL WAL logical replication streamer via `pgoutput`) forward raw events directly to Kafka or NATS.
+- **High-throughput Append-only / CDC Outbox:** The standard `adapters/outbox` provides transactional staging with a polling publisher relay and batching (see the scoped [true-batch capacity result](docs/performance/outbox-true-batch-small-frontier-20260903.md), not a general PostgreSQL throughput ceiling). For high-throughput platforms (e.g. 10,000–100,000+ msg/s) where polling queries and status updates (`UPDATE ... status = 'sent'`) cause database contention or table bloat, applications can write minimal unindexed append-only rows (or stream via `pgx.CopyFrom`) within the business transaction, and let an external CDC pipeline (such as Debezium, Kafka Connect, or a PostgreSQL WAL logical replication streamer via `pgoutput`) forward raw events directly to Kafka or NATS.
 - **Alternative storage backends:** route outbox events into Redis Streams, ClickHouse, KeyDB, or Tarantool.
 - **Dynamic / Conditional routing:** inspect `context.Context` at runtime to route through Outbox when an active `*sql.Tx` is present, or fall back to direct broker publishing outside transactions.
 - **Mock and testing routes:** capture or assert dispatched messages in integration tests with zero infrastructure dependencies.
+
+The linked capacity result is historical `checkout-workspace` evidence at clean GoMessenger
+`dc33c969` and Outbox `e579abdc`, not a measurement of the current release. It confirmed a
+2,550 msg/s target in 3/3 fresh-volume runs of the full-batch PostgreSQL → JetStream → Inbox
+pipeline with the `small` payload, stock PostgreSQL 18.6, NATS 2.12.3, two Outbox workers,
+two consumers, maximum batches of 100, and shared SUT CPUs `0-1` (2 GiB total container
+memory, swap disabled). Each run used 60 seconds of warm-up, 120 seconds of measured load,
+and a 60-second drain limit. Relay throughput was 2,549.167–2,550.000 msg/s, business p95
+135.938–137.530 ms, and drain 1.018–1.664 seconds. All three passed the
+[non-growing-lag and sustainability gates](docs/performance/README.md#reproduction-contract),
+with zero dropped iterations or HTTP failures and exact post-drain reconciliation of all
+918,200 accepted effects. The next 2,600 msg/s target passed only 1/3 runs. See the
+[report and its test boundary](docs/performance/outbox-true-batch-small-frontier-20260903.md#test-boundary)
+for full provenance and limits: no mixed-payload frontier, continuous multi-hour soak,
+fault-at-frontier, multi-node, or production validation is established by this result.
 
 ## Modules and release status
 
