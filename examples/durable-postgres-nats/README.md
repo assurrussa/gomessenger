@@ -48,6 +48,75 @@ The compose stack uses a dedicated PostgreSQL 18 container and a single-node NAT
 the `demo` schema, applies embedded Outbox and namespaced Inbox migrations, and creates two demo business tables. It does
 not drop or truncate data. Do not point this example at a shared database without reviewing those additive migrations.
 
+## Atomic Inbox → business → outgoing event
+
+This checkout companion uses the commit-pinned Outbox PostgreSQL backend in this module's `go.mod`;
+`NewSQLTxPutter` is not part of the published Outbox `v0.16.0` API. No new release tag is implied.
+
+The separate PostgreSQL-only companion demonstrates a consumer that emits another event from its Inbox transaction:
+
+```text
+ProcessAttempt claim
+  -> handler savepoint
+  -> atomic_order_projection insert
+  -> official jobsrepo.NewSQLTxPutter(the same *sql.Tx)
+  -> GoMessenger Outbox producer stages orders.projected
+  -> attempt accounting + Inbox completion
+  -> one PostgreSQL commit
+  -> ACK is now safe
+```
+
+Run from this example module against a disposable PostgreSQL database:
+
+```sh
+GOMESSENGER_POSTGRES_DSN='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
+  GOWORK=off go run ./cmd/atomic-inbox-outbox
+```
+
+The command creates the dedicated `gomessenger_atomic_example` schema, selects it through the host connection's
+`search_path`, applies the official embedded Outbox and Inbox migrations, and retains proof rows. It never drops or
+truncates data. Each invocation uses a fresh input identity, so the command can be repeated. Use a disposable database;
+the role needs permission to create the example schema and tables.
+
+The host opens one `database/sql` pool with `MaxOpenConns(1)`. Inside the handler,
+`inbox.SQLTxFromContext` must contain a concrete `*sql.Tx`; absence or another transaction implementation fails closed.
+That exact transaction goes to the official PostgreSQL `jobsrepo.NewSQLTxPutter`, then to the existing
+`outboxadapter.NewProducer`. The stager opens no pool or transaction and never uses a context fallback.
+The caller's schema/search path must resolve the migrated Outbox tables. Keep a transaction-bound producer inside its
+transaction's lifetime; never cache it for a later delivery.
+
+The outgoing event ID is a namespaced, deterministic UUIDv8 derived from the consumer/output contract and incoming
+`(source, message_id)`. The input event's immutable time is reused, and correlation/causation are explicit.
+Attempt number, replay generation, and wall-clock retry time do not change the outgoing identity or payload.
+A successful `ReceiptStaged` is provisional until the enclosing Inbox transaction commits.
+
+The command verifies and prints three committed snapshots:
+
+- Failure after staging: zero business rows, Outbox jobs, and Outbox idempotency keys; one incomplete Inbox identity and
+  attempt 1 remain. `ProcessAttempt` rolls back its handler savepoint and commits failed-attempt bookkeeping.
+- Successful retry: one business row, one canonical relay job, one Outbox key, one completed Inbox identity, attempt 2.
+- Post-commit/pre-ACK redelivery: the same state, a duplicate result, and no third handler invocation.
+
+Success ends with `atomic Inbox/business/Outbox proof passed`. This companion deliberately runs no broker or relay:
+it re-delivers the exact canonical input at the real Inbox boundary to reproduce the missing-ACK window. Its queued
+`gomessenger.relay` job can be processed by the normal Outbox relay once the host registers a publisher and provisions
+the `orders.projected` destination. It proves local database atomicity, not broker acknowledgement or exactly-once
+external effects. The existing NATS demo and capacity flow are unchanged.
+
+Run all companion regressions from the repository root:
+
+```sh
+GOMESSENGER_POSTGRES_DSN='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
+  make test-postgres-atomic
+```
+
+This manual target fails if the DSN is absent. Ordinary unit runs skip live cases only when it is not configured.
+Live tests create isolated temporary schemas and clean up only their own schema. In addition to the three snapshots,
+they inject a real Outbox SQL staging error and a deferred constraint failure at commit. A staging error must roll back
+the business row and event while recording attempt 1; a failed outer commit must retain neither effects nor attempt
+accounting, so its successful retry starts at attempt 1. Unit tests reject missing/wrong transactions and check stable,
+source-scoped outgoing identity.
+
 ## Capacity experiment
 
 The same example provides a reproducible checkout-local capacity experiment for the real business path:
