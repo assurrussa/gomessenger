@@ -11,7 +11,7 @@ CAPACITY_PROJECT := gomessenger-capacity-nats
 INBOX_CAPACITY_COMPOSE := examples/durable-postgres-nats/compose.inbox-capacity.yaml
 INBOX_CAPACITY_PROJECT := gomessenger-capacity-inbox-postgres
 
-.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-batch-integration test-kafka test-postgres check check-workspace check-published bench-all release-ready release-readiness demo-durable-postgres-nats demo-durable-postgres-nats-down capacity-nats capacity-nats-full capacity-nats-site capacity-nats-site-single capacity-nats-site-batch-1 capacity-nats-site-batch-100 capacity-frontier capacity-frontier-matrix capacity-outbox-batch-screen capacity-batch-proof capacity-batch-proof-verdict capacity-inbox-postgres capacity-nats-down capacity-inbox-postgres-down
+.PHONY: prepare fmt-check build vet lint lint-core lint-root lint-modules lint-fix lint-fix-core test test-race test-checkptr cover test-consumer test-consumer-release test-e2e test-integration test-batch-integration test-kafka test-postgres test-postgres-atomic check check-workspace check-published bench-all release-ready release-readiness demo-durable-postgres-nats demo-durable-postgres-nats-down capacity-nats capacity-nats-full capacity-nats-site capacity-nats-site-single capacity-nats-site-batch-1 capacity-nats-site-batch-100 capacity-frontier capacity-frontier-matrix capacity-outbox-batch-screen capacity-batch-proof capacity-batch-proof-verdict capacity-inbox-postgres capacity-nats-down capacity-inbox-postgres-down
 
 prepare:
 	@$(GO) work sync
@@ -98,6 +98,10 @@ test-kafka:
 test-postgres:
 	@test -n "$(GOMESSENGER_POSTGRES_DSN)" || (echo "GOMESSENGER_POSTGRES_DSN is required" >&2; exit 2)
 	@cd adapters/inbox && GOWORK=off $(GO) test -race -count=1 -run '^TestPostgresInbox' ./pgsql
+
+test-postgres-atomic:
+	@test -n "$(GOMESSENGER_POSTGRES_DSN)" || (echo "GOMESSENGER_POSTGRES_DSN is required" >&2; exit 2)
+	@cd examples/durable-postgres-nats && GOWORK=off $(GO) test -race -count=1 ./internal/atomicflow
 
 check: fmt-check build vet lint test test-race test-checkptr cover test-consumer test-e2e
 

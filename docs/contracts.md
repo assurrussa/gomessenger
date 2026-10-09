@@ -109,6 +109,16 @@ the durable consumer database-versus-ack gap when the handler uses the transacti
 The inbox key is `(consumer_id, source, message_id)`. Replaying the same key and fingerprint skips the handler and is a
 successful duplicate. Replaying the same key with different canonical bytes is an identity conflict and fails closed.
 
+The checkout's source-pinned atomic companion can stage an outgoing event in that same PostgreSQL Inbox transaction.
+This addition is not available in Outbox `v0.16.0`. Bind the official Outbox PostgreSQL
+`jobsrepo.NewSQLTxPutter` to the concrete `*sql.Tx` from `inbox.SQLTxFromContext`, then give it to
+`outboxadapter.NewProducer`. The host must use the migrated Outbox schema in that transaction's search path.
+No independent producer transaction or broker publication belongs inside this atomic boundary. A staged receipt is
+provisional until the enclosing commit; an Inbox handler-savepoint rollback removes the business write, Outbox job,
+and Outbox idempotency key together while failed-attempt bookkeeping can still commit. See the
+[atomic PostgreSQL companion](../examples/durable-postgres-nats/README.md#atomic-inbox--business--outgoing-event)
+for executable rollback, commit-failure, and redelivery checks.
+
 Exactly-once external effects are not promised. HTTP calls, emails, object storage writes, and calls to another database
 need an idempotency key accepted by that system, or their own durable hand-off inside the inbox transaction.
 

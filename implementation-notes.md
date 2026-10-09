@@ -1,5 +1,20 @@
 # Implementation notes
 
+## 2026-10-09 — Atomic PostgreSQL Inbox/business/Outbox companion
+
+- Add a dedicated PostgreSQL-only companion inside the existing durable example module. It uses the real Inbox
+  `ProcessAttempt`, the concrete callback `*sql.Tx`, the official Outbox `jobsrepo.NewSQLTxPutter`, and the existing
+  GoMessenger Outbox producer. Current NATS demo/capacity paths and adapter APIs remain unchanged.
+- Stable outgoing identity and immutable metadata survive retries. Failed handler staging rolls back business,
+  Outbox job, and Outbox key while preserving invocation bookkeeping; a failed outer commit rolls back bookkeeping too.
+- Add explicit command output and opt-in live PostgreSQL coverage for post-stage failure, SQL staging failure,
+  commit failure, and post-commit/pre-ACK redelivery. The manual `test-postgres-atomic` target requires a configured DSN.
+- The example alone pins the PostgreSQL backend to `v0.16.1-0.20261009035614-46f29a8e18e1`, resolved by Go tooling
+  from merged Outbox commit `46f29a8e18e1d33c89ad2e338a34769ec13d90ff`. Root Outbox remains `v0.16.0`; no tag is created.
+- All four added Go files passed a stdin-only gofmt comparison. Compilation, tests, lint, live PostgreSQL and canonical
+  module tidy have not run for this source candidate; they remain required before acceptance.
+- No tag, release, CI trigger, broker topology, or production-readiness changes.
+
 ## 2026-10-05 — Local metadata and NATS global ACK window
 
 - Reproduced metadata loss/forgery for local command, query and event middleware replacement contexts, including async

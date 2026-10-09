@@ -8,7 +8,7 @@ require (
 	github.com/assurrussa/gomessenger/adapters/nats v0.3.1
 	github.com/assurrussa/gomessenger/adapters/outbox v0.3.1
 	github.com/assurrussa/outbox v0.16.0
-	github.com/assurrussa/outbox/backends/pgsql v0.16.0
+	github.com/assurrussa/outbox/backends/pgsql v0.16.1-0.20261009035614-46f29a8e18e1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nats-io/nats.go v1.53.1
 )
