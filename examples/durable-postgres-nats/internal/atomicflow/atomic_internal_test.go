@@ -209,7 +209,6 @@ func openPostgres(t *testing.T) *sql.DB {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Second)
 		defer cancel()
-		//nolint:gosec // The locally generated schema is quoted as a PostgreSQL identifier.
 		if _, err := db.ExecContext(ctx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
 			t.Errorf("drop isolated test schema: %v", err)
 		}
@@ -219,7 +218,6 @@ func openPostgres(t *testing.T) *sql.DB {
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	//nolint:gosec // The locally generated schema is quoted as a PostgreSQL identifier.
 	if _, err := db.ExecContext(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
