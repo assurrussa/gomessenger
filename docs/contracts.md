@@ -418,6 +418,42 @@ IDs, attempts, and other high-cardinality values may be trace/log attributes but
 Core infrastructure logs and observations never include record keys, payloads, query results, message bodies, or
 arbitrary headers.
 
+### Prometheus message and batch metrics
+
+The optional `observability` module keeps `operations_total` and
+`operation_duration_seconds` unchanged and adds the following metrics (default
+prefix `gomessenger_messenger_`; `Config.Namespace` replaces `gomessenger`):
+
+- `messages_total`: one per `OperationHandle`, including failed attempts and
+  completed duplicates. This is a per-handler observation count, not unique
+  messages, broker deliveries, or successful business effects. Multiple event
+  subscriptions and redeliveries can count the same logical message again.
+- `duplicates_total`: the subset of those item observations with `Duplicate=true`.
+- `batch_size`: histogram of positive `BatchSize` on `OperationBatchHandle`,
+  including failed batches. Buckets are 1, 2, 5, 10, 25, 50, 100, 250, 500,
+  1000, and +Inf. This counts collected deliveries, which can include items
+  filtered out before the handler.
+- `batch_outcomes_total`: positive `BatchACKs`, `BatchRetries`, `BatchDeferrals`,
+  and `BatchDLQs` from positive-size `OperationBatchHandle` observations, split
+  by the fixed `result` label `ack`, `retry`, `defer`, or `dlq`.
+
+Batch outcomes are selected item decisions, **not confirmed broker outcomes**;
+`outcome=error` can still have ACK decisions when finalization failed. Individual
+broker ACK, offset commit, retry, and DLQ hand-off observations continue to feed
+only the existing operation metrics. In particular, Kafka offset commit counts
+transactions, not messages. Batch summaries never add to `messages_total` or
+`duplicates_total`, and item observations never add to batch metrics. Do not sum
+item and batch metrics as one throughput total. Missing/unclassified outcomes
+are not inferred; nonpositive batch sizes and nonpositive outcome counts are
+ignored by the new batch metrics.
+
+These metrics use the existing stable descriptor/route/handler/consumer/service,
+operation, receipt state, and `outcome=ok|error` labels. Hosts must keep these
+identifiers bounded and must not embed per-message or user data in them. The
+only additional label is the fixed batch `result`; counts, message IDs,
+attempts, retry delays, durations, and error text are never labels. Repeated
+observer construction on the same registry reuses all matching collectors.
+
 ## Lifecycle
 
 Managed services implement `Run`, `Readiness`, `BeginDrain`, and `Shutdown`.
