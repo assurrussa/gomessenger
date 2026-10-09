@@ -16,7 +16,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const instrumentationName = "github.com/assurrussa/gomessenger/observability"
+const (
+	instrumentationName = "github.com/assurrussa/gomessenger/observability"
+	metricsSubsystem    = "messenger"
+)
 
 var defaultBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
@@ -30,9 +33,13 @@ type Config struct {
 
 // Observer records low-cardinality messaging operation metrics and traces.
 type Observer struct {
-	operations *prometheus.CounterVec
-	duration   *prometheus.HistogramVec
-	tracer     trace.Tracer
+	operations    *prometheus.CounterVec
+	duration      *prometheus.HistogramVec
+	messages      *prometheus.CounterVec
+	duplicates    *prometheus.CounterVec
+	batchSize     *prometheus.HistogramVec
+	batchOutcomes *prometheus.CounterVec
+	tracer        trace.Tracer
 }
 
 // New constructs and registers an observer. A nil Registerer uses the default
@@ -59,26 +66,52 @@ func New(config Config) (*Observer, error) {
 	observer := &Observer{
 		operations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: config.Namespace,
-			Subsystem: "messenger",
+			Subsystem: metricsSubsystem,
 			Name:      "operations_total",
 			Help:      "Total completed gomessenger operations.",
 		}, labels),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: config.Namespace,
-			Subsystem: "messenger",
+			Subsystem: metricsSubsystem,
 			Name:      "operation_duration_seconds",
 			Help:      "Duration of completed gomessenger operations.",
 			Buckets:   append([]float64(nil), config.DurationBuckets...),
 		}, labels),
+		messages: newCounter(config.Namespace, "messages_total",
+			"Total per-item handler observations, including duplicates and failed attempts.", labels),
+		duplicates: newCounter(config.Namespace, "duplicates_total",
+			"Total duplicate per-item handler observations.", labels),
+		batchSize: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: config.Namespace,
+			Subsystem: metricsSubsystem,
+			Name:      "batch_size",
+			Help:      "Number of deliveries in observed consumer batches.",
+			Buckets:   []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000},
+		}, labels),
+		batchOutcomes: newCounter(config.Namespace, "batch_outcomes_total",
+			"Total selected consumer batch item outcomes, not confirmed broker finalizations.",
+			append(append([]string(nil), labels...), "result")),
 		tracer: config.TracerProvider.Tracer(instrumentationName),
 	}
-	if err := registerCounter(config.Registerer, &observer.operations); err != nil {
-		return nil, err
+	for _, counter := range []**prometheus.CounterVec{
+		&observer.operations, &observer.messages, &observer.duplicates, &observer.batchOutcomes,
+	} {
+		if err := registerCounter(config.Registerer, counter); err != nil {
+			return nil, err
+		}
 	}
-	if err := registerHistogram(config.Registerer, &observer.duration); err != nil {
-		return nil, err
+	for _, histogram := range []**prometheus.HistogramVec{&observer.duration, &observer.batchSize} {
+		if err := registerHistogram(config.Registerer, histogram); err != nil {
+			return nil, err
+		}
 	}
 	return observer, nil
+}
+
+func newCounter(namespace, name, help string, labels []string) *prometheus.CounterVec {
+	return prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: metricsSubsystem, Name: name, Help: help,
+	}, labels)
 }
 
 func validateDurationBuckets(buckets []float64) error {
@@ -119,6 +152,7 @@ func (o *Observer) Observe(ctx context.Context, observation messenger.Observatio
 	}
 	o.operations.With(labels).Inc()
 	o.duration.With(labels).Observe(max(0, observation.Duration.Seconds()))
+	o.observeMessages(observation, labels)
 
 	startedAt := observation.StartedAt
 	if startedAt.IsZero() {
@@ -174,6 +208,38 @@ func (o *Observer) Observe(ctx context.Context, observation messenger.Observatio
 	span.End(trace.WithTimestamp(endedAt))
 }
 
+// Item and aggregate observations deliberately feed disjoint metrics. A batch
+// summary does not imply that its selected outcomes reached the broker.
+func (o *Observer) observeMessages(observation messenger.Observation, labels prometheus.Labels) {
+	switch observation.Operation {
+	case messenger.OperationHandle:
+		o.messages.With(labels).Inc()
+		if observation.Duplicate {
+			o.duplicates.With(labels).Inc()
+		}
+	case messenger.OperationBatchHandle:
+		if observation.BatchSize <= 0 {
+			return
+		}
+		o.batchSize.With(labels).Observe(float64(observation.BatchSize))
+		for _, result := range []struct {
+			name  string
+			count int
+		}{
+			{"ack", observation.BatchACKs},
+			{"retry", observation.BatchRetries},
+			{"defer", observation.BatchDeferrals},
+			{"dlq", observation.BatchDLQs},
+		} {
+			if result.count > 0 {
+				labels["result"] = result.name
+				o.batchOutcomes.With(labels).Add(float64(result.count))
+			}
+		}
+	default:
+	}
+}
+
 func registerCounter(registerer prometheus.Registerer, collector **prometheus.CounterVec) error {
 	if err := registerer.Register(*collector); err != nil {
 		var already prometheus.AlreadyRegisteredError
@@ -183,7 +249,7 @@ func registerCounter(registerer prometheus.Registerer, collector **prometheus.Co
 				return nil
 			}
 		}
-		return fmt.Errorf("messenger/observability: register operation counter: %w", err)
+		return fmt.Errorf("messenger/observability: register counter: %w", err)
 	}
 	return nil
 }
@@ -197,7 +263,7 @@ func registerHistogram(registerer prometheus.Registerer, collector **prometheus.
 				return nil
 			}
 		}
-		return fmt.Errorf("messenger/observability: register duration histogram: %w", err)
+		return fmt.Errorf("messenger/observability: register histogram: %w", err)
 	}
 	return nil
 }
