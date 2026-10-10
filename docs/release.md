@@ -10,8 +10,9 @@ runtime health probes and the compatible Outbox v0.16.0 dependency baseline. All
 published-consumer gate are verified; README installation commands now target v0.3.1.
 
 The next selected release is [v0.4.0](releases/v0.4.0.md). Its source packet combines the reviewed Kafka/NATS/pilot
-work and selects already-published Outbox root/PostgreSQL/SQLite v0.17.0 for staged adoption. Source preparation does
-not mean root preparation, dependency-layer publication, or the clean published-consumer gate has completed.
+work and selects published Outbox root/PostgreSQL/SQLite v0.17.0 for staged adoption. Root and the Inbox/Outbox-adapter/
+observability layer are published; the transport layer is prepared. Transport and CLI publication, final graph checks
+and the clean published-consumer gate remain outstanding. The completed installation surface stays on v0.3.1.
 
 Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
 candidates under ADR-0003. The implemented `sportsite` article-publication audit pilot retains its historical acceptance evidence. Current-version
@@ -45,6 +46,8 @@ adoption requires all used modules to resolve at the same published release and 
 
 `make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox.
 The prepared modules layer selects Outbox root/SQLite v0.17.0 for the E2E fixture and Outbox root v0.17.0 for its adapter.
+Prepared NATS/Kafka requirements select published root and Inbox v0.4.0. The E2E fixture retains GoMessenger checkout
+replacements, so its correctness results are separate from clean published-module verification.
 The durable example retains Outbox root v0.16.0 and PostgreSQL backend
 v0.16.1-0.20261009035614-46f29a8e18e1 until final preparation. Root preparation alone did not advance these requirements.
 `make check` uses `GOWORK=off`, but development replacements in
