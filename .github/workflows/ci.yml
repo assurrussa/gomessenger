@@ -3,6 +3,11 @@ name: CI
 on:
   workflow_dispatch:
     inputs:
+      kafka_publish_compare:
+        description: Also measure bounded Kafka single/batch publish completion (full validation only)
+        type: boolean
+        required: false
+        default: false
       static_only:
         description: Run static gates only; retain separate evidence for unchanged runtime code
         type: boolean
@@ -204,6 +209,20 @@ jobs:
             testdata/e2e/go.sum
       - name: Run transactional Kafka integration gate
         run: make test-kafka
+      - name: Compare Kafka publication paths
+        if: ${{ inputs.kafka_publish_compare }}
+        env:
+          KAFKA_TEST_MODE: publish-comparison
+          KAFKA_REPORT_DIR: ${{ runner.temp }}/kafka-publish-comparison
+        run: make test-kafka
+      - name: Upload Kafka publication evidence
+        if: ${{ always() && inputs.kafka_publish_compare }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kafka-publish-${{ matrix.kafka_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kafka-publish-comparison
+          if-no-files-found: error
+          retention-days: 7
 
   check:
     name: ${{ inputs.static_only && 'Static-only gate' || 'Full gate' }}
@@ -236,3 +255,4 @@ jobs:
           fi
           echo "static=$STATIC_RESULT tests=$TESTS_RESULT checkptr=$CHECKPTR_RESULT postgres=$POSTGRES_RESULT kafka=$KAFKA_RESULT" >&2
           exit 1
+
