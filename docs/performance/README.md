@@ -61,7 +61,8 @@ measures existing typed-single, envelope-single, and envelope-batch paths with
 matched inputs. It reports broker-commit completion latency and closed-loop
 throughput separately, with read-committed integrity checks. This is distinct
 from the NATS/Outbox capacity evidence below and makes no production-capacity
-or new-API claim.
+or new-API claim. The [2026-10-10 baseline](kafka-publish-20261010.md)
+retains all repetitions and raw timings, including the observed settling bias.
 
 ## Reproduction contract
 
