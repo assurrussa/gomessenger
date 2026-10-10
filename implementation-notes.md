@@ -1,5 +1,31 @@
 # Implementation notes
 
+## 2026-10-10 — v0.4.0 bounded NATS process fixtures and root preparation
+
+- Add opt-in fixtures in `testdata/e2e/nats_process_{helper,checks,operations}_test.go` and
+  `nats_synthetic_pilot_test.go`. They re-execute the test binary for a file-backed NATS broker and independent
+  consumers sharing one durable and SQLite Inbox; no public API, new dependency, host service, or automatic CI trigger.
+- The operations screen requires a passing 120-second steady phase at 125 messages/s before its separate 120-second
+  rolling/restart phase at 62 messages/s. It replaces one of two consumers while preserving the shared ACK window,
+  then kills/restarts the broker with its existing store. Bounded admission, confirmed publication, durable-effect
+  identity reconciliation, worker progress, and retained failures distinguish recovery from sustainable throughput.
+- The separate 900-second synthetic pilot exercises direct NATS and shared SQLite. It is not the real PostgreSQL/
+  Outbox host pilot, a multi-node durability test, a scalability comparison, or production-capacity acceptance.
+  Exact executed revisions, dependency graphs and retained campaign results are in [the v0.4.0 candidate notes](docs/releases/v0.4.0.md);
+  the [operations contract](docs/performance/nats-process-operations.md) records reproduction and acceptance bounds.
+- Report and ledger files are exclusively reserved below checkout `tmp` through opened `os.Root` handles; traversal,
+  symlink escapes and overwrite attempts are rejected. Campaign contexts, bounded drain and owned-child cleanup
+  require an outer process-group watchdog as well. Message bounds are not hard CPU, memory or disk quotas; reserve
+  the shared runner and retain exact revision, toolchain, selected graph, raw ledgers and incomplete results.
+- Normal repository gates compile the fixtures and run small regressions with campaign opt-ins unset. Canonical root
+  preparation/readiness passed without tidy/format changes. After the narrow CLI G703 path-trust annotation and nine
+  strict JSON/path tests, `make check-workspace` passed on tree `f95cd884e3b0e298a492d190b16fd358fced4d07`, including
+  all nine configured linters and unit/race/checkptr/coverage/local-consumer/Docker-free E2E gates. The original G703
+  failure remains recorded. No campaign was rerun for these documentation updates.
+- Separately retained PostgreSQL 18 and Kafka 4.1.2/4.3.1 results used `GOWORK=off` on existing published graphs;
+  they do not establish the combined local v0.4.0/Outbox v0.17.0 graph. Root PR-head review, later dependency-layer
+  preparation/review/gates, tags and the clean v0.4.0 published consumer remain separate release requirements.
+
 ## 2026-10-09 — Atomic PostgreSQL Inbox/business/Outbox companion
 
 - Add a dedicated PostgreSQL-only companion inside the existing durable example module. It uses the real Inbox
