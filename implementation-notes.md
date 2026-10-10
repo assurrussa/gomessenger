@@ -1055,3 +1055,15 @@ prototype work as history.
 - Recorded the original query boundary in ADR-0001 and the required real-project pilot before production-proven claims in ADR-0002; both decisions are superseded by the typed-local-query section above.
 - At the initial typed durable messenger snapshot, the read-only `make check` gate passed with zero lint findings, 91.6% root coverage, unit, race, and checkptr tests across all modules, plus the Docker-free transactional E2E covering rollback, commit/acknowledgement, lost ACK, retry, permanent DLQ, replay deduplication and Inbox suppression, and drain/redelivery. The later typed-query gate and its current coverage are recorded in the section above.
 - `make test-postgres` remains the separate DSN-gated PostgreSQL 18 integration gate for migrations, conflict and prune, rollback/retry, durable attempts/outcomes/generations, and concurrency. It is not part of `make check`; the final review batch compiled its regressions but did not include a live database rerun.
+
+## 2026-10-10 — Local JSON Schema baseline gate (source candidate)
+
+- Add an offline, CLI-only `schema check` with separate v1 manifest and schema catalog inputs and a required exact-byte
+  baseline SHA-256 pin. Existing manifest v1, descriptor APIs, envelope fingerprints, and runtime codecs are unchanged.
+- Use JSON Schema draft 2020-12 compilation and optional sample validation through the pinned CLI-only
+  `github.com/santhosh-tekuri/jsonschema/v6` dependency; no file/network schema loaders or registry service.
+- Compare immutable same-version descriptor metadata and normalized schema-document fingerprints; preserve released
+  versions while allowing new versions. This does not prove backward/forward compatibility or Go payload conformance.
+- Add golden, invalid-sample, no-external-reference, binding-coverage, input-bound, and parser fuzz coverage.
+  Canonical module tidy, compilation, tests, lint, race, and the aggregate gate remain pending for this source candidate.
+- No release tags, automatic CI triggers, broker changes, or production-readiness claim. See `docs/schema-baselines.md`.

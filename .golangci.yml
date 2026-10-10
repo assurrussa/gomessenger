@@ -90,6 +90,7 @@ linters:
             - github.com/jackc/pgx/v5
             - modernc.org/sqlite
             - github.com/prometheus/client_golang
+            - github.com/santhosh-tekuri/jsonschema/v6
             - go.opentelemetry.io/otel
             - example.com/gomessenger-durable-postgres-nats
     gomoddirectives:

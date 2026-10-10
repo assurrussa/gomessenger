@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      static_only:
+        description: Run static gates only; retain separate evidence for unchanged runtime code
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +38,11 @@ jobs:
             tools/gomessengerctl/go.sum
             examples/*/go.sum
             testdata/*/go.sum
+      - name: Check schema CLI module tidiness
+        working-directory: tools/gomessengerctl
+        env:
+          GOWORK: "off"
+        run: go mod tidy -diff
       - name: Run formatting, build, and vet checks
         run: make fmt-check build vet
       - name: Lint root module
@@ -50,6 +61,7 @@ jobs:
         run: git diff --exit-code -- .
 
   tests:
+    if: ${{ !inputs.static_only }}
     name: Tests and race
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -69,10 +81,47 @@ jobs:
             testdata/*/go.sum
       - name: Run unit, race, coverage, consumer, and E2E checks
         run: make test test-race cover test-consumer test-e2e
+      - name: Exercise schema CLI and bounded parser fuzzing
+        working-directory: tools/gomessengerctl
+        env:
+          GOWORK: "off"
+        run: |
+          go build -o "$RUNNER_TEMP/gomessengerctl-schema" .
+          "$RUNNER_TEMP/gomessengerctl-schema" schema check \
+            --manifest testdata/schema/manifest.json \
+            --file testdata/schema/baseline.json \
+            --baseline testdata/schema/baseline.json \
+            --baseline-sha256 ed6467e74ea1fd496721d1d71e0f5a82592302d10afec2b5b4c035af36c5bb56 \
+            > "$RUNNER_TEMP/schema-report.json"
+          python3 - "$RUNNER_TEMP/schema-report.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          assert report["policy"] == "immutable-version-v1"
+          assert report["baselineSha256"] == "ed6467e74ea1fd496721d1d71e0f5a82592302d10afec2b5b4c035af36c5bb56"
+          assert (report["preserved"], report["added"], report["samplesValidated"], report["skippedNonJson"]) == (1, 0, 2, 0)
+          assert report["fingerprints"] == [{
+              "descriptor": "event/media.processed/v1",
+              "sha256": "05a8b3cd9ea49d734240e3acd6daea223fe78615424c77be55265127872cb57e",
+          }]
+          PY
+          status=0
+          "$RUNNER_TEMP/gomessengerctl-schema" schema check \
+            --manifest testdata/schema/manifest.json \
+            --file testdata/schema/baseline.json \
+            --baseline testdata/schema/baseline.json \
+            --baseline-sha256 0000000000000000000000000000000000000000000000000000000000000000 \
+            > "$RUNNER_TEMP/schema-bad-pin.out" 2> "$RUNNER_TEMP/schema-bad-pin.err" || status=$?
+          test "$status" -eq 1
+          test ! -s "$RUNNER_TEMP/schema-bad-pin.out"
+          grep -Fq 'baseline SHA-256 does not match trusted pin' "$RUNNER_TEMP/schema-bad-pin.err"
+          go test -run '^$' -fuzz '^FuzzSchemaCatalog$' -fuzztime=10s -parallel=2 .
       - name: Verify tests did not mutate tracked files
         run: git diff --exit-code -- .
 
   checkptr:
+    if: ${{ !inputs.static_only }}
     name: Checkptr
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -96,6 +145,7 @@ jobs:
         run: git diff --exit-code -- .
 
   postgres:
+    if: ${{ !inputs.static_only }}
     name: PostgreSQL integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -129,6 +179,7 @@ jobs:
         run: make test-postgres
 
   kafka:
+    if: ${{ !inputs.static_only }}
     name: Kafka integration (${{ matrix.kafka_version }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -155,20 +206,30 @@ jobs:
         run: make test-kafka
 
   check:
-    name: Full gate
+    name: ${{ inputs.static_only && 'Static-only gate' || 'Full gate' }}
     if: ${{ always() }}
     needs: [static, tests, checkptr, postgres, kafka]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify every release-gate shard passed
+      - name: Verify selected validation gates
         env:
+          STATIC_ONLY: ${{ inputs.static_only }}
           STATIC_RESULT: ${{ needs.static.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
           CHECKPTR_RESULT: ${{ needs.checkptr.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           KAFKA_RESULT: ${{ needs.kafka.result }}
         run: |
+          if [ "$STATIC_ONLY" = true ]; then
+            test "$STATIC_RESULT" = success
+            test "$TESTS_RESULT" = skipped
+            test "$CHECKPTR_RESULT" = skipped
+            test "$POSTGRES_RESULT" = skipped
+            test "$KAFKA_RESULT" = skipped
+            echo "Static-only validation; runtime gates were not selected."
+            exit 0
+          fi
           if [ "$STATIC_RESULT" = success ] && [ "$TESTS_RESULT" = success ] && [ "$CHECKPTR_RESULT" = success ] && \
              [ "$POSTGRES_RESULT" = success ] && [ "$KAFKA_RESULT" = success ]; then
             exit 0
