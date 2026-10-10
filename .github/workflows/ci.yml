@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      static_only:
+        description: Run static gates only; retain separate evidence for unchanged runtime code
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -55,6 +61,7 @@ jobs:
         run: git diff --exit-code -- .
 
   tests:
+    if: ${{ !inputs.static_only }}
     name: Tests and race
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -114,6 +121,7 @@ jobs:
         run: git diff --exit-code -- .
 
   checkptr:
+    if: ${{ !inputs.static_only }}
     name: Checkptr
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -137,6 +145,7 @@ jobs:
         run: git diff --exit-code -- .
 
   postgres:
+    if: ${{ !inputs.static_only }}
     name: PostgreSQL integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -170,6 +179,7 @@ jobs:
         run: make test-postgres
 
   kafka:
+    if: ${{ !inputs.static_only }}
     name: Kafka integration (${{ matrix.kafka_version }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -196,20 +206,30 @@ jobs:
         run: make test-kafka
 
   check:
-    name: Full gate
+    name: ${{ inputs.static_only && 'Static-only gate' || 'Full gate' }}
     if: ${{ always() }}
     needs: [static, tests, checkptr, postgres, kafka]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify every release-gate shard passed
+      - name: Verify selected validation gates
         env:
+          STATIC_ONLY: ${{ inputs.static_only }}
           STATIC_RESULT: ${{ needs.static.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
           CHECKPTR_RESULT: ${{ needs.checkptr.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           KAFKA_RESULT: ${{ needs.kafka.result }}
         run: |
+          if [ "$STATIC_ONLY" = true ]; then
+            test "$STATIC_RESULT" = success
+            test "$TESTS_RESULT" = skipped
+            test "$CHECKPTR_RESULT" = skipped
+            test "$POSTGRES_RESULT" = skipped
+            test "$KAFKA_RESULT" = skipped
+            echo "Static-only validation; runtime gates were not selected."
+            exit 0
+          fi
           if [ "$STATIC_RESULT" = success ] && [ "$TESTS_RESULT" = success ] && [ "$CHECKPTR_RESULT" = success ] && \
              [ "$POSTGRES_RESULT" = success ] && [ "$KAFKA_RESULT" = success ]; then
             exit 0
