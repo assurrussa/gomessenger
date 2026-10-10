@@ -5,14 +5,11 @@ clean release consumer can resolve the complete facade.
 
 ## Release scope
 
-The current release is [v0.3.1](releases/v0.3.1.md): managed-service non-returning exit supervision, lifecycle-safe
-runtime health probes and the compatible Outbox v0.16.0 dependency baseline. All module tags and the complete
-published-consumer gate are verified; README installation commands now target v0.3.1.
-
-The next selected release is [v0.4.0](releases/v0.4.0.md). Its source packet combines the reviewed Kafka/NATS/pilot
-work and selects published Outbox root/PostgreSQL/SQLite v0.17.0 for staged adoption. Root and the Inbox/Outbox-adapter/
-observability and transport layers are published; the final graph is prepared. CLI publication and the complete
-clean published-consumer/CLI-install gate remain outstanding. The completed installation surface stays on v0.3.1.
+The current release is [v0.4.0](releases/v0.4.0.md). All seven immutable module tags, their public-proxy origins and
+checksums, and the canonical clean published-consumer/CLI-install gate were verified on 2026-10-10. Three offline
+CLI smoke checks passed. README installation commands target v0.4.0; the selected Outbox root/PostgreSQL/SQLite
+baseline is v0.17.0. Source, PostgreSQL and Kafka correctness evidence remains separately scoped from this
+published-module verification. The [v0.3.1 release](releases/v0.3.1.md) retains its historical evidence.
 
 Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
 candidates under ADR-0003. The implemented `sportsite` article-publication audit pilot retains its historical acceptance evidence. Current-version
@@ -59,9 +56,9 @@ gates close that boundary.
 ## Prepare exact module requirements
 
 The GoMessenger outbox adapter uses the compatible unified Outbox contract. For v0.4.0, select the already-published
-Outbox root, PostgreSQL and SQLite backend `v0.17.0` tags together. The PostgreSQL example already uses the newer
-transaction API through its existing pseudo-version; selecting v0.16.0 for final preparation would downgrade that
-backend below the example's required API. The new v0.17.0 graph still needs its own canonical checks.
+Outbox root, PostgreSQL and SQLite backend `v0.17.0` tags together. The PostgreSQL example now uses the published v0.17.0
+transaction API; its earlier pseudo-version graph remains historical evidence. Selecting v0.16.0 would downgrade
+that backend below the example's required API. The v0.17.0 graph passed its final-layer canonical checks.
 The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
 able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
 is pinned.

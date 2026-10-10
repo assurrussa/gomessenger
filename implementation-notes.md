@@ -1,5 +1,20 @@
 # Implementation notes
 
+## 2026-10-10 — v0.4.0 published acceptance complete
+
+- PR #48 merged at `f25c2ae26e3468fc6552902f0ca14890f9788a20`, exact tree
+  `51b7e7a04f9c62726e965031d2d0a950ea942835`, after final-head Codex review. The CLI tag points to that merge;
+  all seven immutable v0.4.0 module origins and checksums were verified through the public Go proxy.
+- Canonical `make test-consumer-release VERSION=v0.4.0` passed in 237.390 seconds. All ten sequential Go calls
+  exited zero, including published CLI installation and `TestImports`; three offline CLI smoke checks passed.
+  Consumer and CLI graphs contain no replacements. Validation used fresh caches, `GOWORK=off`, `GOENV=off`, Go 1.27.2.
+- The initial runner exited 1 only after all four validation phases passed, because temporary-cache cleanup raised
+  `PermissionError`. Separate owned-root cleanup subsequently exited 0 without rerunning validation. Preserve both
+  outcomes. Acceptance packet SHA-256: `20f65d7437e7ac29fbe3355e2db7cac21f8ec5c78a03f631a4f351352d50c4e0`.
+- README installation and versioned-reference links advance to v0.4.0. Source/PG/Kafka correctness retains its
+  separately recorded scope; no new load campaign, deployment or production-readiness claim. Earlier entries below
+  describe the state at each preparation stage and are retained as history.
+
 ## 2026-10-10 — v0.4.0 final dependency graph preparation
 
 - PR #47 merged at `1db6cd82553eb89d587a58992deef57f9aab819d`; published NATS/Kafka `v0.4.0` resolve at that
