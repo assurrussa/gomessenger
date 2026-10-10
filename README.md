@@ -132,8 +132,9 @@ rollback and post-commit/pre-ACK redelivery checks. It uses a source-pinned Outb
 
 It performs a business write and Outbox stage in one PostgreSQL transaction, relays through JetStream, retries an
 intentional handler failure, suppresses a distinct duplicate delivery in the Inbox, moves a permanent failure to the
-DLQ, and confirms replay. The example is a checkout-level demonstration with local GoMessenger replacements; it is not
-evidence of published-module resolution or production readiness.
+DLQ, and confirms replay. The default Docker build uses `GOWORK=off`; local GoMessenger builds explicitly select
+the repository workspace. See the [dependency modes and actual versions](examples/durable-postgres-nats#dependency-modes-and-actual-versions)
+before comparing results. Neither mode establishes production readiness or replaces the release-consumer gate.
 
 The example also contains an opt-in open-loop NATS capacity experiment over
 `HTTP -> business transaction + Outbox -> JetStream -> Inbox -> business projection`:

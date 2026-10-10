@@ -1,6 +1,6 @@
 # Durable PostgreSQL + NATS demo and capacity stack
 
-This checkout-level example makes GoMessenger's transaction and delivery boundaries visible in one run:
+This repository example makes GoMessenger's transaction and delivery boundaries visible in one run:
 
 ```text
 PostgreSQL business transaction
@@ -47,6 +47,64 @@ make demo-durable-postgres-nats-down
 The compose stack uses a dedicated PostgreSQL 18 container and a single-node NATS development topology. The app creates
 the `demo` schema, applies embedded Outbox and namespaced Inbox migrations, and creates two demo business tables. It does
 not drop or truncate data. Do not point this example at a shared database without reviewing those additive migrations.
+
+## Dependency modes and actual versions
+
+The standard Docker demo builds with `GOWORK=off`. Its `go.mod` has no
+`replace` directives, so dependencies come from the selected module graph,
+not from the GoMessenger source copied into the image. It currently declares
+GoMessenger root, Inbox, NATS, and Outbox adapter `v0.3.1`, Outbox root
+`v0.16.0`, and PostgreSQL backend
+`v0.16.1-0.20261009035614-46f29a8e18e1`. That backend is a commit-pinned
+pseudo-version, not a new release tag.
+
+For a local GoMessenger build, explicitly select this repository's `go.work`.
+It selects the local GoMessenger modules; it does not select a sibling Outbox
+checkout. The capacity Dockerfile also uses this workspace. Its launcher
+copies and records the sibling Outbox checkout, but that alone does not make
+it a build dependency: the committed workspace has no Outbox `use` or
+`replace` entry. The checkout-workspace batch proof requires a `devel`
+Outbox version and rejects a module-resolved one; copying the sibling alone
+cannot satisfy that proof gate.
+
+From the repository root, inspect and build either mode without starting the
+demo:
+
+```sh
+# Published-module graph, including the declared commit-pinned backend.
+(
+  set -e
+  cd examples/durable-postgres-nats
+  export GOWORK=off
+  go list -m all
+  go build -o gomessenger-durable-postgres-nats .
+  go version -m ./gomessenger-durable-postgres-nats
+)
+
+# Local GoMessenger checkout with the remaining dependencies module-resolved.
+(
+  set -e
+  export GOWORK="$(pwd)/go.work"
+  cd examples/durable-postgres-nats
+  go list -m all
+  go build -o gomessenger-durable-postgres-nats .
+  go version -m ./gomessenger-durable-postgres-nats
+)
+```
+
+A `require` line is an input to version selection. Use `go list -m all` for
+the selected graph and `go version -m` on the exact binary you will run for its
+embedded dependency versions and replacements. Local replacement metadata
+does not identify a Git commit or dirty changes; record those separately.
+The two commands above write the same binary name, so inspect each result
+before rebuilding in the other mode.
+
+The demo does not print a complete module inventory at startup. The capacity
+report's `environment.outboxVersion` reads only Outbox root from the
+capacity-runner binary's build metadata: a selected version, the replacement
+version, `devel (local replace)` for a path replacement, or `unknown` when
+unavailable. It does not report GoMessenger/adapters/backend versions or
+independently inspect the API service binary.
 
 ## Atomic Inbox → business → outgoing event
 
@@ -116,6 +174,87 @@ they inject a real Outbox SQL staging error and a deferred constraint failure at
 the business row and event while recording attempt 1; a failed outer commit must retain neither effects nor attempt
 accounting, so its successful retry starts at attempt 1. Unit tests reject missing/wrong transactions and check stable,
 source-scoped outgoing identity.
+
+## Partial SQL batch failures and retry ownership
+
+The batch consumer uses `handleOrderBatch` in
+[internal/demo/app.go](internal/demo/app.go). Unlike the single-message failure
+scenario above, it classifies **every item before any business SQL**, then inserts
+only the successful subset with one `INSERT ... FROM unnest` in the Inbox
+transaction. `NewBatchResultBuilder` initially marks every item successful, so
+every rejected or deferred item must be marked explicitly.
+
+For example, input in broker order can be:
+
+1. order A: success;
+2. order B: `RetryAfter(..., 300*time.Millisecond)`;
+3. order C: success;
+4. order D: `Permanent(...)`.
+
+The handler writes A and C only and returns all four keyed results with a nil
+top-level error. If the shared transaction commits, A and C have committed
+business effects and Inbox completion; B consumes an attempt and is retried
+(or goes to DLQ when exhausted); D becomes terminal and is handed to DLQ.
+ACK and DLQ/retry handoff belong to the consumer after SQL commit. Returning
+an item error does **not** undo arbitrary SQL already issued for that item:
+there are no automatic per-item savepoints in the batch path.
+
+If one row makes the shared INSERT fail, return an empty `BatchResult{}` and
+the SQL error, as this handler does. Do not turn it into one failed item while
+returning success for the remaining items. The Inbox backend rolls back the
+entire transaction, including earlier writes and attempt bookkeeping. Ordinary
+top-level failures retry the batch without consuming item attempts; that retry
+is unbounded by `MaxAttempts`, so a persistent SQL/schema error needs operator
+attention. A top-level `Permanent` error or malformed result instead fails the
+consumer closed. An ambiguous commit is resolved against durable Inbox state
+on redelivery.
+
+The handler neither sleeps nor starts its own retry loop. The consumer owns
+durable retry scheduling, attempt limits and terminal handoff. Its next
+invocation may contain a different subset and order; a completed identity is
+filtered by the Inbox, while retry retains the original message identity.
+The demo's in-memory `attemptTracker` only injects a first-call failure. It is
+not durable retry accounting, is not rolled back with SQL, and resets on restart.
+
+### Dependent events need an application ordering rule
+
+In the example above, C can commit before B succeeds, even though B arrived
+first. The input is broker-ordered; the keyed result's order is irrelevant.
+Neither partial retries nor concurrent batches provide global or per-aggregate
+business ordering. A set-based INSERT's input order is not an execution-order
+guarantee either.
+
+Do not reuse this independent-order projection for dependent transitions such
+as `OrderCreated` followed by `OrderPaid` without a host-owned prerequisite or
+version check. Classify a not-yet-applicable successor with `DeferAfter` and
+perform no writes for it; it will retry without consuming a handler attempt.
+Validate durable prerequisites using the Inbox transaction and appropriate
+locking/version constraints across concurrent invocations. A predecessor that
+becomes terminal requires a business recovery decision; repeated deferral
+alone cannot resolve it. Batch size 1 or concurrency 1 alone does not prevent
+a later message from overtaking a delayed retry.
+
+### Regression checks and their limits
+
+From this example module:
+
+```sh
+GOWORK=off go test ./internal/demo -run '^TestHandleOrderBatch'
+```
+
+[internal/demo/batch_sql_test.go](internal/demo/batch_sql_test.go) records the
+existing `inbox.SQLTx` boundary: classification completes before SQL, failed
+items are excluded, successful columns retain input alignment, an explicit
+later invocation handles B, and SQL failure returns only a top-level error.
+It also covers an all-failed batch and a missing transaction. This test does
+not simulate a database commit, rollback, Inbox deduplication or broker ACK.
+
+The existing [PostgreSQL Inbox regression suite](../../adapters/inbox/pgsql/pgsql_integration_test.go)
+checks real partial commit, whole-batch rollback with unchanged attempts, and
+duplicate suppression; run it against a disposable database with
+`GOMESSENGER_POSTGRES_DSN='...' make test-postgres` from the repository root.
+See [ADR-0005](../../docs/decisions/0005-batch-consumer.md) for the complete
+item/top-level outcome contract.
 
 ## Capacity experiment
 
@@ -368,9 +507,14 @@ container resources. For a short diagnostic run, override `INBOX_CAPACITY_WARMUP
 
 ## Scope
 
-The example module uses local `replace` directives because it deliberately proves the current checkout, which may be
-ahead of published modules. It is compiled by `make check`; it does not prove published-module resolution. The capacity
-experiment is explicitly local and opt-in, so `make check` and hosted CI do not execute it. Single-node NATS, local
-Docker resources, a synthetic business process, and checkout-local replacements do not establish production capacity,
-failover, or operational readiness. The separate [release process](../../docs/release.md) and
+`make check` and `make check-published` use `GOWORK=off` by default;
+`make check-workspace` explicitly selects the repository workspace. The example
+is compiled by those source gates. A workspace build can include code ahead of
+published modules; a module-resolved build is not a substitute for the separate
+release-consumer gate or evidence that every dependency is a release tag.
+
+The capacity experiment is local and opt-in, so `make check` and hosted CI do
+not execute it. Single-node NATS, local Docker resources, and a synthetic
+business process do not establish production capacity, failover, or operational
+readiness. The separate [release process](../../docs/release.md) and
 [real-service pilot](../../docs/decisions/0002-real-project-pilot.md) remain required.
