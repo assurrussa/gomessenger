@@ -1,5 +1,18 @@
 # Implementation notes
 
+## 2026-10-10 — v0.4.0 root-dependent module layer
+
+- Resolve published GoMessenger root `v0.4.0` at `7adc402895a9f8e4680103d3db718f72d5f52b96` and Outbox
+  root/PostgreSQL/SQLite `v0.17.0` through the public Go proxy and checksum database before preparation.
+- Canonical `release-ready` and `release-readiness` for `RELEASE_LAYER=modules` pass. Inbox, Outbox adapter and
+  observability now require the published root; the Outbox adapter selects published Outbox `v0.17.0`.
+- The checkout-only E2E fixture selects the published root and Outbox root/SQLite prerequisites while preserving
+  its GoMessenger path replacements and later adapter requirements. No Outbox replacement is added. The workspace
+  gains version-qualified local GoMessenger replacements; checkout-wide formatting changes no Go source file.
+- Exact selected graphs and canonical source-gate results belong to the retained module-layer validation packet.
+  Transports, CLI, consumer and the atomic PostgreSQL example keep their previous graphs until their own layers;
+  this preparation does not claim their combined v0.4.0 acceptance or publish any tag.
+
 ## 2026-10-10 — v0.4.0 bounded NATS process fixtures and root preparation
 
 - Add opt-in fixtures in `testdata/e2e/nats_process_{helper,checks,operations}_test.go` and
