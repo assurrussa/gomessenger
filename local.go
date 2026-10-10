@@ -130,6 +130,30 @@ type LocalAsyncConfig struct {
 }
 
 // LocalAsyncRoute admits handler calls to a bounded GoBus async runtime.
+//
+// Local dispatch does not serialize or deep-copy payloads. Passing a struct by
+// value copies its fields, but pointers, maps, slices (including their backing
+// arrays), and other referenced data still alias the caller's data. Event
+// subscribers also receive the same referenced data, not independent copies.
+//
+// Callers and handlers must coordinate ownership of that data. Keep shared
+// payload data immutable while a call is queued or executing, or give the
+// handler exclusive access. A handler may change its own value fields, but must
+// copy shared referenced data before changing it unless exclusive access or
+// synchronization is guaranteed. Event handlers should not mutate shared data
+// that later subscribers may read.
+//
+// Send and Publish return ReceiptAccepted after admission, not completion, and
+// cancelling their caller context does not stop accepted work. Reuse shared
+// storage only after application-level synchronization proves all accesses have
+// ended, or after a graceful Shutdown returns nil. BeginDrain alone and a
+// timed-out or cancelled Shutdown do not establish completion.
+//
+// Query waits for a result, but cancellation can return before the handler has
+// stopped; cancellation alone does not make its request safe to mutate. Query
+// results are not deep-copied either. Any goroutine or retained reference that
+// outlives a handler needs its own ownership and synchronization protocol;
+// handler completion and runtime drain do not wait for such application work.
 type LocalAsyncRoute struct {
 	name    string
 	runtime *gobusasync.Runtime
