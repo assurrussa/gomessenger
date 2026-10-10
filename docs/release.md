@@ -43,9 +43,10 @@ adoption requires all used modules to resolve at the same published release and 
    tagging. Request a missing review with `@codex review`; a later push requires
    a new completed result.
 
-`make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox;
-its current Outbox root/SQLite prerequisites are v0.16.0 and the durable example's PostgreSQL backend is
-v0.16.1-0.20261009035614-46f29a8e18e1. Root preparation alone does not advance this graph.
+`make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox.
+The prepared modules layer selects Outbox root/SQLite v0.17.0 for the E2E fixture and Outbox root v0.17.0 for its adapter.
+The durable example retains Outbox root v0.16.0 and PostgreSQL backend
+v0.16.1-0.20261009035614-46f29a8e18e1 until final preparation. Root preparation alone did not advance these requirements.
 `make check` uses `GOWORK=off`, but development replacements in
 individual `go.mod` files still apply. Before final release preparation, either source gate can pass without proving
 that an external consumer can resolve the new GoMessenger APIs. The final `release-readiness` and published-consumer
