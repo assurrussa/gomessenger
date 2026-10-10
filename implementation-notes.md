@@ -1,5 +1,22 @@
 # Implementation notes
 
+## 2026-10-10 — v0.4.0 final dependency graph preparation
+
+- PR #47 merged at `1db6cd82553eb89d587a58992deef57f9aab819d`; published NATS/Kafka `v0.4.0` resolve at that
+  origin. Verify all six published GoMessenger prerequisites and Outbox root/PostgreSQL/SQLite `v0.17.0` through
+  the public Go proxy and checksum database before final preparation.
+- Canonical `release-ready` and `release-readiness` for `RELEASE_LAYER=final` pass. CLI, consumer, E2E and the
+  durable example now align GoMessenger requirements at `v0.4.0`; consumer/example/E2E select Outbox `v0.17.0`
+  with matching PostgreSQL or SQLite backends where used. Tidy records resolver-produced checksums; checkout-wide
+  formatting changes no Go source. Published modules, consumer and example contain no replacements.
+- E2E intentionally retains GoMessenger checkout replacements and no Outbox replacements. Its canonical source
+  and Kafka correctness results are distinct from published transport acceptance. The separate final-layer packet
+  records actual per-module graphs, canonical source checks, PostgreSQL Inbox/atomic-example correctness and bounded
+  official Kafka 4.1.2/4.3.1 correctness, with owned fixtures removed afterward.
+- No load/comparison/soak campaign is part of this layer. Parent-owned final PR-head review, merge and CLI tag
+  remain outstanding. The complete clean published-consumer/CLI-install check is reserved for a separately approved
+  second turn after that tag resolves; README installation and completed-release claims remain at `v0.3.1`.
+
 ## 2026-10-10 — v0.4.0 transport dependency layer
 
 - PR #46 merged at `6b6acd17fddb7b77448fe83da0662744e96cda3b`; its Inbox, Outbox-adapter and observability
