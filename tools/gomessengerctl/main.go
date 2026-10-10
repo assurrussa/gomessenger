@@ -38,6 +38,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	switch args[0] {
+	case "schema":
+		if args[1] != "check" {
+			usage(stderr)
+			return exitUsage
+		}
+		return checkSchemas(args[2:], stdout, stderr)
 	case "kafka":
 		return runKafka(args[1:], stdout, stderr)
 	case "manifest":
@@ -314,6 +320,9 @@ func report(stderr io.Writer, err error) int {
 }
 
 func usage(writer io.Writer) {
+	_, _ = fmt.Fprintln(writer,
+		"usage: gomessengerctl schema check --manifest manifest.json --file schemas.json "+
+			"--baseline baseline.json --baseline-sha256 HEX")
 	_, _ = fmt.Fprintln(writer, "usage: gomessengerctl manifest validate --file manifest.json")
 	_, _ = fmt.Fprintln(writer, "       gomessengerctl topology validate --file topology.json")
 	_, _ = fmt.Fprintln(writer,

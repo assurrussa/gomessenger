@@ -1,0 +1,30 @@
+{
+  "specVersion": "1.0",
+  "policy": "immutable-version-v1",
+  "descriptors": [
+    {
+      "kind": "event",
+      "name": "media.processed",
+      "schemaVersion": 1,
+      "contentType": "application/json",
+      "dataEncoding": "json",
+      "schema": "urn:example:media.processed:1",
+      "document": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "$defs": {"size": {"type": "integer", "minimum": 0}},
+        "properties": {
+          "mediaId": {"type": "string", "minLength": 1},
+          "status": {"enum": ["done"]},
+          "sizes": {"type": "array", "items": {"$ref": "#/$defs/size"}}
+        },
+        "required": ["mediaId", "status"],
+        "additionalProperties": false
+      },
+      "samples": [
+        {"mediaId": "media-1", "status": "done", "sizes": [1, 2]},
+        {"mediaId": "media-2", "status": "done"}
+      ]
+    }
+  ]
+}

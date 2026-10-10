@@ -1,0 +1,14 @@
+{
+  "specVersion": "1.0",
+  "source": "urn:example:schema-check",
+  "descriptors": [
+    {
+      "kind": "event",
+      "name": "media.processed",
+      "schemaVersion": 1,
+      "contentType": "application/json",
+      "dataEncoding": "json",
+      "schema": "urn:example:media.processed:1"
+    }
+  ]
+}
