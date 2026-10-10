@@ -1,6 +1,6 @@
 # ADR-0002: Pilot article publication audit in a real service
 
-- Status: accepted; target selected; selected-release verification required; `site` implementation remains pending
+- Status: accepted; host implemented with historical local acceptance; selected-release and production acceptance remain separately qualified
 - Date: 2026-08-24
 
 ## Context
@@ -9,8 +9,8 @@ Unit, race, checkptr, embedded JetStream, SQLite E2E, PostgreSQL integration, an
 contracts in controlled environments. They do not prove service integration cost, production-shaped throughput,
 operational ownership, deployment behavior, or useful observability under a real workload.
 
-The selected host is `site`. Its existing article-publication transaction already emits webhooks with an immutable
-recipient snapshot. A pilot must not replace or reinterpret that path.
+The selected host is `sportsite` (formerly `site`). Its existing article-publication transaction already emits webhooks
+with an immutable recipient snapshot. The pilot must not replace or reinterpret that path.
 
 ## Decision
 
@@ -25,14 +25,15 @@ article changes from draft to published
   -> article_publication_audit row
 ```
 
-The event payload is `{articleId, slug, locale, publishedAt}`. The pilot is disabled by default and publishes only on
-the draft-to-published transition. Updates and unpublishing do not emit it. The audit handler writes through
-`inbox.SQLTxFromContext`, so the audit row and Inbox completion marker commit in one PostgreSQL transaction.
+The event payload is `{articleId, slug, locale, publishedAt}`. The pilot is disabled by default for its initial dark
+rollout and publishes only on the draft-to-published transition. Updates and unpublishing do not emit it. The audit
+handler writes through `inbox.SQLTxFromContext`, so the audit row and Inbox completion marker commit in one PostgreSQL
+transaction. The host owns its current enabled/disabled configuration.
 
-Implementation belongs in a separate `site` project task and branch after every used GoMessenger module is pinned to
-the same published release and that version passes the clean release-consumer gate. Local `replace` directives are
-forbidden. The host must upgrade Go to 1.27, pin Outbox root and PostgreSQL backend together at `v0.16.0`, own the NATS
-connection/topology and migrations, and preserve existing required-runner supervision.
+The host implementation exists in `assurrussa/sportsite`. Every used GoMessenger module must remain pinned to the same
+published release, with selected-version compatibility established by the consumer-update gates. Local `replace`
+directives are forbidden in the host. The host uses Go 1.27, owns the NATS connection/topology and migrations, preserves
+required-runner supervision, and pins Outbox root and PostgreSQL backend together.
 
 ## Compatibility constraints
 
@@ -47,10 +48,23 @@ connection/topology and migrations, and preserve existing required-runner superv
 
 ## Acceptance
 
-The separate pilot task must prove business rollback, Outbox staging, JetStream `PubAck`, one audit row, real lost-ACK
-redelivery suppression, transient retry, permanent DLQ and confirmed replay, process and persistent-NATS restart,
-PostgreSQL outage/recovery, graceful and forced drain, operational telemetry, and a 15-minute 5 events/s soak. After
-the soak, lag must reach zero within 30 seconds, no row may be missing or duplicated, DLQ must remain unexpectedly
-empty, p95 handler latency must stay below 500 ms, and at least half of the pgx pool must remain free.
+The pilot must prove business rollback, Outbox staging, JetStream `PubAck`, one audit row, real lost-ACK redelivery
+suppression, transient retry, permanent DLQ and confirmed replay, process and persistent-NATS restart, PostgreSQL
+outage/recovery, graceful and forced drain, operational telemetry, and a 15-minute 5 events/s soak. After the soak, lag
+must reach zero within 30 seconds, no row may be missing or duplicated, DLQ must remain unexpectedly empty, p95 handler
+latency must stay below 500 ms, and at least half of the pgx pool must remain free.
 
-Repository gates alone do not satisfy this ADR, and this document does not claim that the pilot is implemented.
+## Existing host evidence
+
+The [historical host pilot report](https://github.com/assurrussa/sportsite/blob/3e59b2c6cf9a531092f369598ab6913709ef7325/docs/tasks/gomessenger-site-pilot.md)
+records implementation, real local admin acceptance, and a 901.390-second local soak with 4,500 audit rows. The
+[version-specific follow-up](https://github.com/assurrussa/sportsite/blob/3e59b2c6cf9a531092f369598ab6913709ef7325/docs/tasks/2026-09-06-gomessenger-v030.md)
+records PostgreSQL/NATS E2E acceptance for GoMessenger v0.3.0 and Outbox v0.15.0. Preserve these historical passes;
+they are committed reports, not raw current-version execution logs or production-readiness proof.
+
+Current host sources and reusable opt-in E2E/soak commands are in
+[sportsite](https://github.com/assurrussa/sportsite/blob/dfcf3f30e3c2e76593ed89ba0002a176ed117945/docs/backend/messaging.md).
+Its runtime-restart fixture replaces a consumer inside one test process. The separate
+[NATS process screen](../performance/nats-process-operations.md) addresses process/rolling behavior only in its stated
+direct-NATS/SQLite scope. Neither a two-minute synthetic screen nor ordinary repository gates replaces host or
+production acceptance. This ADR does not authorize deployment or a new production retention policy.

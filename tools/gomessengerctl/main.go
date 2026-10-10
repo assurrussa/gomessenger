@@ -286,8 +286,10 @@ func readTopologyArgs(command string, args []string, stderr io.Writer) (natsadap
 	return topology, exitOK
 }
 
+// readStrictJSON reads a file explicitly selected by the local CLI operator.
+// It provides no filesystem confinement and must not receive remote or untrusted paths.
 func readStrictJSON(path string, target any) (err error) {
-	file, err := os.Open(filepath.Clean(path))
+	file, err := os.Open(filepath.Clean(path)) // #nosec G703 -- The local CLI operator explicitly selects this file.
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}

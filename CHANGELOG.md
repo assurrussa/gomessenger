@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+Target: [v0.4.0](docs/releases/v0.4.0.md). Source preparation only; dependency-layer publication and the clean
+published-consumer gate remain outstanding.
+
 ### Fixed
 
 - local command, event, and query terminal handlers retain canonical metadata and child lineage when global middleware
@@ -14,6 +17,30 @@ All notable changes to this project will be documented in this file.
 - NATS `HandlerConfig.MaxAckPending` explicitly controls the shared durable's global outstanding-ACK window separately
   from per-replica worker/prefetch bounds. Zero preserves the previous default; negative values are rejected and topology
   mismatches remain strict conflicts. Existing unkeyed configuration literals need to be updated to keyed form.
+
+- per-item message and duplicate counters, consumer batch-size observations, and selected batch outcome metrics in
+  the optional observability module; selected outcomes do not imply confirmed broker finalization.
+- a PostgreSQL-only companion demonstrating atomic Inbox completion, business writes, and Outbox staging in one
+  transaction, with stable outgoing identity across retries.
+- executable examples for LocalAsync payload ownership and safe reuse, SQL batch retry decisions, and application-owned
+  aggregate-version ordering, plus explicit dependency modes for the durable demo.
+- offline `gomessengerctl schema check` with a trusted SHA-256-pinned baseline, immutable descriptor/schema versions,
+  and JSON Schema sample validation; this does not establish general backward/forward compatibility or runtime validation.
+
+- opt-in, bounded two-process NATS rolling/restart checks and a separate 900-second direct-NATS/shared-SQLite pilot;
+  retained results and exact source/dependency limits are recorded in the v0.4.0 candidate notes.
+- reproducible comparisons of existing Kafka single and batch publication paths with committed raw measurements;
+  these short within-run screens do not establish production capacity or introduce a typed direct-batch API.
+
+### Changed
+
+- CI and benchmark workflows run only through manual dispatch; CI also offers a static-only validation mode.
+
+### Planned dependency adoption
+
+- v0.4.0 selects published Outbox root and PostgreSQL/SQLite backend v0.17.0 together through the existing staged
+  release preparation. This source-only candidate retains the previous module files; the root module has no Outbox
+  dependency. Prior synthetic results use their original v0.16.0 graph, not the planned v0.17.0 graph.
 
 ## [0.3.1] - 2026-10-03
 
