@@ -1,5 +1,20 @@
 # Implementation notes
 
+## 2026-10-10 — v0.4.0 transport dependency layer
+
+- PR #46 merged at `6b6acd17fddb7b77448fe83da0662744e96cda3b`; its Inbox, Outbox-adapter and observability
+  `v0.4.0` tags resolve through the public Go proxy and checksum database at that exact origin. Recheck root
+  `v0.4.0` and all selected Outbox `v0.17.0` prerequisites before changing transport requirements.
+- Canonical `release-ready` and `release-readiness` for `RELEASE_LAYER=transports` pass. NATS and Kafka now require
+  published root and Inbox `v0.4.0`; tidy updates their verified sums. Checkout-wide formatting changes no Go file.
+- E2E advances its published Inbox requirement while retaining all GoMessenger checkout replacements and published
+  Outbox root/SQLite `v0.17.0` without external replacements. Its broker correctness gate exercises this checkout
+  graph, not a clean published transport consumer. Selected graphs, canonical source checks and bounded Kafka
+  correctness evidence for official 4.1.2/4.3.1 belong to the separate transport-layer packet.
+- CLI, consumer and atomic PostgreSQL example requirements remain unchanged until final preparation. No load or
+  comparison campaign is part of this layer. Parent-owned final PR-head review, merge and transport tags remain
+  separate publication requirements; README installation and Latest release stay on completed `v0.3.1`.
+
 ## 2026-10-10 — v0.4.0 root-dependent module layer
 
 - Resolve published GoMessenger root `v0.4.0` at `7adc402895a9f8e4680103d3db718f72d5f52b96` and Outbox
