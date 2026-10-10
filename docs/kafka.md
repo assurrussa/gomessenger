@@ -194,6 +194,61 @@ Ordering is preserved within each concrete topic-partition, including while an e
 failed record is moved to a different retry topic, later source records may overtake it. Choose handlers and domain
 keys with that boundary in mind; this adapter does not claim strict per-key ordering across topics.
 
+### Dependent changes: aggregate version versus schema version
+
+`Metadata.Key = orderID` keeps an aggregate's records keyed consistently, but
+does not serialize its source and retry topics. For example, `OrderCreated`
+can fail and move to retry while the later `OrderPaid` reaches the handler.
+Concurrency 1 and batch size 1 do not close that cross-topic gap.
+
+Use a host-owned sequence in the payload when applying a change requires its
+predecessor. The runnable
+[aggregate-version example](../example_ordering_test.go) uses one
+`orders.changed` descriptor with `SchemaVersion = 2` for both changes:
+
+- `{orderId: "order-42", aggregateVersion: 1, status: "created"}`
+- `{orderId: "order-42", aggregateVersion: 2, status: "paid"}`
+
+`SchemaVersion` identifies the wire contract and selects the descriptor/topic
+version. `aggregateVersion` is application data identifying one order's
+committed transition. It is not a GoMessenger metadata field or a retry count.
+Increment it with the authoritative business change, not on delivery attempts;
+preserve the original message identity and payload on retry. Changing the wire
+schema does not reset the order's business sequence.
+
+The example assumes a single authoritative sequence, starting at 1, and a
+projection that receives every transition in that sequence. It accepts only
+`incoming == current + 1`; a gap returns `DeferAfter` without changing state.
+When Created eventually applies, Paid can apply on its next delivery.
+`DeferAfter` leaves the durable handler-attempt count unchanged, unlike
+`RetryAfter`. A missing, expired or permanently failed predecessor therefore
+needs an expiry or host-owned gap-recovery policy and monitoring; deferral alone cannot
+repair it, and `MaxAttempts` does not bound those deferrals. A filtered event
+stream needs its own prerequisite rule rather than this contiguous sequence.
+
+For a real handler, load and serialize the aggregate state, validate its version
+and business transition, and write the new state using the same transaction
+provided by `inbox.SQLTxFromContext`. Use database locking/version constraints,
+including serialization of concurrent first inserts. A process-local check or
+the Inbox's per-message lock does not serialize different messages for one
+aggregate. Commit the projection and Inbox completion together before ACK.
+
+Within retained deduplication history, the Inbox suppresses a completed
+`(ConsumerID, Source, MessageID)` identity with a matching canonical fingerprint.
+The example fails closed on a stale version reaching the handler under a different identity;
+it does not silently accept conflicting payloads as duplicates. Decide any
+stale-event reconciliation policy explicitly for the application.
+
+Run the example and focused regression tests from the repository root:
+
+```sh
+GOWORK=off go test . -run '^(ExampleDeferAfter_aggregateVersion|TestAggregateVersion)'
+```
+
+These tests exercise application decisions and real envelope schema validation.
+They manually arrange the overtaking deliveries; they do not run Kafka, SQL,
+Inbox attempt accounting or ACKs, and do not establish cross-topic ordering.
+
 ## Inspect and replay DLQ records
 
 Save the DLQ record value as JSON, then use:
