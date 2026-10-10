@@ -376,6 +376,7 @@ func persistKafkaPublishReport(t *testing.T, report kafkaPublishReport) {
 		t.Fatalf("encode comparison report: %v", err)
 	}
 	if path := os.Getenv("GOMESSENGER_KAFKA_REPORT"); path != "" {
+		//nolint:gosec // This opt-in output file is selected by the host launcher, never by broker input.
 		if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 			t.Fatalf("write comparison report: %v", err)
 		}
