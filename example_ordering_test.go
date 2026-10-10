@@ -9,6 +9,11 @@ import (
 	messenger "github.com/assurrussa/gomessenger"
 )
 
+const (
+	orderedExampleID     = "order-42"
+	orderedCreatedStatus = "created"
+)
+
 type orderedChange struct {
 	OrderID          string `json:"orderId"`
 	AggregateVersion int64  `json:"aggregateVersion"`
@@ -26,7 +31,7 @@ type orderedProjection struct {
 // cannot prove those database boundaries or serialize concurrent consumers.
 func nextOrderedProjection(current orderedProjection, change orderedChange) (orderedProjection, error) {
 	if change.OrderID == "" || change.AggregateVersion <= 0 ||
-		(change.Status != "created" && change.Status != "paid") {
+		(change.Status != orderedCreatedStatus && change.Status != "paid") {
 		return current, messenger.Permanent(errors.New("invalid aggregate change"))
 	}
 	if change.AggregateVersion <= current.version {
@@ -37,8 +42,8 @@ func nextOrderedProjection(current orderedProjection, change orderedChange) (ord
 	if change.AggregateVersion != current.version+1 {
 		return current, messenger.DeferAfter(errors.New("waiting for predecessor"), time.Second)
 	}
-	if (current.version == 0 && change.Status == "created") ||
-		(current.status == "created" && change.Status == "paid") {
+	if (current.version == 0 && change.Status == orderedCreatedStatus) ||
+		(current.status == orderedCreatedStatus && change.Status == "paid") {
 		return orderedProjection{version: change.AggregateVersion, status: change.Status}, nil
 	}
 	return current, messenger.Permanent(errors.New("invalid order transition"))
@@ -46,8 +51,8 @@ func nextOrderedProjection(current orderedProjection, change orderedChange) (ord
 
 func ExampleDeferAfter_aggregateVersion() {
 	changed := messenger.MustEvent("orders.changed", 2, messenger.JSON[orderedChange]())
-	created := orderedChange{OrderID: "order-42", AggregateVersion: 1, Status: "created"}
-	paid := orderedChange{OrderID: "order-42", AggregateVersion: 2, Status: "paid"}
+	created := orderedChange{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus}
+	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"}
 	fmt.Println("schema", changed.Info().SchemaVersion, "aggregate versions", created.AggregateVersion, paid.AggregateVersion)
 
 	// Assume Created failed without committing and moved to a retry topic.
@@ -79,8 +84,8 @@ func ExampleDeferAfter_aggregateVersion() {
 
 func TestAggregateVersionRetryOrder(t *testing.T) {
 	t.Parallel()
-	created := orderedChange{OrderID: "order-42", AggregateVersion: 1, Status: "created"}
-	paid := orderedChange{OrderID: "order-42", AggregateVersion: 2, Status: "paid"}
+	created := orderedChange{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus}
+	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"}
 	current := orderedProjection{}
 
 	// Repeated successor delivery must not advance or otherwise mutate state.
@@ -115,11 +120,11 @@ func TestAggregateVersionRetryOrder(t *testing.T) {
 func TestAggregateVersionRejectsInvalidTransitions(t *testing.T) {
 	t.Parallel()
 	for _, change := range []orderedChange{
-		{OrderID: "", AggregateVersion: 1, Status: "created"},
-		{OrderID: "order-42", AggregateVersion: 0, Status: "created"},
-		{OrderID: "order-42", AggregateVersion: -1, Status: "created"},
-		{OrderID: "order-42", AggregateVersion: 1, Status: "paid"},
-		{OrderID: "order-42", AggregateVersion: 2, Status: "unknown"},
+		{OrderID: "", AggregateVersion: 1, Status: orderedCreatedStatus},
+		{OrderID: orderedExampleID, AggregateVersion: 0, Status: orderedCreatedStatus},
+		{OrderID: orderedExampleID, AggregateVersion: -1, Status: orderedCreatedStatus},
+		{OrderID: orderedExampleID, AggregateVersion: 1, Status: "paid"},
+		{OrderID: orderedExampleID, AggregateVersion: 2, Status: "unknown"},
 	} {
 		current := orderedProjection{}
 		next, err := nextOrderedProjection(current, change)
@@ -137,8 +142,8 @@ func TestAggregateVersionIsNotSchemaVersion(t *testing.T) {
 	ids := [...]messenger.MessageID{{15: 1}, {15: 2}}
 	current := orderedProjection{}
 	for index, change := range []orderedChange{
-		{OrderID: "order-42", AggregateVersion: 1, Status: "created"},
-		{OrderID: "order-42", AggregateVersion: 2, Status: "paid"},
+		{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus},
+		{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"},
 	} {
 		metadata := messenger.Metadata{
 			ID: ids[index], CorrelationID: ids[index], Kind: info.Kind, Name: info.Name,
