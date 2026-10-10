@@ -109,7 +109,8 @@ the durable consumer database-versus-ack gap when the handler uses the transacti
 The inbox key is `(consumer_id, source, message_id)`. Replaying the same key and fingerprint skips the handler and is a
 successful duplicate. Replaying the same key with different canonical bytes is an identity conflict and fails closed.
 
-The checkout's source-pinned atomic companion can stage an outgoing event in that same PostgreSQL Inbox transaction.
+The atomic PostgreSQL companion uses published Outbox root and PostgreSQL backend `v0.17.0` and can stage an outgoing
+event in that same PostgreSQL Inbox transaction.
 This addition is not available in Outbox `v0.16.0`. Bind the official Outbox PostgreSQL
 `jobsrepo.NewSQLTxPutter` to the concrete `*sql.Tx` from `inbox.SQLTxFromContext`, then give it to
 `outboxadapter.NewProducer`. The host must use the migrated Outbox schema in that transaction's search path.
