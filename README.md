@@ -128,7 +128,8 @@ make demo-durable-postgres-nats
 
 For a consumer that writes business state and emits another event in the same Inbox transaction, see the
 [atomic PostgreSQL companion](examples/durable-postgres-nats#atomic-inbox--business--outgoing-event), including
-rollback and post-commit/pre-ACK redelivery checks. It uses a source-pinned Outbox backend addition beyond `v0.16.0`.
+rollback and post-commit/pre-ACK redelivery checks. The prepared example selects published Outbox root/PostgreSQL
+`v0.17.0`; its source checks are separate from complete v0.4.0 published-module verification.
 
 It performs a business write and Outbox stage in one PostgreSQL transaction, relays through JetStream, retries an
 intentional handler failure, suppresses a distinct duplicate delivery in the Inbox, moves a permanent failure to the

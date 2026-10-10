@@ -53,10 +53,12 @@ not drop or truncate data. Do not point this example at a shared database withou
 The standard Docker demo builds with `GOWORK=off`. Its `go.mod` has no
 `replace` directives, so dependencies come from the selected module graph,
 not from the GoMessenger source copied into the image. It currently declares
-GoMessenger root, Inbox, NATS, and Outbox adapter `v0.3.1`, Outbox root
-`v0.16.0`, and PostgreSQL backend
-`v0.16.1-0.20261009035614-46f29a8e18e1`. That backend is a commit-pinned
-pseudo-version, not a new release tag.
+GoMessenger root, Inbox, NATS, and Outbox adapter `v0.4.0`, with published Outbox
+root and PostgreSQL backend `v0.17.0`. The prepared example graph is separate
+from complete release acceptance, which still requires CLI publication and the
+clean published-consumer gate. Before final preparation, this example used
+GoMessenger `v0.3.1`, Outbox root `v0.16.0` and PostgreSQL backend
+`v0.16.1-0.20261009035614-46f29a8e18e1`; earlier results retain that historical graph.
 
 For a local GoMessenger build, explicitly select this repository's `go.work`.
 It selects the local GoMessenger modules; it does not select a sibling Outbox
@@ -71,7 +73,7 @@ From the repository root, inspect and build either mode without starting the
 demo:
 
 ```sh
-# Published-module graph, including the declared commit-pinned backend.
+# Published-module graph with the declared Outbox root/PostgreSQL v0.17.0 tags.
 (
   set -e
   cd examples/durable-postgres-nats
@@ -108,8 +110,9 @@ independently inspect the API service binary.
 
 ## Atomic Inbox → business → outgoing event
 
-This checkout companion uses the commit-pinned Outbox PostgreSQL backend in this module's `go.mod`;
-`NewSQLTxPutter` is not part of the published Outbox `v0.16.0` API. No new release tag is implied.
+This prepared companion uses the published Outbox PostgreSQL backend `v0.17.0` in this module's `go.mod`.
+`NewSQLTxPutter` is absent from the older Outbox `v0.16.0` API; historical pseudo-version checks remain separate
+from verification of the prepared v0.17.0 graph. Example correctness does not publish the pending CLI tag.
 
 The separate PostgreSQL-only companion demonstrates a consumer that emits another event from its Inbox transaction:
 

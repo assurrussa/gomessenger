@@ -11,8 +11,8 @@ published-consumer gate are verified; README installation commands now target v0
 
 The next selected release is [v0.4.0](releases/v0.4.0.md). Its source packet combines the reviewed Kafka/NATS/pilot
 work and selects published Outbox root/PostgreSQL/SQLite v0.17.0 for staged adoption. Root and the Inbox/Outbox-adapter/
-observability layer are published; the transport layer is prepared. Transport and CLI publication, final graph checks
-and the clean published-consumer gate remain outstanding. The completed installation surface stays on v0.3.1.
+observability and transport layers are published; the final graph is prepared. CLI publication and the complete
+clean published-consumer/CLI-install gate remain outstanding. The completed installation surface stays on v0.3.1.
 
 Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
 candidates under ADR-0003. The implemented `sportsite` article-publication audit pilot retains its historical acceptance evidence. Current-version
@@ -48,8 +48,9 @@ adoption requires all used modules to resolve at the same published release and 
 The prepared modules layer selects Outbox root/SQLite v0.17.0 for the E2E fixture and Outbox root v0.17.0 for its adapter.
 Prepared NATS/Kafka requirements select published root and Inbox v0.4.0. The E2E fixture retains GoMessenger checkout
 replacements, so its correctness results are separate from clean published-module verification.
-The durable example retains Outbox root v0.16.0 and PostgreSQL backend
-v0.16.1-0.20261009035614-46f29a8e18e1 until final preparation. Root preparation alone did not advance these requirements.
+The prepared durable example now selects published GoMessenger v0.4.0 and matching Outbox root/PostgreSQL v0.17.0
+without replacements. Its earlier v0.16.0/pseudo-version graph remains qualified historical evidence. Root preparation
+alone did not advance these requirements; each published prerequisite was verified before final preparation.
 `make check` uses `GOWORK=off`, but development replacements in
 individual `go.mod` files still apply. Before final release preparation, either source gate can pass without proving
 that an external consumer can resolve the new GoMessenger APIs. The final `release-readiness` and published-consumer
