@@ -376,7 +376,7 @@ func TestSchemaJSONUnicode(t *testing.T) {
 func FuzzSchemaCatalog(f *testing.F) {
 	f.Add([]byte(`{"specVersion":"1.0","policy":"immutable-version-v1","descriptors":[]}`))
 	f.Add([]byte(`{"a":{"a":1,"a":2}}`))
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		// Exercise the bounded parser only; general schema compilation is for trusted repository inputs.
 		var value any
 		_ = decodeSchemaJSON(data, &value)
