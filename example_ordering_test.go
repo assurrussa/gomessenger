@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	orderedExampleID     = "order-42"
-	orderedCreatedStatus = "created"
+	orderedPaidStatus     = "paid"
+	orderedDescriptorName = "orders.changed"
+	orderedExampleID      = "order-42"
+	orderedCreatedStatus  = "created"
 )
 
 type orderedChange struct {
@@ -31,7 +33,7 @@ type orderedProjection struct {
 // cannot prove those database boundaries or serialize concurrent consumers.
 func nextOrderedProjection(current orderedProjection, change orderedChange) (orderedProjection, error) {
 	if change.OrderID == "" || change.AggregateVersion <= 0 ||
-		(change.Status != orderedCreatedStatus && change.Status != "paid") {
+		(change.Status != orderedCreatedStatus && change.Status != orderedPaidStatus) {
 		return current, messenger.Permanent(errors.New("invalid aggregate change"))
 	}
 	if change.AggregateVersion <= current.version {
@@ -43,16 +45,16 @@ func nextOrderedProjection(current orderedProjection, change orderedChange) (ord
 		return current, messenger.DeferAfter(errors.New("waiting for predecessor"), time.Second)
 	}
 	if (current.version == 0 && change.Status == orderedCreatedStatus) ||
-		(current.status == orderedCreatedStatus && change.Status == "paid") {
+		(current.status == orderedCreatedStatus && change.Status == orderedPaidStatus) {
 		return orderedProjection{version: change.AggregateVersion, status: change.Status}, nil
 	}
 	return current, messenger.Permanent(errors.New("invalid order transition"))
 }
 
 func ExampleDeferAfter_aggregateVersion() {
-	changed := messenger.MustEvent("orders.changed", 2, messenger.JSON[orderedChange]())
+	changed := messenger.MustEvent(orderedDescriptorName, 2, messenger.JSON[orderedChange]())
 	created := orderedChange{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus}
-	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"}
+	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: orderedPaidStatus}
 	fmt.Println("schema", changed.Info().SchemaVersion, "aggregate versions", created.AggregateVersion, paid.AggregateVersion)
 
 	// Assume Created failed without committing and moved to a retry topic.
@@ -85,7 +87,7 @@ func ExampleDeferAfter_aggregateVersion() {
 func TestAggregateVersionRetryOrder(t *testing.T) {
 	t.Parallel()
 	created := orderedChange{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus}
-	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"}
+	paid := orderedChange{OrderID: orderedExampleID, AggregateVersion: 2, Status: orderedPaidStatus}
 	current := orderedProjection{}
 
 	// Repeated successor delivery must not advance or otherwise mutate state.
@@ -123,7 +125,7 @@ func TestAggregateVersionRejectsInvalidTransitions(t *testing.T) {
 		{OrderID: "", AggregateVersion: 1, Status: orderedCreatedStatus},
 		{OrderID: orderedExampleID, AggregateVersion: 0, Status: orderedCreatedStatus},
 		{OrderID: orderedExampleID, AggregateVersion: -1, Status: orderedCreatedStatus},
-		{OrderID: orderedExampleID, AggregateVersion: 1, Status: "paid"},
+		{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedPaidStatus},
 		{OrderID: orderedExampleID, AggregateVersion: 2, Status: "unknown"},
 	} {
 		current := orderedProjection{}
@@ -136,14 +138,14 @@ func TestAggregateVersionRejectsInvalidTransitions(t *testing.T) {
 
 func TestAggregateVersionIsNotSchemaVersion(t *testing.T) {
 	t.Parallel()
-	changed := messenger.MustEvent("orders.changed", 2, messenger.JSON[orderedChange]())
-	olderSchema := messenger.MustEvent("orders.changed", 1, messenger.JSON[orderedChange]())
+	changed := messenger.MustEvent(orderedDescriptorName, 2, messenger.JSON[orderedChange]())
+	olderSchema := messenger.MustEvent(orderedDescriptorName, 1, messenger.JSON[orderedChange]())
 	info := changed.Info()
 	ids := [...]messenger.MessageID{{15: 1}, {15: 2}}
 	current := orderedProjection{}
 	for index, change := range []orderedChange{
 		{OrderID: orderedExampleID, AggregateVersion: 1, Status: orderedCreatedStatus},
-		{OrderID: orderedExampleID, AggregateVersion: 2, Status: "paid"},
+		{OrderID: orderedExampleID, AggregateVersion: 2, Status: orderedPaidStatus},
 	} {
 		metadata := messenger.Metadata{
 			ID: ids[index], CorrelationID: ids[index], Kind: info.Kind, Name: info.Name,
@@ -171,7 +173,7 @@ func TestAggregateVersionIsNotSchemaVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if current.version != 2 || current.status != "paid" {
+	if current.version != 2 || current.status != orderedPaidStatus {
 		t.Fatalf("final projection=%+v", current)
 	}
 }
