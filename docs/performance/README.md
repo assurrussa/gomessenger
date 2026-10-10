@@ -54,6 +54,15 @@ The machine-readable snapshots are
 [`v0.2.2-batch16-pool-ab.json`](v0.2.2-batch16-pool-ab.json). Each includes
 every run's core metrics and SHA-256 of its source `report.json`.
 
+## Kafka publication screen
+
+The opt-in [Kafka single/batch publication comparison](kafka-publish-comparison.md)
+measures existing typed-single, envelope-single, and envelope-batch paths with
+matched inputs. It reports broker-commit completion latency and closed-loop
+throughput separately, with read-committed integrity checks. This is distinct
+from the NATS/Outbox capacity evidence below and makes no production-capacity
+or new-API claim.
+
 ## Reproduction contract
 
 Start from a clean checkout and record the exact commit or immutable release
