@@ -9,9 +9,13 @@ The current release is [v0.3.1](releases/v0.3.1.md): managed-service non-returni
 runtime health probes and the compatible Outbox v0.16.0 dependency baseline. All module tags and the complete
 published-consumer gate are verified; README installation commands now target v0.3.1.
 
+The next selected release is [v0.4.0](releases/v0.4.0.md). Its source packet combines the reviewed Kafka/NATS/pilot
+work and selects already-published Outbox root/PostgreSQL/SQLite v0.17.0 for staged adoption. Source preparation does
+not mean root preparation, dependency-layer publication, or the clean published-consumer gate has completed.
+
 Distributed query transports remain outside the public contract. HTTP, gRPC, and core NATS request/reply remain future
-candidates under ADR-0003. The `site` article-publication audit pilot requires all used modules to resolve at the same
-published release version and remains a separate service integration task.
+candidates under ADR-0003. The implemented `sportsite` article-publication audit pilot retains its historical acceptance evidence. Current-version
+adoption requires all used modules to resolve at the same published release and remains a separate service integration step.
 
 ## Pre-release gate
 
@@ -40,15 +44,20 @@ published release version and remains a separate service integration task.
    a new completed result.
 
 `make check-workspace` proves the local GoMessenger workspace graph. The current `go.work` does not override Outbox;
-its Outbox root and PostgreSQL/SQLite prerequisites resolve at v0.16.0. `make check` uses `GOWORK=off`, but development replacements in
+its current Outbox root/SQLite prerequisites are v0.16.0 and the durable example's PostgreSQL backend is
+v0.16.1-0.20261009035614-46f29a8e18e1. Root preparation alone does not advance this graph.
+`make check` uses `GOWORK=off`, but development replacements in
 individual `go.mod` files still apply. Before final release preparation, either source gate can pass without proving
 that an external consumer can resolve the new GoMessenger APIs. The final `release-readiness` and published-consumer
 gates close that boundary.
 
 ## Prepare exact module requirements
 
-The GoMessenger outbox adapter uses the compatible unified Outbox contract. Outbox root and backend `v0.16.0` tags are
-already published; the v0.3.1 nested release layers adopt their worker-exit and transaction-finalization fixes. The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
+The GoMessenger outbox adapter uses the compatible unified Outbox contract. For v0.4.0, select the already-published
+Outbox root, PostgreSQL and SQLite backend `v0.17.0` tags together. The PostgreSQL example already uses the newer
+transaction API through its existing pseudo-version; selecting v0.16.0 for final preparation would downgrade that
+backend below the example's required API. The new v0.17.0 graph still needs its own canonical checks.
+The GoMessenger graph cannot be prepared in one pre-tag commit: a clean `GOWORK=off` build must be
 able to resolve every exact dependency, so the root and each dependency layer must be published before the next layer
 is pinned.
 
@@ -66,19 +75,23 @@ The immutable root v0.3.1 tag was published with the existing Outbox v0.15.0 pre
 Outbox dependency. For a future root release, keep nested modules on their current development graph and run:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=root
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=root
+make release-ready VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=root
+make release-readiness VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=root
 make check-workspace
 ```
 
-The root layer verifies the published Outbox root/backend prerequisites, checks that the facade has no replacement,
-and tidies only the root module. It does not pin nested modules to an unavailable GoMessenger tag.
+The root-layer script verifies the published Outbox root/PostgreSQL/SQLite prerequisites, checks that the facade has
+no replacement, and tidies only the root module. The Makefile's `release-ready` target then formats Go files across the
+checkout, excluding `tmp`; inspect any resulting changes rather than assuming a clean diff. Root `release-readiness`
+checks replacement state only and does not independently resolve prerequisites or prove a build/runtime gate.
+The root's direct dependency remains GoBus v1.2.1; it has no Outbox requirement. Nested modules are not pinned to an
+unavailable GoMessenger tag.
 
 After the reviewed root tag resolves through the Go proxy, prepare the root-dependent modules:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=modules
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=modules
+make release-ready VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=modules
+make release-readiness VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=modules
 make check
 ```
 
@@ -88,8 +101,8 @@ already-published versions, preserving its GoMessenger path replacements and all
 publish those three tags. After the Inbox tag resolves, prepare the transports:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=transports
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0 RELEASE_LAYER=transports
+make release-ready VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=transports
+make release-readiness VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0 RELEASE_LAYER=transports
 make check
 ```
 
@@ -100,8 +113,8 @@ the external consumer and the durable example wait until the final layer. Review
 both transport tags. After all six root/adapter/observability tags resolve, finalize the graph:
 
 ```sh
-make release-ready VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
-make release-readiness VERSION=vX.Y.Z OUTBOX_VERSION=v0.16.0
+make release-ready VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0
+make release-readiness VERSION=v0.4.0 OUTBOX_VERSION=v0.17.0
 make check
 ```
 
@@ -180,7 +193,7 @@ Only after the published clean-consumer probe succeeds:
 4. identify public material as `GoMessenger — typed durable messaging for Go` or `assurrussa/gomessenger` so the name
    remains searchable without implying a universal messenger;
 5. publish release notes and technical launch material only with an explicit separation between source gates,
-   published-module verification, the still-pending real-service pilot, and any later deployment/manual smoke.
+   published-module verification, historical host-pilot evidence, current-version adoption, and any later deployment/manual smoke.
 
 Do not add `exactly-once`, `event-sourcing`, `saga`, or `workflow-engine` topics: those are not current product claims.
 
