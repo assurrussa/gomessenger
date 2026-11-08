@@ -4,8 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-Target: [v0.4.0](docs/releases/v0.4.0.md). Source preparation only; dependency-layer publication and the clean
-published-consumer gate remain outstanding.
+## [0.4.0] - 2026-10-10
+
+See the [release and upgrade notes](docs/releases/v0.4.0.md). All seven module tags are published; the complete
+published-consumer gate, CLI installation, and exact origin/checksum verification passed.
 
 ### Fixed
 
@@ -28,7 +30,7 @@ published-consumer gate remain outstanding.
   and JSON Schema sample validation; this does not establish general backward/forward compatibility or runtime validation.
 
 - opt-in, bounded two-process NATS rolling/restart checks and a separate 900-second direct-NATS/shared-SQLite pilot;
-  retained results and exact source/dependency limits are recorded in the v0.4.0 candidate notes.
+  retained results and exact source/dependency limits are recorded in the v0.4.0 release notes.
 - reproducible comparisons of existing Kafka single and batch publication paths with committed raw measurements;
   these short within-run screens do not establish production capacity or introduce a typed direct-batch API.
 
@@ -36,11 +38,11 @@ published-consumer gate remain outstanding.
 
 - CI and benchmark workflows run only through manual dispatch; CI also offers a static-only validation mode.
 
-### Planned dependency adoption
+### Dependencies
 
-- v0.4.0 selects published Outbox root and PostgreSQL/SQLite backend v0.17.0 together through the existing staged
-  release preparation. This source-only candidate retains the previous module files; the root module has no Outbox
-  dependency. Prior synthetic results use their original v0.16.0 graph, not the planned v0.17.0 graph.
+- the Outbox adapter and durable fixtures adopt published Outbox root and PostgreSQL/SQLite backend v0.17.0 together;
+  the immutable root v0.4.0 has no Outbox dependency. Prior synthetic results use their original v0.16.0 graph, not the
+  v0.17.0 graph.
 
 ## [0.3.1] - 2026-10-03
 

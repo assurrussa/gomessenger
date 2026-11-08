@@ -1,6 +1,6 @@
 # Local JSON Schema baselines
 
-This unreleased CLI feature checks a deliberately narrow contract: published descriptor versions and their schema
+This CLI feature checks a deliberately narrow contract: published descriptor versions and their schema
 documents stay immutable, and any supplied example payloads satisfy their own JSON Schema. It does not establish
 universal backward, forward, or full compatibility between different schemas. It does not inspect Go payload types,
 run their codecs, or install runtime validation.
@@ -29,7 +29,7 @@ candidate during the comparison: replacing both the baseline and trusted pin def
 scope does not discover release tags, enforce repository permissions, or manage intentional retirement of versions.
 
 There is no previously published GoMessenger payload-schema baseline. The checked-in baseline below is an example
-fixture, not a claim about payload schemas published in v0.3.1. An adopting application must review and pin its own
+fixture, not a claim about payload schemas published in v0.3.1 or v0.4.0. An adopting application must review and pin its own
 initial baseline before using this gate for releases.
 
 ## Catalog format

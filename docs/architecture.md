@@ -65,7 +65,7 @@ that could change identity or timestamps.
 
 ## Producer transaction
 
-The current-checkout outbox adapter pins Outbox v0.16.0 for its unified version-aware repository and batch contracts. It uses the
+The current-checkout outbox adapter pins Outbox v0.17.0 for its unified version-aware repository and batch contracts. It uses the
 message ID as the unique key and fingerprints the immutable job definition. The host supplies the transaction through
 its configured outbox repository context; GoMessenger does not begin or commit the business transaction.
 
