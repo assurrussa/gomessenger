@@ -73,7 +73,10 @@ Level 2 should make the schema contract independently verifiable:
 - keep external registry support behind optional adapters after the internal contract is stable.
 
 The first implementation should validate repository-owned schemas without requiring a network service. Integrations with
-external schema registries are a later adapter concern, not a root-module dependency.
+external schema registries are a later adapter concern, not a root-module dependency. The initial offline baseline
+immutability and sample validator (`gomessengerctl schema check`, policy `immutable-version-v1`) landed in `v0.4.0`
+(see [local JSON Schema baselines](schema-baselines.md)); manifest-embedded schema fingerprints and general
+backward/forward compatibility classification remain future work.
 
 Exit criteria:
 

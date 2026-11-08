@@ -128,8 +128,7 @@ make demo-durable-postgres-nats
 
 For a consumer that writes business state and emits another event in the same Inbox transaction, see the
 [atomic PostgreSQL companion](examples/durable-postgres-nats#atomic-inbox--business--outgoing-event), including
-rollback and post-commit/pre-ACK redelivery checks. The prepared example selects published Outbox root/PostgreSQL
-`v0.17.0`; its source checks are separate from complete v0.4.0 published-module verification.
+rollback and post-commit/pre-ACK redelivery checks. The example uses published Outbox root/PostgreSQL `v0.17.0`.
 
 It performs a business write and Outbox stage in one PostgreSQL transaction, relays through JetStream, retries an
 intentional handler failure, suppresses a distinct duplicate delivery in the Inbox, moves a permanent failure to the
@@ -565,7 +564,7 @@ semaphore: `database/sql` is the host-managed backpressure boundary. When severa
 and maintenance queries. A smaller pool becomes the bottleneck before Go dispatch and can exhaust handler deadlines
 before application code runs.
 
-The unreleased development API adds `natsadapter.HandlerConfig.MaxAckPending` for the shared durable's global
+`natsadapter.HandlerConfig.MaxAckPending` configures the shared durable's global
 outstanding-ACK window across all process replicas. Set the same positive value on every replica independently of
 local `Concurrency`. Zero preserves the previous limit: `Concurrency` for single-message consumers, or
 `Concurrency * BatchConfig.MaxMessages` for batch consumers. Negative values, including an unlimited sentinel, are
@@ -738,6 +737,7 @@ conflicts; the tool never deletes and recreates resources automatically. Compati
 outside the manifest's managed subset.
 
 ```sh
+gomessengerctl schema check --manifest manifest.json --file schemas.json --baseline baseline.json --baseline-sha256 HEX
 gomessengerctl manifest validate --file manifest.json
 gomessengerctl topology validate --file topology.json
 gomessengerctl topology plan --file topology.json --server nats://localhost:4222
@@ -753,6 +753,8 @@ gomessengerctl kafka dlq replay --file kafka-record.json
 gomessengerctl kafka dlq replay --file kafka-record.json --confirm --brokers localhost:9092 --instance-id ops-a
 ```
 
+`schema check` verifies offline JSON Schema 2020-12 baseline immutability and sample validity against a trusted
+SHA-256-pinned baseline; see [local JSON Schema baselines](docs/schema-baselines.md).
 `topology plan` exits with code `3` when the printed plan contains a conflict.
 `dlq inspect` prints a safe summary and replayability status without handler error text, wire bytes, or header values.
 `dlq replay` is offline by default and prints a payload-free deterministic JSON plan. `--confirm` republishes the
@@ -797,7 +799,7 @@ Docker entry point against official Apache Kafka 4.1.2 and 4.3.1 images in KRaft
 each version in an independent matrix job. Both NATS and Kafka adapters share complete functional E2E test parity under
 the race detector (Outbox staging, transactional relay, Inbox deduplication, retry tiers, DLQ, and replay). Fixed-rate
 capacity benchmarking (1,500 msg/s floor) is published for the v0.3.0 PostgreSQL + NATS baseline; it is not a fresh
-v0.3.1 capacity result. Run the full source gate before
+v0.3.1 or v0.4.0 capacity result. Run the full source gate before
 publishing the reviewed root tag. Then promote exact module requirements in reviewed dependency layers: root-dependent modules,
 Inbox-dependent transports, and finally the CLI and checkout fixtures. After the root, Inbox, NATS, and Kafka tags
 resolve through the Go proxy, finalize and check the complete graph:

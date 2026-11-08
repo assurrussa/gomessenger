@@ -1,7 +1,7 @@
 # Release capacity verification
 
-This procedure records the v0.3.0 capacity baseline with published Outbox v0.15.0. It does not establish a v0.3.1
-capacity result; a new claim needs fresh evidence for its exact selected dependency graph.
+This procedure records the v0.3.0 capacity baseline with published Outbox v0.15.0. It does not establish a v0.3.1 or
+v0.4.0 capacity result; a new claim needs fresh evidence for its exact selected dependency graph.
 
 To reproduce the v0.3.0 candidate at 1,500 msg/s, run three independent confirmations for each advertised payload profile on
 the exact clean release-candidate checkout. The September 5 `SCREEN_ONLY` result is not a substitute for this series.
@@ -85,5 +85,5 @@ public upload because environment and logs may contain host-specific information
 
 For a claim about maximum throughput or a batch speedup, use the matched frontier/matrix procedure in the
 [performance contract](README.md), with its controls and three confirmations. `capacity-batch-proof` currently accepts
-only `checkout-workspace` evidence with a local Outbox development replacement; it rejects the published Outbox graph, including v0.15.0 and v0.16.0.
+only `checkout-workspace` evidence with a local Outbox development replacement; it rejects the published Outbox graph, including v0.15.0, v0.16.0, and v0.17.0.
 Do not use that validator as a release check for the current published dependency graph.

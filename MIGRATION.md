@@ -61,7 +61,7 @@ consumer; never use local `replace` directives as release evidence.
 5. Deploy the consumer dark, check readiness and telemetry, then enable producer traffic.
 6. Drain and remove the old consumer only after lag and duplicate behavior are understood.
 
-The unreleased `HandlerConfig.MaxAckPending` field separates the shared durable's broker window from each replica's
+The `HandlerConfig.MaxAckPending` field (added in v0.4.0) separates the shared durable's broker window from each replica's
 worker count. Existing keyed literals keep their zero-value behavior; existing unkeyed `HandlerConfig` literals must be
 updated (prefer keyed literals). No wire format, database schema, or dependency changes are required.
 

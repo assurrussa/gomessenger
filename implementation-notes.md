@@ -1,5 +1,15 @@
 # Implementation notes
 
+## 2026-10-10 — Post-v0.4.0 documentation and metadata alignment
+
+- Promote the `v0.4.0` changelog section from `[Unreleased]` to `[0.4.0] - 2026-10-10` and replace pre-release
+  dependency preparation wording with completed release metadata.
+- Update `AGENTS.md`, `README.md`, `MIGRATION.md`, `docs/architecture.md`, `docs/comparison.md`, `docs/e2e.md`,
+  `docs/schema-baselines.md`, `docs/roadmap.md`, `docs/performance/*.md`, and `examples/durable-postgres-nats/README.md`
+  to remove stale pre-v0.4.0 (`unreleased`, `v0.3.1` current-release, and `v0.16.0` current-pin) references and list
+  `gomessengerctl schema check` in the main README CLI overview.
+- Historical release notes, provenance records, Go source files, module graphs, and CI workflows remain unchanged.
+
 ## 2026-10-10 — v0.4.0 published acceptance complete
 
 - PR #48 merged at `f25c2ae26e3468fc6552902f0ca14890f9788a20`, exact tree

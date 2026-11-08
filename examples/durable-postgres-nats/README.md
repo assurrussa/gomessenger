@@ -54,9 +54,8 @@ The standard Docker demo builds with `GOWORK=off`. Its `go.mod` has no
 `replace` directives, so dependencies come from the selected module graph,
 not from the GoMessenger source copied into the image. It currently declares
 GoMessenger root, Inbox, NATS, and Outbox adapter `v0.4.0`, with published Outbox
-root and PostgreSQL backend `v0.17.0`. The prepared example graph is separate
-from complete release acceptance, which still requires CLI publication and the
-clean published-consumer gate. Before final preparation, this example used
+root and PostgreSQL backend `v0.17.0`. Evaluating this example remains separate
+from the clean published-consumer gate (`make test-consumer-release VERSION=v0.4.0`). Before final preparation, this example used
 GoMessenger `v0.3.1`, Outbox root `v0.16.0` and PostgreSQL backend
 `v0.16.1-0.20261009035614-46f29a8e18e1`; earlier results retain that historical graph.
 
@@ -110,9 +109,9 @@ independently inspect the API service binary.
 
 ## Atomic Inbox → business → outgoing event
 
-This prepared companion uses the published Outbox PostgreSQL backend `v0.17.0` in this module's `go.mod`.
+This companion uses the published Outbox PostgreSQL backend `v0.17.0` in this module's `go.mod`.
 `NewSQLTxPutter` is absent from the older Outbox `v0.16.0` API; historical pseudo-version checks remain separate
-from verification of the prepared v0.17.0 graph. Example correctness does not publish the pending CLI tag.
+from verification of the v0.17.0 graph.
 
 The separate PostgreSQL-only companion demonstrates a consumer that emits another event from its Inbox transaction:
 

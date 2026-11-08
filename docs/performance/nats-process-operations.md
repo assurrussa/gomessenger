@@ -1,6 +1,7 @@
 # Bounded NATS process operations screen
 
-Status: source candidate; no execution result is recorded by this document.
+Status: reproduction and acceptance contract; retained v0.4.0 campaign results are recorded in the
+[v0.4.0 release notes](../releases/v0.4.0.md#exact-source-and-retained-evidence).
 
 This opt-in test closes a narrow gap: independently running GoMessenger consumer
 processes sharing one durable, a rolling replacement with the same global ACK
