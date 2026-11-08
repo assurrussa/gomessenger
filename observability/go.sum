@@ -1,5 +1,5 @@
-github.com/assurrussa/gobus v1.2.1 h1:1urjLfegz05kjKVfW3XM+tDgPCU7qoAC+rN/6O6Z8is=
-github.com/assurrussa/gobus v1.2.1/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
+github.com/assurrussa/gobus v1.2.2 h1:Ul2XU+9KgGWTviNFreZ9SYccZJP+r326c4mOTCwXsig=
+github.com/assurrussa/gobus v1.2.2/go.mod h1:dYZjOOBtndAZx230ZHWNEz48nZoPfwfSAsvvlVR3yok=
 github.com/assurrussa/gomessenger v0.4.0 h1:iTiiX5WHRd3JQYD2vn8S79nGDh1Tqy3iw3rqXwZXQxo=
 github.com/assurrussa/gomessenger v0.4.0/go.mod h1:IaoCqFzCqMixe6vRb9yddMxloSlC/Rt6WHBE10c6VF4=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
